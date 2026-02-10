@@ -2,8 +2,8 @@
 require_once 'config.php';
 
 // Check if student is logged in
-if (!isset($_SESSION['is_student']) || !isset($_SESSION['student_id'])) {
-    header('Location: student_login.php');
+if ((!isset($_SESSION['is_student']) && !(isset($_SESSION['user_type']) && $_SESSION['user_type'] === 'student')) || !isset($_SESSION['student_id'])) {
+    header('Location: login.php?type=student');
     exit;
 }
 

@@ -212,4 +212,104 @@ function showAlert($message, $type = 'info') {
                 <span class='block sm:inline'>{$message}</span>
             </div>";
 }
+
+// Theme & Branding Functions
+function getThemeColorSchemes() {
+    return [
+        'blue' => [
+            'name' => 'Ocean Blue',
+            'primary' => '#2563EB',
+            'primary_hover' => '#1D4ED8',
+            'primary_light' => '#DBEAFE',
+            'sidebar_bg' => '#1E3A5F',
+            'sidebar_text' => '#CBD5E1',
+            'sidebar_active' => '#2563EB',
+            'accent' => '#3B82F6',
+            'gradient_from' => '#1E3A5F',
+            'gradient_to' => '#2563EB',
+        ],
+        'emerald' => [
+            'name' => 'Emerald Green',
+            'primary' => '#059669',
+            'primary_hover' => '#047857',
+            'primary_light' => '#D1FAE5',
+            'sidebar_bg' => '#1B3B36',
+            'sidebar_text' => '#A7F3D0',
+            'sidebar_active' => '#059669',
+            'accent' => '#10B981',
+            'gradient_from' => '#1B3B36',
+            'gradient_to' => '#059669',
+        ],
+        'crimson' => [
+            'name' => 'Crimson Red',
+            'primary' => '#DC2626',
+            'primary_hover' => '#B91C1C',
+            'primary_light' => '#FEE2E2',
+            'sidebar_bg' => '#450A0A',
+            'sidebar_text' => '#FECACA',
+            'sidebar_active' => '#DC2626',
+            'accent' => '#EF4444',
+            'gradient_from' => '#450A0A',
+            'gradient_to' => '#DC2626',
+        ],
+        'purple' => [
+            'name' => 'Royal Purple',
+            'primary' => '#7C3AED',
+            'primary_hover' => '#6D28D9',
+            'primary_light' => '#EDE9FE',
+            'sidebar_bg' => '#2E1065',
+            'sidebar_text' => '#C4B5FD',
+            'sidebar_active' => '#7C3AED',
+            'accent' => '#8B5CF6',
+            'gradient_from' => '#2E1065',
+            'gradient_to' => '#7C3AED',
+        ],
+        'slate' => [
+            'name' => 'Modern Slate',
+            'primary' => '#475569',
+            'primary_hover' => '#334155',
+            'primary_light' => '#F1F5F9',
+            'sidebar_bg' => '#0F172A',
+            'sidebar_text' => '#94A3B8',
+            'sidebar_active' => '#475569',
+            'accent' => '#64748B',
+            'gradient_from' => '#0F172A',
+            'gradient_to' => '#475569',
+        ],
+        'amber' => [
+            'name' => 'Golden Amber',
+            'primary' => '#D97706',
+            'primary_hover' => '#B45309',
+            'primary_light' => '#FEF3C7',
+            'sidebar_bg' => '#451A03',
+            'sidebar_text' => '#FDE68A',
+            'sidebar_active' => '#D97706',
+            'accent' => '#F59E0B',
+            'gradient_from' => '#451A03',
+            'gradient_to' => '#D97706',
+        ],
+    ];
+}
+
+function getActiveTheme() {
+    $scheme_key = getSetting('theme_color_scheme', 'blue');
+    $schemes = getThemeColorSchemes();
+    return $schemes[$scheme_key] ?? $schemes['blue'];
+}
+
+function getActiveThemeKey() {
+    return getSetting('theme_color_scheme', 'blue');
+}
+
+function getLogoPath() {
+    $logo = getSetting('site_logo', '');
+    if ($logo && file_exists('uploads/logo/' . $logo)) {
+        return 'uploads/logo/' . $logo;
+    }
+    return '';
+}
+
+function getSiteName() {
+    return getSetting('site_name', APP_NAME);
+}
 ?>

@@ -42,7 +42,7 @@ $belt_history = $belt_history->fetchAll();
 
 // Get memberships
 $memberships = $pdo->prepare("
-    SELECT m.*, mp.name as plan_name, mp.price
+    SELECT m.*, mp.name as plan_name, mp.price, mp.classes_per_week
     FROM memberships m
     JOIN membership_plans mp ON m.plan_id = mp.id
     WHERE m.student_id = ?
@@ -82,14 +82,93 @@ $payments = $pdo->prepare("
 $payments->execute([$student_id]);
 $payments = $payments->fetchAll();
 
+// === COMPLIANCE CHECK ===
+$compliance_warnings = [];
+
+// 1. Check for active membership
+$active_mem = $pdo->prepare("
+    SELECT m.id, mp.name as plan_name, mp.classes_per_week, m.end_date
+    FROM memberships m
+    JOIN membership_plans mp ON m.plan_id = mp.id
+    WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()
+    ORDER BY mp.classes_per_week DESC
+    LIMIT 1
+");
+$active_mem->execute([$student_id]);
+$active_membership = $active_mem->fetch();
+
+$active_enrollment_count = count($enrolled_classes);
+
+if (!$active_membership && $active_enrollment_count > 0) {
+    $compliance_warnings[] = [
+        'type' => 'error',
+        'icon' => '&#9888;',
+        'title' => 'No Active Membership',
+        'message' => 'This student is enrolled in ' . $active_enrollment_count . ' class(es) but does not have an active membership.'
+    ];
+} elseif (!$active_membership && $active_enrollment_count === 0) {
+    $compliance_warnings[] = [
+        'type' => 'warning',
+        'icon' => '&#9888;',
+        'title' => 'No Active Membership',
+        'message' => 'This student does not have an active membership. They cannot be enrolled in classes.'
+    ];
+}
+
+// 2. Check class enrollment limit
+if ($active_membership) {
+    $allowed = (int)$active_membership['classes_per_week'];
+    if ($allowed < 99 && $active_enrollment_count > $allowed) {
+        $compliance_warnings[] = [
+            'type' => 'error',
+            'icon' => '&#128680;',
+            'title' => 'Over Enrollment Limit',
+            'message' => 'This student is enrolled in ' . $active_enrollment_count . ' class(es) but their plan ('
+                . htmlspecialchars($active_membership['plan_name']) . ') only allows ' . $allowed . ' classes per week.'
+        ];
+    }
+
+    // 3. Check membership expiring soon
+    $days_until_expiry = (strtotime($active_membership['end_date']) - time()) / 86400;
+    if ($days_until_expiry <= 7 && $days_until_expiry > 0) {
+        $compliance_warnings[] = [
+            'type' => 'warning',
+            'icon' => '&#9200;',
+            'title' => 'Membership Expiring Soon',
+            'message' => 'Membership expires in ' . ceil($days_until_expiry) . ' day(s) on ' . date('M j, Y', strtotime($active_membership['end_date'])) . '.'
+        ];
+    }
+}
+
 include 'includes/header.php';
 ?>
 
 <div class="container mx-auto px-4 py-8">
     <div class="mb-6">
-        <a href="students.php" class="text-blue-600 hover:text-blue-800">← Back to Students</a>
+        <a href="students.php" class="text-blue-600 hover:text-blue-800">&larr; Back to Students</a>
     </div>
-    
+
+    <!-- Compliance Warnings -->
+    <?php if (!empty($compliance_warnings)): ?>
+        <div class="mb-6 space-y-3">
+            <?php foreach ($compliance_warnings as $warn): ?>
+                <?php
+                    $bgColor = $warn['type'] === 'error' ? 'bg-red-50 border-red-500 text-red-800' : 'bg-yellow-50 border-yellow-500 text-yellow-800';
+                    $iconBg = $warn['type'] === 'error' ? 'bg-red-100' : 'bg-yellow-100';
+                ?>
+                <div class="border-l-4 rounded-r-lg p-4 <?php echo $bgColor; ?>">
+                    <div class="flex items-start space-x-3">
+                        <span class="text-xl flex-shrink-0"><?php echo $warn['icon']; ?></span>
+                        <div>
+                            <h4 class="font-semibold"><?php echo $warn['title']; ?></h4>
+                            <p class="text-sm mt-1"><?php echo $warn['message']; ?></p>
+                        </div>
+                    </div>
+                </div>
+            <?php endforeach; ?>
+        </div>
+    <?php endif; ?>
+
     <!-- Student Header -->
     <div class="bg-white rounded-lg shadow p-6 mb-6">
         <div class="flex items-center justify-between">
@@ -103,24 +182,36 @@ include 'includes/header.php';
                     </h1>
                     <p class="text-gray-600 mt-1">
                         <?php if ($current_belt): ?>
-                            Current Belt: <span class="font-semibold"><?php echo $current_belt['belt_name']; ?></span> 
+                            Current Belt: <span class="font-semibold"><?php echo $current_belt['belt_name']; ?></span>
                             (<?php echo $current_belt['style_name']; ?>)
                         <?php else: ?>
                             No belt awarded yet
                         <?php endif; ?>
                     </p>
-                    <div class="mt-2">
-                        <span class="px-3 py-1 text-sm font-semibold rounded-full <?php 
+                    <div class="mt-2 flex items-center space-x-2">
+                        <span class="px-3 py-1 text-sm font-semibold rounded-full <?php
                             $colors = ['active' => 'bg-green-100 text-green-800', 'inactive' => 'bg-gray-100 text-gray-800', 'suspended' => 'bg-red-100 text-red-800'];
-                            echo $colors[$student['status']]; 
+                            echo $colors[$student['status']];
                         ?>">
                             <?php echo ucfirst($student['status']); ?>
                         </span>
+                        <?php if ($active_membership): ?>
+                            <span class="px-3 py-1 text-sm font-semibold rounded-full bg-blue-100 text-blue-800">
+                                <?php echo htmlspecialchars($active_membership['plan_name']); ?>
+                                <?php if ((int)$active_membership['classes_per_week'] < 99): ?>
+                                    (<?php echo $active_enrollment_count; ?>/<?php echo $active_membership['classes_per_week']; ?> classes)
+                                <?php else: ?>
+                                    (Unlimited)
+                                <?php endif; ?>
+                            </span>
+                        <?php else: ?>
+                            <span class="px-3 py-1 text-sm font-semibold rounded-full bg-red-100 text-red-800">No Membership</span>
+                        <?php endif; ?>
                     </div>
                 </div>
             </div>
         </div>
-        
+
         <!-- Student Info -->
         <div class="mt-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             <div>
@@ -146,7 +237,7 @@ include 'includes/header.php';
             </div>
         </div>
     </div>
-    
+
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <!-- Belt History -->
         <div class="bg-white rounded-lg shadow">
@@ -173,11 +264,14 @@ include 'includes/header.php';
                 <?php endif; ?>
             </div>
         </div>
-        
+
         <!-- Enrolled Classes -->
         <div class="bg-white rounded-lg shadow">
-            <div class="px-6 py-4 border-b">
+            <div class="px-6 py-4 border-b flex justify-between items-center">
                 <h2 class="text-xl font-semibold">Enrolled Classes</h2>
+                <?php if ($active_membership && (int)$active_membership['classes_per_week'] < 99): ?>
+                    <span class="text-sm text-gray-500"><?php echo $active_enrollment_count; ?> / <?php echo $active_membership['classes_per_week']; ?> allowed</span>
+                <?php endif; ?>
             </div>
             <div class="p-6">
                 <?php if (empty($enrolled_classes)): ?>
@@ -189,8 +283,8 @@ include 'includes/header.php';
                                 <p class="font-semibold"><?php echo $class['class_name']; ?></p>
                                 <p class="text-sm text-gray-600"><?php echo $class['style_name']; ?></p>
                                 <p class="text-sm text-gray-600">
-                                    <?php echo $class['day_of_week']; ?> • 
-                                    <?php echo date('g:i A', strtotime($class['start_time'])); ?> - 
+                                    <?php echo $class['day_of_week']; ?> &bull;
+                                    <?php echo date('g:i A', strtotime($class['start_time'])); ?> -
                                     <?php echo date('g:i A', strtotime($class['end_time'])); ?>
                                 </p>
                             </div>
@@ -199,7 +293,7 @@ include 'includes/header.php';
                 <?php endif; ?>
             </div>
         </div>
-        
+
         <!-- Memberships -->
         <div class="bg-white rounded-lg shadow">
             <div class="px-6 py-4 border-b">
@@ -216,13 +310,17 @@ include 'includes/header.php';
                                     <div>
                                         <p class="font-semibold"><?php echo $membership['plan_name']; ?></p>
                                         <p class="text-sm text-gray-600">
-                                            <?php echo formatDate($membership['start_date']); ?> - 
+                                            <?php echo formatDate($membership['start_date']); ?> -
                                             <?php echo formatDate($membership['end_date']); ?>
                                         </p>
+                                        <p class="text-xs text-gray-500">
+                                            <?php echo (int)$membership['classes_per_week'] >= 99 ? 'Unlimited classes' : $membership['classes_per_week'] . ' classes/week'; ?>
+                                            &bull; Auto-renew: <?php echo (isset($membership['auto_renew']) && $membership['auto_renew']) ? 'ON' : 'OFF'; ?>
+                                        </p>
                                     </div>
-                                    <span class="px-2 py-1 text-xs font-semibold rounded-full <?php 
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full <?php
                                         $colors = ['active' => 'bg-green-100 text-green-800', 'expired' => 'bg-red-100 text-red-800', 'cancelled' => 'bg-gray-100 text-gray-800'];
-                                        echo $colors[$membership['status']]; 
+                                        echo $colors[$membership['status']];
                                     ?>">
                                         <?php echo ucfirst($membership['status']); ?>
                                     </span>
@@ -233,7 +331,7 @@ include 'includes/header.php';
                 <?php endif; ?>
             </div>
         </div>
-        
+
         <!-- Event Registrations -->
         <div class="bg-white rounded-lg shadow">
             <div class="px-6 py-4 border-b">
@@ -259,7 +357,7 @@ include 'includes/header.php';
             </div>
         </div>
     </div>
-    
+
     <!-- Payment History -->
     <div class="bg-white rounded-lg shadow mt-6">
         <div class="px-6 py-4 border-b">

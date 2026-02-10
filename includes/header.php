@@ -17,6 +17,8 @@ $siteName = getSiteName();
         }
         .sidebar-custom {
             background: linear-gradient(180deg, <?php echo $theme['gradient_from']; ?> 0%, <?php echo $theme['sidebar_bg']; ?> 100%);
+            display: flex;
+            flex-direction: column;
         }
         .sidebar-custom a {
             color: <?php echo $theme['sidebar_text']; ?>;
@@ -37,13 +39,32 @@ $siteName = getSiteName();
         .user-avatar {
             background-color: <?php echo $theme['primary']; ?>;
         }
+        /* Sidebar scrolling */
+        .sidebar-nav-scroll {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+        .sidebar-nav-scroll::-webkit-scrollbar {
+            width: 6px;
+        }
+        .sidebar-nav-scroll::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .sidebar-nav-scroll::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.15);
+            border-radius: 3px;
+        }
+        .sidebar-nav-scroll::-webkit-scrollbar-thumb:hover {
+            background: rgba(255,255,255,0.3);
+        }
     </style>
 </head>
 <body class="bg-gray-50">
     <div class="flex h-screen overflow-hidden">
         <!-- Sidebar -->
         <aside class="w-64 shadow-lg hidden md:block sidebar-custom">
-            <div class="p-6 border-b border-white/10">
+            <div class="p-6 border-b border-white/10 flex-shrink-0">
                 <?php if ($logoPath): ?>
                     <div class="flex items-center gap-3">
                         <img src="<?php echo htmlspecialchars($logoPath); ?>" alt="Logo" class="max-h-10 max-w-[140px] object-contain">
@@ -55,6 +76,7 @@ $siteName = getSiteName();
                 <?php endif; ?>
             </div>
 
+            <div class="sidebar-nav-scroll">
             <nav class="p-4">
                 <a href="index.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'index.php' ? 'active-nav' : ''; ?>">
                     <span class="mr-3">📊</span>
@@ -129,6 +151,11 @@ $siteName = getSiteName();
                     <span class="mr-3">🔐</span>
                     <span>Role Permissions</span>
                 </a>
+
+                <a href="admin_dashboard.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'admin_dashboard.php' ? 'active-nav' : ''; ?>">
+                    <span class="mr-3">🎨</span>
+                    <span>Studio Branding</span>
+                </a>
                 <?php endif; ?>
 
                 <?php
@@ -158,7 +185,7 @@ $siteName = getSiteName();
                 </a>
                 <?php endif; ?>
 
-                <a href="login.php?type=student" class="flex items-center px-4 py-3 mb-2 rounded-lg hover:!bg-blue-500/20" target="_blank" style="color: #93C5FD;">
+                <a href="student_portal.php" class="flex items-center px-4 py-3 mb-2 rounded-lg hover:!bg-blue-500/20" target="_blank" style="color: #93C5FD;">
                     <span class="mr-3">🎓</span>
                     <span>Student Portal</span>
                 </a>
@@ -168,6 +195,7 @@ $siteName = getSiteName();
                     <span>Logout</span>
                 </a>
             </nav>
+            </div><!-- /.sidebar-nav-scroll -->
         </aside>
 
         <!-- Main Content -->

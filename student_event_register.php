@@ -171,4 +171,4 @@ include 'includes/student_header.php';
     </div>
 </div>
 
-<?php include 'includes/footer.php'; ?>
+<?php include 'includes/student_footer.php'; ?>

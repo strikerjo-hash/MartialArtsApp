@@ -2,6 +2,25 @@
 $theme = getActiveTheme();
 $logoPath = getLogoPath();
 $siteName = getSiteName();
+
+// Build a hover color by darkening the primary — safe fallback if primary_hover isn't set
+$primaryHover = $theme['primary_hover'] ?? '';
+if (!$primaryHover) {
+    // Darken primary by ~15%
+    $hex = ltrim($theme['primary'], '#');
+    if (strlen($hex) === 6) {
+        $r = max(0, hexdec(substr($hex, 0, 2)) - 30);
+        $g = max(0, hexdec(substr($hex, 2, 2)) - 30);
+        $b = max(0, hexdec(substr($hex, 4, 2)) - 30);
+        $primaryHover = sprintf('#%02x%02x%02x', $r, $g, $b);
+    } else {
+        $primaryHover = $theme['primary'];
+    }
+}
+
+// Student display name — works with both session formats
+$studentDisplayName = $_SESSION['student_name']
+    ?? (isset($_SESSION['first_name']) ? $_SESSION['first_name'] . ' ' . ($_SESSION['last_name'] ?? '') : 'Student');
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -19,7 +38,7 @@ $siteName = getSiteName();
             color: <?php echo $theme['primary']; ?>;
         }
         .nav-link:hover {
-            color: <?php echo $theme['primary_hover']; ?>;
+            color: <?php echo $primaryHover; ?>;
         }
         .nav-link-active {
             font-weight: 700;
@@ -44,7 +63,7 @@ $siteName = getSiteName();
                 <?php endif; ?>
                 <div>
                     <h1 class="text-xl font-bold text-gray-800"><?php echo htmlspecialchars($siteName); ?></h1>
-                    <p class="text-sm text-gray-600">Welcome, <?php echo $_SESSION['student_name'] ?? 'Student'; ?></p>
+                    <p class="text-sm text-gray-600">Welcome, <?php echo htmlspecialchars($studentDisplayName); ?></p>
                 </div>
             </div>
 
@@ -61,7 +80,7 @@ $siteName = getSiteName();
                 </a>
             </nav>
 
-            <a href="student_logout.php" class="text-white px-4 py-2 rounded-lg text-sm transition-colors" style="background-color: <?php echo $theme['primary']; ?>;" onmouseover="this.style.backgroundColor='<?php echo $theme['primary_hover']; ?>'" onmouseout="this.style.backgroundColor='<?php echo $theme['primary']; ?>'">
+            <a href="student_logout.php" class="text-white px-4 py-2 rounded-lg text-sm transition-colors" style="background-color: <?php echo $theme['primary']; ?>;" onmouseover="this.style.backgroundColor='<?php echo $primaryHover; ?>'" onmouseout="this.style.backgroundColor='<?php echo $theme['primary']; ?>'">
                 Logout
             </a>
         </div>

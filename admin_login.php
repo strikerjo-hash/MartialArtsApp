@@ -9,7 +9,7 @@ require_once __DIR__ . '/includes/theme.php';
 auth_start_session();
 
 if (current_user_type() === 'admin') {
-    header('Location: admin_dashboard.php');
+    header('Location: index.php');
     exit;
 }
 
@@ -26,7 +26,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($admin) {
             login_admin($admin);
-            header('Location: admin_dashboard.php');
+            header('Location: index.php');
             exit;
         } else {
             $error = 'Invalid username or password.';

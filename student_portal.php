@@ -3,157 +3,236 @@
  * student_portal.php — Student Dashboard
  *
  * The main landing page after a student logs in.  Shows upcoming
- * classes, attendance history, announcements, and profile info.
+ * classes, attendance history, and profile info.
+ *
+ * Uses the primary schema (database.sql):
+ *   - class_enrollments (not enrollments)
+ *   - classes.name (not class_name), classes.status (not is_active)
  */
 
-require_once __DIR__ . '/includes/auth.php';
-require_once __DIR__ . '/includes/theme.php';
-require_once __DIR__ . '/includes/db.php';
+require_once 'config.php';
 
-require_student();
+// Require student login
+if ((!isset($_SESSION['is_student']) && !(isset($_SESSION['user_type']) && $_SESSION['user_type'] === 'student')) || !isset($_SESSION['student_id'])) {
+    header('Location: login.php');
+    exit;
+}
 
-$theme    = get_theme();
-$pdo      = get_db();
-$studentId = $_SESSION['user_id'];
+$studentId = $_SESSION['student_id'];
 
 // Fetch student profile
 $stmt = $pdo->prepare('SELECT * FROM students WHERE id = :id LIMIT 1');
 $stmt->execute([':id' => $studentId]);
 $student = $stmt->fetch();
 
+if (!$student) {
+    header('Location: logout.php');
+    exit;
+}
+
 // Fetch enrolled classes
-$classesStmt = $pdo->prepare(
-    'SELECT c.* FROM classes c
-     JOIN enrollments e ON e.class_id = c.id
-     WHERE e.student_id = :sid AND c.is_active = 1
-     ORDER BY FIELD(c.day_of_week, "Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"), c.start_time'
-);
-$classesStmt->execute([':sid' => $studentId]);
-$classes = $classesStmt->fetchAll();
+$classes = [];
+try {
+    $classesStmt = $pdo->prepare(
+        "SELECT c.* FROM classes c
+         JOIN class_enrollments ce ON ce.class_id = c.id
+         WHERE ce.student_id = :sid AND ce.status = 'active' AND c.status = 'active'
+         ORDER BY FIELD(c.day_of_week, 'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'), c.start_time"
+    );
+    $classesStmt->execute([':sid' => $studentId]);
+    $classes = $classesStmt->fetchAll();
+} catch (\PDOException $e) {}
 
 // Fetch recent attendance (last 30 records)
-$attendStmt = $pdo->prepare(
-    'SELECT a.attendance_date, a.status, c.class_name
-     FROM attendance a
-     JOIN classes c ON c.id = a.class_id
-     WHERE a.student_id = :sid
-     ORDER BY a.attendance_date DESC
-     LIMIT 30'
-);
-$attendStmt->execute([':sid' => $studentId]);
-$attendance = $attendStmt->fetchAll();
-
-// Fetch announcements (latest 5)
-$annStmt = $pdo->query(
-    'SELECT a.title, a.body, a.created_at, ad.full_name AS author
-     FROM announcements a
-     LEFT JOIN admins ad ON ad.id = a.posted_by
-     ORDER BY a.created_at DESC
-     LIMIT 5'
-);
-$announcements = $annStmt->fetchAll();
+$attendance = [];
+try {
+    $attendStmt = $pdo->prepare(
+        'SELECT a.attendance_date, a.status, c.name as class_name
+         FROM attendance a
+         JOIN classes c ON c.id = a.class_id
+         WHERE a.student_id = :sid
+         ORDER BY a.attendance_date DESC
+         LIMIT 30'
+    );
+    $attendStmt->execute([':sid' => $studentId]);
+    $attendance = $attendStmt->fetchAll();
+} catch (\PDOException $e) {}
 
 // Attendance stats
-$statsStmt = $pdo->prepare(
-    'SELECT status, COUNT(*) AS cnt FROM attendance WHERE student_id = :sid GROUP BY status'
-);
-$statsStmt->execute([':sid' => $studentId]);
-$statsRows = $statsStmt->fetchAll();
 $stats = ['present' => 0, 'absent' => 0, 'late' => 0];
-foreach ($statsRows as $r) {
-    $stats[$r['status']] = (int)$r['cnt'];
-}
+try {
+    $statsStmt = $pdo->prepare(
+        'SELECT status, COUNT(*) AS cnt FROM attendance WHERE student_id = :sid GROUP BY status'
+    );
+    $statsStmt->execute([':sid' => $studentId]);
+    foreach ($statsStmt->fetchAll() as $r) {
+        $stats[$r['status']] = (int)$r['cnt'];
+    }
+} catch (\PDOException $e) {}
 $totalClasses = array_sum($stats);
 $attendanceRate = $totalClasses > 0 ? round(($stats['present'] / $totalClasses) * 100) : 0;
+
+// Upcoming events the student is registered for
+$upcomingEvents = [];
+try {
+    $evStmt = $pdo->prepare(
+        "SELECT e.name, e.event_date, e.start_time, e.location, er.payment_status
+         FROM events e
+         JOIN event_registrations er ON er.event_id = e.id
+         WHERE er.student_id = :sid AND e.event_date >= CURDATE()
+         ORDER BY e.event_date ASC LIMIT 5"
+    );
+    $evStmt->execute([':sid' => $studentId]);
+    $upcomingEvents = $evStmt->fetchAll();
+} catch (\PDOException $e) {}
+
+// Current membership info
+$membership = null;
+try {
+    $memStmt = $pdo->prepare(
+        "SELECT m.*, mp.name as plan_name
+         FROM memberships m
+         JOIN membership_plans mp ON mp.id = m.plan_id
+         WHERE m.student_id = :sid AND m.status = 'active' AND m.end_date >= CURDATE()
+         ORDER BY m.end_date DESC LIMIT 1"
+    );
+    $memStmt->execute([':sid' => $studentId]);
+    $membership = $memStmt->fetch();
+} catch (\PDOException $e) {}
+
+// Belt history
+$beltHistory = [];
+try {
+    $beltStmt = $pdo->prepare(
+        "SELECT b.name as belt_name, b.color, mas.name as style_name, sb.awarded_date
+         FROM student_belts sb
+         JOIN belts b ON b.id = sb.belt_id
+         JOIN martial_arts_styles mas ON mas.id = sb.style_id
+         WHERE sb.student_id = :sid
+         ORDER BY sb.awarded_date DESC LIMIT 5"
+    );
+    $beltStmt->execute([':sid' => $studentId]);
+    $beltHistory = $beltStmt->fetchAll();
+} catch (\PDOException $e) {}
+
+include 'includes/student_header.php';
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Student Portal — <?= htmlspecialchars($theme['studio_name']) ?></title>
-    <?php if (!empty($theme['favicon_url'])): ?>
-        <link rel="icon" href="<?= htmlspecialchars($theme['favicon_url']) ?>">
-    <?php endif; ?>
-    <style><?= theme_css_vars() ?></style>
-    <link rel="stylesheet" href="assets/css/style.css">
-</head>
-<body class="portal-page">
 
-    <!-- Top navigation -->
-    <nav class="top-nav">
-        <div class="nav-brand">
-            <?php if (!empty($theme['logo_url'])): ?>
-                <img src="<?= htmlspecialchars($theme['logo_url']) ?>" alt="" class="nav-logo">
-            <?php endif; ?>
-            <span><?= htmlspecialchars($theme['studio_name']) ?></span>
-        </div>
-        <div class="nav-user">
-            <span class="nav-greeting">Welcome, <?= htmlspecialchars($student['first_name']) ?></span>
-            <a href="logout.php" class="btn btn-sm btn-outline">Sign Out</a>
-        </div>
-    </nav>
+<div class="container mx-auto px-4 py-8">
 
-    <main class="portal-main">
+    <!-- Profile & Membership Row -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
         <!-- Profile Summary -->
-        <section class="card profile-card">
-            <h2>My Profile</h2>
-            <div class="profile-details">
-                <div class="profile-field">
-                    <strong>Name:</strong>
-                    <?= htmlspecialchars($student['first_name'] . ' ' . $student['last_name']) ?>
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-lg font-semibold text-gray-800 mb-4">My Profile</h2>
+            <div class="space-y-3">
+                <div>
+                    <span class="text-sm text-gray-500">Name</span>
+                    <p class="font-medium text-gray-800"><?= htmlspecialchars($student['first_name'] . ' ' . $student['last_name']) ?></p>
                 </div>
-                <div class="profile-field">
-                    <strong>Belt Rank:</strong>
-                    <span class="belt-badge"><?= htmlspecialchars($student['belt_rank']) ?></span>
+                <div>
+                    <span class="text-sm text-gray-500">Email</span>
+                    <p class="font-medium text-gray-800"><?= htmlspecialchars($student['email'] ?? '—') ?></p>
                 </div>
-                <div class="profile-field">
-                    <strong>Member Since:</strong>
-                    <?= htmlspecialchars(date('F j, Y', strtotime($student['join_date']))) ?>
+                <div>
+                    <span class="text-sm text-gray-500">Member Since</span>
+                    <p class="font-medium text-gray-800"><?= formatDate($student['join_date']) ?></p>
                 </div>
-                <div class="profile-field">
-                    <strong>Email:</strong>
-                    <?= htmlspecialchars($student['email'] ?? '—') ?>
+                <div>
+                    <span class="text-sm text-gray-500">Status</span>
+                    <span class="inline-block px-2 py-1 text-xs font-semibold rounded-full <?= $student['status'] === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800' ?>">
+                        <?= ucfirst($student['status']) ?>
+                    </span>
                 </div>
             </div>
-        </section>
+        </div>
 
-        <!-- Stats Row -->
-        <section class="stats-row">
-            <div class="card stat-card">
-                <div class="stat-number"><?= $totalClasses ?></div>
-                <div class="stat-label">Total Classes</div>
+        <!-- Membership Info -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg font-semibold text-gray-800">Membership</h2>
+                <a href="student_upgrade.php" class="text-sm text-blue-600 hover:underline">Upgrade</a>
             </div>
-            <div class="card stat-card">
-                <div class="stat-number"><?= $attendanceRate ?>%</div>
-                <div class="stat-label">Attendance Rate</div>
-            </div>
-            <div class="card stat-card">
-                <div class="stat-number"><?= count($classes) ?></div>
-                <div class="stat-label">Enrolled Classes</div>
-            </div>
-        </section>
-
-        <!-- My Classes -->
-        <section class="card">
-            <h2>My Schedule</h2>
-            <?php if (empty($classes)): ?>
-                <p class="empty-state">You are not enrolled in any classes yet.</p>
+            <?php if ($membership): ?>
+                <div class="space-y-3">
+                    <div>
+                        <span class="text-sm text-gray-500">Plan</span>
+                        <p class="font-medium text-gray-800"><?= htmlspecialchars($membership['plan_name']) ?></p>
+                    </div>
+                    <div>
+                        <span class="text-sm text-gray-500">Valid Until</span>
+                        <p class="font-medium text-gray-800"><?= formatDate($membership['end_date']) ?></p>
+                    </div>
+                    <div>
+                        <span class="text-sm text-gray-500">Status</span>
+                        <span class="inline-block px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800">Active</span>
+                    </div>
+                </div>
             <?php else: ?>
-                <table class="data-table">
-                    <thead>
+                <div class="text-center py-4">
+                    <p class="text-gray-500 text-sm mb-3">No active membership found.</p>
+                    <a href="student_upgrade.php" class="inline-block bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg">
+                        View Plans
+                    </a>
+                </div>
+            <?php endif; ?>
+        </div>
+
+        <!-- Stats -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-lg font-semibold text-gray-800 mb-4">My Stats</h2>
+            <div class="grid grid-cols-3 gap-4 text-center">
+                <div>
+                    <p class="text-2xl font-bold text-gray-800"><?= $totalClasses ?></p>
+                    <p class="text-xs text-gray-500">Total Classes</p>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-green-600"><?= $attendanceRate ?>%</p>
+                    <p class="text-xs text-gray-500">Attendance</p>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-blue-600"><?= count($classes) ?></p>
+                    <p class="text-xs text-gray-500">Enrolled</p>
+                </div>
+            </div>
+            <?php if (!empty($beltHistory)): ?>
+                <div class="mt-4 pt-4 border-t border-gray-200">
+                    <span class="text-sm text-gray-500">Current Belt</span>
+                    <p class="font-medium text-gray-800">
+                        <?= htmlspecialchars($beltHistory[0]['belt_name']) ?>
+                        <span class="text-xs text-gray-500">(<?= htmlspecialchars($beltHistory[0]['style_name']) ?>)</span>
+                    </p>
+                </div>
+            <?php endif; ?>
+        </div>
+    </div>
+
+    <!-- My Schedule -->
+    <div class="bg-white rounded-lg shadow mb-8">
+        <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+            <h2 class="text-lg font-semibold text-gray-800">My Schedule</h2>
+            <span class="text-sm text-gray-500"><?= count($classes) ?> class<?= count($classes) !== 1 ? 'es' : '' ?></span>
+        </div>
+        <?php if (empty($classes)): ?>
+            <div class="p-8 text-center">
+                <p class="text-gray-500">You are not enrolled in any classes yet.</p>
+            </div>
+        <?php else: ?>
+            <div class="overflow-x-auto">
+                <table class="min-w-full">
+                    <thead class="bg-gray-50">
                         <tr>
-                            <th>Class</th>
-                            <th>Day</th>
-                            <th>Time</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Class</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Day</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
                         </tr>
                     </thead>
-                    <tbody>
+                    <tbody class="divide-y divide-gray-200">
                         <?php foreach ($classes as $c): ?>
-                            <tr>
-                                <td><?= htmlspecialchars($c['class_name']) ?></td>
-                                <td><?= htmlspecialchars($c['day_of_week']) ?></td>
-                                <td>
+                            <tr class="hover:bg-gray-50">
+                                <td class="px-6 py-4 font-medium text-gray-800"><?= htmlspecialchars($c['name']) ?></td>
+                                <td class="px-6 py-4 text-gray-600"><?= htmlspecialchars($c['day_of_week']) ?></td>
+                                <td class="px-6 py-4 text-gray-600">
                                     <?= date('g:i A', strtotime($c['start_time'])) ?>
                                     &ndash;
                                     <?= date('g:i A', strtotime($c['end_time'])) ?>
@@ -162,64 +241,80 @@ $attendanceRate = $totalClasses > 0 ? round(($stats['present'] / $totalClasses) 
                         <?php endforeach; ?>
                     </tbody>
                 </table>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- Upcoming Events -->
+        <div class="bg-white rounded-lg shadow">
+            <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                <h2 class="text-lg font-semibold text-gray-800">Upcoming Events</h2>
+                <a href="student_events.php" class="text-sm text-blue-600 hover:underline">Browse All</a>
+            </div>
+            <?php if (empty($upcomingEvents)): ?>
+                <div class="p-8 text-center">
+                    <p class="text-gray-500">No upcoming events.</p>
+                    <a href="student_events.php" class="text-sm text-blue-600 hover:underline mt-2 inline-block">Browse events</a>
+                </div>
+            <?php else: ?>
+                <div class="divide-y divide-gray-200">
+                    <?php foreach ($upcomingEvents as $ev): ?>
+                        <div class="px-6 py-4 hover:bg-gray-50">
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <p class="font-medium text-gray-800"><?= htmlspecialchars($ev['name']) ?></p>
+                                    <p class="text-sm text-gray-500">
+                                        <?= formatDate($ev['event_date']) ?>
+                                        <?php if (!empty($ev['location'])): ?>
+                                            &bull; <?= htmlspecialchars($ev['location']) ?>
+                                        <?php endif; ?>
+                                    </p>
+                                </div>
+                                <span class="px-2 py-1 text-xs font-semibold rounded-full <?= $ev['payment_status'] === 'paid' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800' ?>">
+                                    <?= ucfirst($ev['payment_status']) ?>
+                                </span>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
             <?php endif; ?>
-        </section>
+        </div>
 
         <!-- Recent Attendance -->
-        <section class="card">
-            <h2>Recent Attendance</h2>
+        <div class="bg-white rounded-lg shadow">
+            <div class="px-6 py-4 border-b border-gray-200">
+                <h2 class="text-lg font-semibold text-gray-800">Recent Attendance</h2>
+            </div>
             <?php if (empty($attendance)): ?>
-                <p class="empty-state">No attendance records yet.</p>
+                <div class="p-8 text-center">
+                    <p class="text-gray-500">No attendance records yet.</p>
+                </div>
             <?php else: ?>
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Date</th>
-                            <th>Class</th>
-                            <th>Status</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($attendance as $a): ?>
-                            <tr>
-                                <td><?= htmlspecialchars(date('M j, Y', strtotime($a['attendance_date']))) ?></td>
-                                <td><?= htmlspecialchars($a['class_name']) ?></td>
-                                <td>
-                                    <span class="status-badge status-<?= $a['status'] ?>">
-                                        <?= ucfirst($a['status']) ?>
-                                    </span>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
+                <div class="divide-y divide-gray-200">
+                    <?php foreach (array_slice($attendance, 0, 10) as $a): ?>
+                        <div class="px-6 py-3 flex items-center justify-between hover:bg-gray-50">
+                            <div>
+                                <p class="text-sm font-medium text-gray-800"><?= htmlspecialchars($a['class_name']) ?></p>
+                                <p class="text-xs text-gray-500"><?= formatDate($a['attendance_date']) ?></p>
+                            </div>
+                            <?php
+                            $statusColors = [
+                                'present' => 'bg-green-100 text-green-800',
+                                'absent'  => 'bg-red-100 text-red-800',
+                                'late'    => 'bg-yellow-100 text-yellow-800',
+                            ];
+                            $cls = $statusColors[$a['status']] ?? 'bg-gray-100 text-gray-800';
+                            ?>
+                            <span class="px-2 py-1 text-xs font-semibold rounded-full <?= $cls ?>">
+                                <?= ucfirst($a['status']) ?>
+                            </span>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
             <?php endif; ?>
-        </section>
+        </div>
+    </div>
+</div>
 
-        <!-- Announcements -->
-        <section class="card">
-            <h2>Announcements</h2>
-            <?php if (empty($announcements)): ?>
-                <p class="empty-state">No announcements at this time.</p>
-            <?php else: ?>
-                <?php foreach ($announcements as $ann): ?>
-                    <div class="announcement">
-                        <h3><?= htmlspecialchars($ann['title']) ?></h3>
-                        <p class="announcement-meta">
-                            <?= htmlspecialchars(date('M j, Y', strtotime($ann['created_at']))) ?>
-                            <?php if ($ann['author']): ?>
-                                &mdash; <?= htmlspecialchars($ann['author']) ?>
-                            <?php endif; ?>
-                        </p>
-                        <p><?= nl2br(htmlspecialchars($ann['body'])) ?></p>
-                    </div>
-                <?php endforeach; ?>
-            <?php endif; ?>
-        </section>
-    </main>
-
-    <footer class="portal-footer">
-        <p>&copy; <?= date('Y') ?> <?= htmlspecialchars($theme['studio_name']) ?>. All rights reserved.</p>
-    </footer>
-</body>
-</html>
+<?php include 'includes/student_footer.php'; ?>

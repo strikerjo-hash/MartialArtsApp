@@ -3,7 +3,7 @@ require_once 'config.php';
 
 // Check if student is logged in
 if ((!isset($_SESSION['is_student']) && !(isset($_SESSION['user_type']) && $_SESSION['user_type'] === 'student')) || !isset($_SESSION['student_id'])) {
-    header('Location: login.php?type=student');
+    header('Location: login.php');
     exit;
 }
 
@@ -247,4 +247,4 @@ include 'includes/student_header.php';
     <?php endif; ?>
 </div>
 
-<?php include 'includes/footer.php'; ?>
+<?php include 'includes/student_footer.php'; ?>

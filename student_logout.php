@@ -6,6 +6,6 @@ unset($_SESSION['is_student']);
 unset($_SESSION['user_type']);
 unset($_SESSION['role']);
 session_destroy();
-header('Location: login.php?type=student');
+header('Location: login.php');
 exit;
 ?>

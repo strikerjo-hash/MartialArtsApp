@@ -1,23 +1,19 @@
 <?php
 /**
- * admin_dashboard.php — Admin / Owner Dashboard
+ * admin_dashboard.php — Studio Branding & Theme Management
  *
- * Includes a "Studio Branding" section that lets the studio owner
- * customise colours, name, tagline, logo, and custom CSS — the theme
- * values are stored in the studio_config table and immediately applied
- * across the whole application.
+ * Lets the studio owner customise colours, name, tagline, logo, and
+ * custom CSS. Theme values are stored in the studio_config table and
+ * immediately applied across the whole application.
  */
 
-require_once __DIR__ . '/includes/auth.php';
+require_once 'config.php';
+requireLogin();
+
 require_once __DIR__ . '/includes/theme.php';
-require_once __DIR__ . '/includes/db.php';
 
-require_admin();
-
-$pdo   = get_db();
-$theme = get_theme();
-
-$success = '';
+$theme_data = get_theme();
+$message = '';
 
 // ---------- Handle branding form submission ----------
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_branding'])) {
@@ -40,159 +36,153 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_branding'])) {
         }
     }
 
-    // Reload theme after saving.
-    $theme   = get_theme();
-    $success = 'Branding settings saved successfully.';
+    $theme_data = get_theme();
+    $message = showAlert('Branding settings saved successfully!', 'success');
 }
 
-// ---------- Dashboard stats ----------
-$studentCount = (int)$pdo->query('SELECT COUNT(*) FROM students WHERE is_active = 1')->fetchColumn();
-$classCount   = (int)$pdo->query('SELECT COUNT(*) FROM classes WHERE is_active = 1')->fetchColumn();
-$todayAttend  = (int)$pdo->query("SELECT COUNT(*) FROM attendance WHERE attendance_date = CURDATE()")->fetchColumn();
+include 'includes/header.php';
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Dashboard — <?= htmlspecialchars($theme['studio_name']) ?></title>
-    <?php if (!empty($theme['favicon_url'])): ?>
-        <link rel="icon" href="<?= htmlspecialchars($theme['favicon_url']) ?>">
-    <?php endif; ?>
-    <style><?= theme_css_vars() ?></style>
-    <link rel="stylesheet" href="assets/css/style.css">
-</head>
-<body class="portal-page">
 
-    <nav class="top-nav">
-        <div class="nav-brand">
-            <?php if (!empty($theme['logo_url'])): ?>
-                <img src="<?= htmlspecialchars($theme['logo_url']) ?>" alt="" class="nav-logo">
-            <?php endif; ?>
-            <span><?= htmlspecialchars($theme['studio_name']) ?> — Admin</span>
-        </div>
-        <div class="nav-user">
-            <span class="nav-greeting"><?= htmlspecialchars($_SESSION['full_name']) ?></span>
-            <a href="logout.php" class="btn btn-sm btn-outline">Sign Out</a>
-        </div>
-    </nav>
+<div class="container mx-auto px-4 py-8">
+    <?php echo $message; ?>
 
-    <main class="portal-main">
+    <div class="mb-6">
+        <h1 class="text-3xl font-bold text-gray-800">Studio Branding & Theme</h1>
+        <p class="text-gray-600 mt-1">Customise the look and feel of your application. Changes apply immediately to all pages including the student login and portal.</p>
+    </div>
 
-        <?php if ($success): ?>
-            <div class="alert alert-success"><?= htmlspecialchars($success) ?></div>
-        <?php endif; ?>
+    <form method="POST" action="admin_dashboard.php" class="space-y-6">
+        <input type="hidden" name="save_branding" value="1">
 
-        <!-- Quick Stats -->
-        <section class="stats-row">
-            <div class="card stat-card">
-                <div class="stat-number"><?= $studentCount ?></div>
-                <div class="stat-label">Active Students</div>
-            </div>
-            <div class="card stat-card">
-                <div class="stat-number"><?= $classCount ?></div>
-                <div class="stat-label">Active Classes</div>
-            </div>
-            <div class="card stat-card">
-                <div class="stat-number"><?= $todayAttend ?></div>
-                <div class="stat-label">Today's Attendance</div>
-            </div>
-        </section>
-
-        <!-- Studio Branding -->
-        <section class="card">
-            <h2>Studio Branding &amp; Theme</h2>
-            <p class="section-description">
-                Customise the look and feel of your application. Changes apply
-                immediately to all pages including the student login and portal.
-            </p>
-
-            <form method="POST" action="admin_dashboard.php" class="branding-form">
-                <input type="hidden" name="save_branding" value="1">
-
-                <div class="form-row">
-                    <div class="form-group">
-                        <label for="studio_name">Studio Name</label>
-                        <input type="text" id="studio_name" name="studio_name"
-                               value="<?= htmlspecialchars($theme['studio_name']) ?>">
-                    </div>
-                    <div class="form-group">
-                        <label for="studio_tagline">Tagline</label>
-                        <input type="text" id="studio_tagline" name="studio_tagline"
-                               value="<?= htmlspecialchars($theme['studio_tagline']) ?>">
-                    </div>
+        <!-- Studio Identity -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Studio Identity</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label for="studio_name" class="block text-sm font-medium text-gray-700 mb-1">Studio Name</label>
+                    <input type="text" id="studio_name" name="studio_name"
+                           value="<?php echo htmlspecialchars($theme_data['studio_name']); ?>"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
                 </div>
-
-                <div class="form-row">
-                    <div class="form-group">
-                        <label for="logo_url">Logo URL</label>
-                        <input type="text" id="logo_url" name="logo_url"
-                               value="<?= htmlspecialchars($theme['logo_url']) ?>"
-                               placeholder="assets/images/logo.png">
-                    </div>
-                    <div class="form-group">
-                        <label for="favicon_url">Favicon URL</label>
-                        <input type="text" id="favicon_url" name="favicon_url"
-                               value="<?= htmlspecialchars($theme['favicon_url']) ?>"
-                               placeholder="assets/images/favicon.ico">
-                    </div>
+                <div>
+                    <label for="studio_tagline" class="block text-sm font-medium text-gray-700 mb-1">Tagline</label>
+                    <input type="text" id="studio_tagline" name="studio_tagline"
+                           value="<?php echo htmlspecialchars($theme_data['studio_tagline']); ?>"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
                 </div>
+            </div>
+        </div>
 
-                <h3>Colour Palette</h3>
-                <div class="color-grid">
-                    <div class="form-group">
-                        <label for="primary_color">Primary</label>
+        <!-- Logo & Favicon -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Logo & Favicon</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label for="logo_url" class="block text-sm font-medium text-gray-700 mb-1">Logo URL</label>
+                    <input type="text" id="logo_url" name="logo_url"
+                           value="<?php echo htmlspecialchars($theme_data['logo_url']); ?>"
+                           placeholder="assets/images/logo.png"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                    <?php if (!empty($theme_data['logo_url'])): ?>
+                        <div class="mt-2 p-2 bg-gray-50 rounded inline-block">
+                            <img src="<?php echo htmlspecialchars($theme_data['logo_url']); ?>" alt="Current logo" class="max-h-12">
+                        </div>
+                    <?php endif; ?>
+                </div>
+                <div>
+                    <label for="favicon_url" class="block text-sm font-medium text-gray-700 mb-1">Favicon URL</label>
+                    <input type="text" id="favicon_url" name="favicon_url"
+                           value="<?php echo htmlspecialchars($theme_data['favicon_url']); ?>"
+                           placeholder="assets/images/favicon.ico"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                </div>
+            </div>
+        </div>
+
+        <!-- Colour Palette -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Colour Palette</h2>
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+                <div>
+                    <label for="primary_color" class="block text-sm font-medium text-gray-700 mb-1">Primary</label>
+                    <div class="flex items-center gap-2">
                         <input type="color" id="primary_color" name="primary_color"
-                               value="<?= htmlspecialchars($theme['primary_color']) ?>">
+                               value="<?php echo htmlspecialchars($theme_data['primary_color']); ?>"
+                               class="w-10 h-10 rounded cursor-pointer">
+                        <span class="text-xs text-gray-500"><?php echo htmlspecialchars($theme_data['primary_color']); ?></span>
                     </div>
-                    <div class="form-group">
-                        <label for="secondary_color">Secondary</label>
+                </div>
+                <div>
+                    <label for="secondary_color" class="block text-sm font-medium text-gray-700 mb-1">Secondary</label>
+                    <div class="flex items-center gap-2">
                         <input type="color" id="secondary_color" name="secondary_color"
-                               value="<?= htmlspecialchars($theme['secondary_color']) ?>">
+                               value="<?php echo htmlspecialchars($theme_data['secondary_color']); ?>"
+                               class="w-10 h-10 rounded cursor-pointer">
+                        <span class="text-xs text-gray-500"><?php echo htmlspecialchars($theme_data['secondary_color']); ?></span>
                     </div>
-                    <div class="form-group">
-                        <label for="accent_color">Accent</label>
+                </div>
+                <div>
+                    <label for="accent_color" class="block text-sm font-medium text-gray-700 mb-1">Accent</label>
+                    <div class="flex items-center gap-2">
                         <input type="color" id="accent_color" name="accent_color"
-                               value="<?= htmlspecialchars($theme['accent_color']) ?>">
+                               value="<?php echo htmlspecialchars($theme_data['accent_color']); ?>"
+                               class="w-10 h-10 rounded cursor-pointer">
+                        <span class="text-xs text-gray-500"><?php echo htmlspecialchars($theme_data['accent_color']); ?></span>
                     </div>
-                    <div class="form-group">
-                        <label for="background_color">Background</label>
+                </div>
+                <div>
+                    <label for="background_color" class="block text-sm font-medium text-gray-700 mb-1">Background</label>
+                    <div class="flex items-center gap-2">
                         <input type="color" id="background_color" name="background_color"
-                               value="<?= htmlspecialchars($theme['background_color']) ?>">
+                               value="<?php echo htmlspecialchars($theme_data['background_color']); ?>"
+                               class="w-10 h-10 rounded cursor-pointer">
+                        <span class="text-xs text-gray-500"><?php echo htmlspecialchars($theme_data['background_color']); ?></span>
                     </div>
-                    <div class="form-group">
-                        <label for="text_color">Text</label>
+                </div>
+                <div>
+                    <label for="text_color" class="block text-sm font-medium text-gray-700 mb-1">Text</label>
+                    <div class="flex items-center gap-2">
                         <input type="color" id="text_color" name="text_color"
-                               value="<?= htmlspecialchars($theme['text_color']) ?>">
+                               value="<?php echo htmlspecialchars($theme_data['text_color']); ?>"
+                               class="w-10 h-10 rounded cursor-pointer">
+                        <span class="text-xs text-gray-500"><?php echo htmlspecialchars($theme_data['text_color']); ?></span>
                     </div>
                 </div>
+            </div>
+        </div>
 
-                <div class="form-group">
-                    <label for="font_family">Font Family (CSS)</label>
+        <!-- Typography & Extras -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Typography & Extras</h2>
+            <div class="space-y-4">
+                <div>
+                    <label for="font_family" class="block text-sm font-medium text-gray-700 mb-1">Font Family (CSS)</label>
                     <input type="text" id="font_family" name="font_family"
-                           value="<?= htmlspecialchars($theme['font_family']) ?>">
+                           value="<?php echo htmlspecialchars($theme_data['font_family']); ?>"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
                 </div>
-
-                <div class="form-group">
-                    <label for="login_background_image">Login Background Image URL</label>
+                <div>
+                    <label for="login_background_image" class="block text-sm font-medium text-gray-700 mb-1">Login Background Image URL</label>
                     <input type="text" id="login_background_image" name="login_background_image"
-                           value="<?= htmlspecialchars($theme['login_background_image']) ?>"
-                           placeholder="Optional — URL or path to a background image">
+                           value="<?php echo htmlspecialchars($theme_data['login_background_image']); ?>"
+                           placeholder="Optional — URL or path to a background image"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
                 </div>
-
-                <div class="form-group">
-                    <label for="custom_css">Custom CSS</label>
+                <div>
+                    <label for="custom_css" class="block text-sm font-medium text-gray-700 mb-1">Custom CSS</label>
                     <textarea id="custom_css" name="custom_css" rows="6"
-                              placeholder="Add any extra CSS rules here..."><?= htmlspecialchars($theme['custom_css']) ?></textarea>
+                              placeholder="Add any extra CSS rules here..."
+                              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 font-mono text-sm"><?php echo htmlspecialchars($theme_data['custom_css']); ?></textarea>
                 </div>
+            </div>
+        </div>
 
-                <button type="submit" class="btn btn-primary">Save Branding</button>
-            </form>
-        </section>
-    </main>
+        <div class="flex justify-end">
+            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-lg font-medium">
+                Save Branding
+            </button>
+        </div>
+    </form>
+</div>
 
-    <footer class="portal-footer">
-        <p>&copy; <?= date('Y') ?> <?= htmlspecialchars($theme['studio_name']) ?>. All rights reserved.</p>
-    </footer>
-</body>
-</html>
+<?php include 'includes/footer.php'; ?>

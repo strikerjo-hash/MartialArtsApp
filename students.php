@@ -6,6 +6,7 @@ $message = '';
 
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    verify_csrf();
     if (isset($_POST['action'])) {
         switch ($_POST['action']) {
             case 'add':
@@ -192,9 +193,12 @@ include 'includes/header.php';
                             </span>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                            <a href="student_detail.php?id=<?php echo $student['id']; ?>" 
+                            <a href="student_detail.php?id=<?php echo $student['id']; ?>"
                                class="text-blue-600 hover:text-blue-900 mr-3">View</a>
+                            <a href="student_edit.php?id=<?php echo $student['id']; ?>"
+                               class="text-green-600 hover:text-green-900 mr-3">Edit</a>
                             <form method="POST" class="inline" onsubmit="return confirmDelete('Are you sure you want to delete this student?')">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="action" value="delete">
                                 <input type="hidden" name="student_id" value="<?php echo $student['id']; ?>">
                                 <button type="submit" class="text-red-600 hover:text-red-900">Delete</button>
@@ -228,6 +232,7 @@ include 'includes/header.php';
         </div>
         
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="add">
             
             <div class="grid grid-cols-2 gap-4">

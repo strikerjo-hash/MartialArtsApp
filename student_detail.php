@@ -210,6 +210,10 @@ include 'includes/header.php';
                     </div>
                 </div>
             </div>
+            <a href="student_edit.php?id=<?php echo $student_id; ?>"
+               class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium flex-shrink-0">
+                Edit Student
+            </a>
         </div>
 
         <!-- Student Info -->

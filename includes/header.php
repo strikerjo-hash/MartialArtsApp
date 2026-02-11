@@ -84,7 +84,7 @@ $siteName = getSiteName();
                 </a>
 
                 <?php if (canView('students.php')): ?>
-                <a href="students.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'students.php' || basename($_SERVER['PHP_SELF']) == 'student_detail.php' ? 'active-nav' : ''; ?>">
+                <a href="students.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'students.php' || basename($_SERVER['PHP_SELF']) == 'student_detail.php' || basename($_SERVER['PHP_SELF']) == 'student_edit.php' ? 'active-nav' : ''; ?>">
                     <span class="mr-3">👥</span>
                     <span>Students</span>
                 </a>

@@ -457,6 +457,109 @@ img {
 }
 
 /* ======================================================
+   Registration Page
+   ====================================================== */
+.register-container {
+    max-width: 520px;
+}
+
+.password-hint {
+    font-size: .8rem;
+    opacity: .5;
+    margin-bottom: 1.25rem;
+    font-style: italic;
+}
+
+/* ======================================================
+   Card Header Row (title + action button side by side)
+   ====================================================== */
+.card-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+}
+
+.card-header-row h2 {
+    margin-bottom: 0;
+}
+
+/* ======================================================
+   Payment Methods
+   ====================================================== */
+.payment-list {
+    display: flex;
+    flex-direction: column;
+    gap: .75rem;
+}
+
+.payment-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .75rem 1rem;
+    border-radius: 8px;
+    background: rgba(0,0,0,.15);
+}
+
+.payment-info {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    flex-wrap: wrap;
+}
+
+.payment-label {
+    font-weight: 600;
+}
+
+.payment-last4 {
+    opacity: .65;
+    font-family: monospace;
+    letter-spacing: .1em;
+}
+
+.payment-actions {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+}
+
+/* ======================================================
+   Form Select
+   ====================================================== */
+.form-select {
+    width: 100%;
+    padding: .65rem .85rem;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 6px;
+    background: rgba(0,0,0,.25);
+    color: var(--text-color);
+    font-size: .95rem;
+    font-family: inherit;
+    transition: border-color .2s;
+    appearance: none;
+}
+
+.form-select:focus {
+    outline: none;
+    border-color: var(--primary-color);
+}
+
+/* ======================================================
+   Danger Button
+   ====================================================== */
+.btn-danger {
+    background: rgba(244, 67, 54, .2);
+    color: #ef9a9a;
+    border: 1px solid rgba(244, 67, 54, .4);
+}
+
+.btn-danger:hover {
+    background: rgba(244, 67, 54, .35);
+}
+
+/* ======================================================
    Responsive
    ====================================================== */
 @media (max-width: 600px) {
@@ -473,5 +576,11 @@ img {
     }
     .nav-user {
         justify-content: center;
+        flex-wrap: wrap;
+    }
+    .payment-item {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: .5rem;
     }
 }

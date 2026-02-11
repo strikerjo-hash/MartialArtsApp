@@ -17,6 +17,8 @@ $message = '';
 
 // ---------- Handle branding form submission ----------
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_branding'])) {
+    verify_csrf();
+
     $editable_keys = [
         'studio_name', 'studio_tagline', 'logo_url',
         'primary_color', 'secondary_color', 'accent_color',
@@ -52,6 +54,7 @@ include 'includes/header.php';
     </div>
 
     <form method="POST" action="admin_dashboard.php" class="space-y-6">
+        <?= csrf_field() ?>
         <input type="hidden" name="save_branding" value="1">
 
         <!-- Studio Identity -->

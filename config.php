@@ -16,6 +16,16 @@ define('DB_CHARSET', 'utf8mb4');
 // Session configuration
 define('SESSION_LIFETIME', 3600); // 1 hour
 
+// Security — rate limiting
+define('MAX_LOGIN_ATTEMPTS', 5);        // per 15-minute window
+define('LOGIN_LOCKOUT_SECONDS', 900);   // 15 minutes
+
+// Security — encryption key for payment data (64-char hex = 256-bit key).
+// IMPORTANT: Generate your own key with: php -r "echo bin2hex(random_bytes(32));"
+// and keep it SECRET.  If you lose this key, stored payment tokens become
+// unrecoverable.
+define('ENCRYPTION_KEY', 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2');
+
 // Application paths
 define('BASE_URL', '/MartialArtsApp');
 define('APP_ROOT', __DIR__);

@@ -3,11 +3,7 @@
  * student_portal.php — Student Dashboard
  *
  * The main landing page after a student logs in.  Shows upcoming
- * classes, attendance history, and profile info.
- *
- * Uses the primary schema (database.sql):
- *   - class_enrollments (not enrollments)
- *   - classes.name (not class_name), classes.status (not is_active)
+ * classes, attendance history, events, membership, and profile info.
  */
 
 require_once 'config.php';
@@ -124,7 +120,10 @@ include 'includes/student_header.php';
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
         <!-- Profile Summary -->
         <div class="bg-white rounded-lg shadow p-6">
-            <h2 class="text-lg font-semibold text-gray-800 mb-4">My Profile</h2>
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg font-semibold text-gray-800">My Profile</h2>
+                <a href="student_profile.php" class="text-sm text-blue-600 hover:underline">Edit Profile</a>
+            </div>
             <div class="space-y-3">
                 <div>
                     <span class="text-sm text-gray-500">Name</span>
@@ -140,8 +139,8 @@ include 'includes/student_header.php';
                 </div>
                 <div>
                     <span class="text-sm text-gray-500">Status</span>
-                    <span class="inline-block px-2 py-1 text-xs font-semibold rounded-full <?= $student['status'] === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800' ?>">
-                        <?= ucfirst($student['status']) ?>
+                    <span class="inline-block px-2 py-1 text-xs font-semibold rounded-full <?= ($student['status'] ?? 'active') === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800' ?>">
+                        <?= ucfirst($student['status'] ?? 'active') ?>
                     </span>
                 </div>
             </div>
@@ -313,6 +312,29 @@ include 'includes/student_header.php';
                     <?php endforeach; ?>
                 </div>
             <?php endif; ?>
+        </div>
+    </div>
+
+    <!-- Quick Links -->
+    <div class="mt-8 bg-white rounded-lg shadow p-6">
+        <h2 class="text-lg font-semibold text-gray-800 mb-4">Quick Links</h2>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <a href="student_profile.php" class="flex flex-col items-center p-4 bg-blue-50 rounded-lg hover:bg-blue-100 transition">
+                <span class="text-2xl mb-2">&#9998;</span>
+                <span class="text-sm font-medium text-gray-700">Edit Profile</span>
+            </a>
+            <a href="student_payment.php" class="flex flex-col items-center p-4 bg-green-50 rounded-lg hover:bg-green-100 transition">
+                <span class="text-2xl mb-2">&#128179;</span>
+                <span class="text-sm font-medium text-gray-700">Payment Methods</span>
+            </a>
+            <a href="student_events.php" class="flex flex-col items-center p-4 bg-purple-50 rounded-lg hover:bg-purple-100 transition">
+                <span class="text-2xl mb-2">&#127942;</span>
+                <span class="text-sm font-medium text-gray-700">Browse Events</span>
+            </a>
+            <a href="student_upgrade.php" class="flex flex-col items-center p-4 bg-yellow-50 rounded-lg hover:bg-yellow-100 transition">
+                <span class="text-2xl mb-2">&#11088;</span>
+                <span class="text-sm font-medium text-gray-700">Upgrade Plan</span>
+            </a>
         </div>
     </div>
 </div>

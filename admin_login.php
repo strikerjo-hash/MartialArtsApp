@@ -16,20 +16,29 @@ if (current_user_type() === 'admin') {
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    verify_csrf();
+
     $username = trim($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
 
     if ($username === '' || $password === '') {
         $error = 'Please enter both username and password.';
     } else {
-        $admin = authenticate_admin($username, $password);
+        $ip   = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+        $wait = check_rate_limit($username, $ip);
 
-        if ($admin) {
-            login_admin($admin);
-            header('Location: index.php');
-            exit;
+        if ($wait > 0) {
+            $error = "Too many failed attempts. Please wait {$wait} seconds before trying again.";
         } else {
-            $error = 'Invalid username or password.';
+            $admin = authenticate_admin($username, $password, $ip);
+
+            if ($admin) {
+                login_admin($admin);
+                header('Location: index.php');
+                exit;
+            } else {
+                $error = 'Invalid username or password.';
+            }
         }
     }
 }
@@ -65,6 +74,7 @@ $theme = get_theme();
             <?php endif; ?>
 
             <form method="POST" action="admin_login.php" class="login-form">
+                <?= csrf_field() ?>
                 <div class="form-group">
                     <label for="username">Username</label>
                     <input type="text" id="username" name="username"

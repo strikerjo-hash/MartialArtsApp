@@ -100,6 +100,30 @@ CREATE TABLE IF NOT EXISTS announcements (
     FOREIGN KEY (posted_by) REFERENCES admins(id) ON DELETE SET NULL
 );
 
+-- Login attempt rate-limiting
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL,
+    ip_address VARCHAR(45) NOT NULL,
+    attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_attempts_user (username, attempted_at),
+    INDEX idx_attempts_ip (ip_address, attempted_at)
+);
+
+-- Payment methods (encrypted; card numbers are NEVER stored in plain text)
+-- In production, prefer Stripe/Braintree tokens over storing card data yourself.
+CREATE TABLE IF NOT EXISTS payment_methods (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    student_id INT NOT NULL,
+    label VARCHAR(100) NOT NULL,           -- e.g. "Visa ending 4242"
+    card_brand VARCHAR(20) DEFAULT NULL,   -- visa, mastercard, amex, etc.
+    last_four CHAR(4) NOT NULL,
+    encrypted_token TEXT NOT NULL,          -- AES-256-GCM encrypted processor token / reference
+    is_default TINYINT(1) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+);
+
 -- Insert a default admin (password: admin123 — change immediately)
 INSERT INTO admins (username, password_hash, full_name, email, role) VALUES
     ('admin', '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'Studio Owner', 'admin@studio.com', 'owner');

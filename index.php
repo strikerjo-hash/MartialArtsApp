@@ -35,7 +35,7 @@ $recentStudents = $pdo->query("
 $upcomingEvents = [];
 try {
     $upcomingEvents = $pdo->query("
-        SELECT name, event_date, location
+        SELECT id, name, event_type, event_date, location, start_time, status
         FROM events WHERE event_date >= CURDATE()
         ORDER BY event_date ASC LIMIT 5
     ")->fetchAll();
@@ -168,20 +168,47 @@ include 'includes/header.php';
         <div class="bg-white rounded-lg shadow p-6">
             <div class="flex items-center justify-between mb-4">
                 <h2 class="text-lg font-semibold text-gray-800">Upcoming Events</h2>
-                <a href="events.php" class="text-sm text-blue-600 hover:underline">View All</a>
+                <div class="flex items-center gap-3">
+                    <a href="calendar.php" class="text-sm text-purple-600 hover:underline">Calendar</a>
+                    <a href="events.php" class="text-sm text-blue-600 hover:underline">View All</a>
+                </div>
             </div>
             <?php if (empty($upcomingEvents)): ?>
                 <p class="text-gray-500 text-sm">No upcoming events.</p>
             <?php else: ?>
                 <div class="space-y-3">
+                    <?php
+                    $eventTypeColors = [
+                        'belt_test' => 'bg-yellow-100 text-yellow-700',
+                        'tournament' => 'bg-red-100 text-red-700',
+                        'seminar' => 'bg-blue-100 text-blue-700',
+                        'workshop' => 'bg-green-100 text-green-700',
+                        'demonstration' => 'bg-purple-100 text-purple-700',
+                        'other' => 'bg-gray-100 text-gray-700'
+                    ];
+                    ?>
                     <?php foreach ($upcomingEvents as $e): ?>
-                    <div class="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
-                        <div>
-                            <p class="font-medium text-gray-800"><?php echo htmlspecialchars($e['name']); ?></p>
-                            <p class="text-xs text-gray-500"><?php echo htmlspecialchars($e['location'] ?? ''); ?></p>
+                    <a href="event_detail.php?id=<?php echo $e['id']; ?>"
+                       class="flex items-center justify-between py-3 px-3 -mx-3 border-b border-gray-100 last:border-0 rounded-lg hover:bg-blue-50 transition group">
+                        <div class="flex items-center gap-3">
+                            <span class="px-2 py-1 text-xs font-semibold rounded <?php echo $eventTypeColors[$e['event_type']] ?? 'bg-gray-100 text-gray-700'; ?>">
+                                <?php echo ucfirst(str_replace('_', ' ', $e['event_type'])); ?>
+                            </span>
+                            <div>
+                                <p class="font-medium text-gray-800 group-hover:text-blue-700"><?php echo htmlspecialchars($e['name']); ?></p>
+                                <p class="text-xs text-gray-500">
+                                    <?php echo htmlspecialchars($e['location'] ?? ''); ?>
+                                    <?php if (!empty($e['start_time'])): ?>
+                                        <?php echo $e['location'] ? ' &middot; ' : ''; ?><?php echo date('g:i A', strtotime($e['start_time'])); ?>
+                                    <?php endif; ?>
+                                </p>
+                            </div>
                         </div>
-                        <span class="text-xs text-gray-600"><?php echo $e['event_date']; ?></span>
-                    </div>
+                        <div class="text-right flex-shrink-0">
+                            <span class="text-sm font-medium text-gray-700"><?php echo formatDate($e['event_date']); ?></span>
+                            <span class="block text-xs text-blue-500 opacity-0 group-hover:opacity-100 transition">View Details &rarr;</span>
+                        </div>
+                    </a>
                     <?php endforeach; ?>
                 </div>
             <?php endif; ?>
@@ -204,9 +231,9 @@ include 'includes/header.php';
                 <span class="text-2xl mb-2">🎯</span>
                 <span class="text-sm font-medium text-gray-700">Create Event</span>
             </a>
-            <a href="admin_dashboard.php" class="flex flex-col items-center p-4 bg-yellow-50 rounded-lg hover:bg-yellow-100 transition">
-                <span class="text-2xl mb-2">🎨</span>
-                <span class="text-sm font-medium text-gray-700">Studio Branding</span>
+            <a href="calendar.php" class="flex flex-col items-center p-4 bg-yellow-50 rounded-lg hover:bg-yellow-100 transition">
+                <span class="text-2xl mb-2">📅</span>
+                <span class="text-sm font-medium text-gray-700">Calendar</span>
             </a>
         </div>
     </div>

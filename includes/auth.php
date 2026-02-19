@@ -13,6 +13,50 @@
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/security.php';
 
+// ─── Idempotent migrations for payment lockout ──────────────────────
+try {
+    $pdo = get_db();
+    // Add 'declined' to memberships.payment_status ENUM
+    $pdo->exec("ALTER TABLE memberships MODIFY COLUMN payment_status ENUM('paid','pending','partial','declined') DEFAULT 'pending'");
+} catch (\PDOException $e) {}
+try {
+    $pdo = get_db();
+    $cols = $pdo->query("SHOW COLUMNS FROM students")->fetchAll();
+    $colNames = array_column($cols, 'Field');
+    if (!in_array('payment_lockout_override', $colNames, true)) {
+        $pdo->exec("ALTER TABLE students ADD COLUMN payment_lockout_override TINYINT(1) DEFAULT 0");
+    }
+    if (!in_array('lockout_override_at', $colNames, true)) {
+        $pdo->exec("ALTER TABLE students ADD COLUMN lockout_override_at DATETIME DEFAULT NULL");
+    }
+    if (!in_array('lockout_override_by', $colNames, true)) {
+        $pdo->exec("ALTER TABLE students ADD COLUMN lockout_override_by INT DEFAULT NULL");
+    }
+} catch (\PDOException $e) {}
+
+// ─── Idempotent migrations for import: forced password change & registration ──
+try {
+    $pdo = get_db();
+    $cols = $pdo->query("SHOW COLUMNS FROM students")->fetchAll();
+    $colNames = array_column($cols, 'Field');
+    if (!in_array('must_change_password', $colNames, true)) {
+        $pdo->exec("ALTER TABLE students ADD COLUMN must_change_password TINYINT(1) NOT NULL DEFAULT 0");
+    }
+    if (!in_array('registration_incomplete', $colNames, true)) {
+        $pdo->exec("ALTER TABLE students ADD COLUMN registration_incomplete TINYINT(1) NOT NULL DEFAULT 0");
+    }
+} catch (\PDOException $e) {}
+
+// ─── Idempotent migration for calendar-only events ───────────────────
+try {
+    $pdo = get_db();
+    $cols = $pdo->query("SHOW COLUMNS FROM events")->fetchAll();
+    $colNames = array_column($cols, 'Field');
+    if (!in_array('requires_registration', $colNames, true)) {
+        $pdo->exec("ALTER TABLE events ADD COLUMN requires_registration TINYINT(1) NOT NULL DEFAULT 1");
+    }
+} catch (\PDOException $e) {}
+
 /**
  * Start or resume a session with hardened cookie settings.
  */
@@ -114,6 +158,16 @@ function login_student(array $student): void
     $_SESSION['first_name'] = $student['first_name'];
     $_SESSION['last_name']  = $student['last_name'];
     $_SESSION['belt_rank']  = $student['belt_rank'] ?? '';
+
+    // Set parent capability flag if student has been promoted
+    $_SESSION['is_parent']  = !empty($student['is_parent']) && (int)$student['is_parent'] === 1;
+
+    // Import flags: forced password change & incomplete registration
+    $_SESSION['must_change_password']    = !empty($student['must_change_password']) && (int)$student['must_change_password'] === 1;
+    $_SESSION['registration_incomplete'] = !empty($student['registration_incomplete']) && (int)$student['registration_incomplete'] === 1;
+
+    // Cache payment lockout status immediately on login
+    refresh_payment_lockout_status();
 }
 
 /**
@@ -125,6 +179,158 @@ function require_student(): void
 
     if (empty($_SESSION['user_type']) || $_SESSION['user_type'] !== 'student') {
         header('Location: login.php');
+        exit;
+    }
+}
+
+/**
+ * Guard: redirect students who must change their password or complete registration.
+ * Call at the top of any student page EXCEPT complete_registration.php and logout.php.
+ */
+function require_registration_complete(): void
+{
+    auth_start_session();
+    if (!empty($_SESSION['must_change_password']) || !empty($_SESSION['registration_incomplete'])) {
+        header('Location: complete_registration.php');
+        exit;
+    }
+}
+
+// ---------- Student payment lockout ----------
+
+/**
+ * Query DB for the student's current payment lockout state and cache in session.
+ * A student is locked out if their active membership has a non-paid payment_status
+ * AND no admin override is active.
+ */
+function refresh_payment_lockout_status(): void
+{
+    auth_start_session();
+    $studentId = $_SESSION['student_id'] ?? 0;
+    if (!$studentId) return;
+
+    $pdo = get_db();
+
+    // Check if the student has an admin override active
+    try {
+        $overrideStmt = $pdo->prepare(
+            'SELECT payment_lockout_override FROM students WHERE id = :id LIMIT 1'
+        );
+        $overrideStmt->execute([':id' => $studentId]);
+        $overrideRow = $overrideStmt->fetch();
+
+        if ($overrideRow && (int) $overrideRow['payment_lockout_override'] === 1) {
+            $_SESSION['payment_locked_out'] = false;
+            $_SESSION['payment_lockout_checked_at'] = time();
+            return;
+        }
+    } catch (\PDOException $e) {
+        // Column may not exist yet on older installs
+        $_SESSION['payment_locked_out'] = false;
+        $_SESSION['payment_lockout_checked_at'] = time();
+        return;
+    }
+
+    // Check active membership for problematic payment_status
+    $isLocked = false;
+    try {
+        $stmt = $pdo->prepare("
+            SELECT m.payment_status
+            FROM memberships m
+            WHERE m.student_id = :sid AND m.status = 'active'
+            ORDER BY m.end_date DESC LIMIT 1
+        ");
+        $stmt->execute([':sid' => $studentId]);
+        $membership = $stmt->fetch();
+
+        if ($membership && in_array($membership['payment_status'], ['declined', 'pending', 'partial'], true)) {
+            $isLocked = true;
+        }
+    } catch (\PDOException $e) {}
+
+    // Also check for recent payment_failed entries in renewal_log
+    if (!$isLocked) {
+        try {
+            $failStmt = $pdo->prepare("
+                SELECT COUNT(*) as cnt FROM renewal_log
+                WHERE student_id = :sid
+                  AND action = 'payment_failed'
+                  AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+            ");
+            $failStmt->execute([':sid' => $studentId]);
+            $failRow = $failStmt->fetch();
+            if ($failRow && (int) $failRow['cnt'] > 0) {
+                $isLocked = true;
+            }
+        } catch (\PDOException $e) {
+            // renewal_log may not exist on older installs
+        }
+    }
+
+    $_SESSION['payment_locked_out'] = $isLocked;
+    $_SESSION['payment_lockout_checked_at'] = time();
+}
+
+/**
+ * Check if the current student is payment-locked.
+ * Uses session cache, refreshes from DB if stale (>5 minutes).
+ * Also respects the global test toggle (test_lockout_all_students setting).
+ */
+function is_student_payment_locked(): bool
+{
+    auth_start_session();
+    if (empty($_SESSION['student_id'])) {
+        return false;
+    }
+    if (($_SESSION['user_type'] ?? '') !== 'student') {
+        return false;
+    }
+
+    // Global test toggle — forces ALL students into lockout mode
+    // Cached in session for 60 seconds to avoid constant DB reads
+    $testCacheTime = $_SESSION['test_lockout_checked_at'] ?? 0;
+    if ((time() - $testCacheTime) > 60) {
+        try {
+            $pdo = get_db();
+            $testStmt = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'test_lockout_all_students' LIMIT 1");
+            $testStmt->execute();
+            $testRow = $testStmt->fetch();
+            $_SESSION['test_lockout_all_students'] = ($testRow && $testRow['setting_value'] === '1');
+            $_SESSION['test_lockout_checked_at'] = time();
+        } catch (\PDOException $e) {
+            $_SESSION['test_lockout_all_students'] = false;
+            $_SESSION['test_lockout_checked_at'] = time();
+        }
+    }
+    if (!empty($_SESSION['test_lockout_all_students'])) {
+        return true;
+    }
+
+    // Refresh cache if stale (older than 5 minutes)
+    $cacheTime = $_SESSION['payment_lockout_checked_at'] ?? 0;
+    if ((time() - $cacheTime) > 300) {
+        refresh_payment_lockout_status();
+    }
+
+    return !empty($_SESSION['payment_locked_out']);
+}
+
+/**
+ * Guard: redirect locked-out students to the payment page.
+ * Call at the top of any student page that should be LOCKED during payment issues.
+ *
+ * ALLOWED pages (do NOT call this on):
+ *   - student_payment.php  (must update card info — primary lockout landing page)
+ *   - student_profile.php  (basic profile access)
+ *   - student_logout.php   (must be able to log out)
+ */
+function require_student_payment_clear(): void
+{
+    // Imported students must complete registration before anything else
+    require_registration_complete();
+
+    if (is_student_payment_locked()) {
+        header('Location: student_payment.php?lockout=1');
         exit;
     }
 }

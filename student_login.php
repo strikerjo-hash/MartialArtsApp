@@ -1,21 +1,25 @@
 <?php
 require_once 'config.php';
+require_once __DIR__ . '/includes/auth.php';
 
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $email = sanitizeInput($_POST['email']);
     $dob = $_POST['dob'];
-    
+
     $stmt = $pdo->prepare("SELECT * FROM students WHERE email = ? AND date_of_birth = ? AND status = 'active'");
     $stmt->execute([$email, $dob]);
     $student = $stmt->fetch();
-    
+
     if ($student) {
         $_SESSION['student_id'] = $student['id'];
         $_SESSION['student_name'] = $student['first_name'] . ' ' . $student['last_name'];
         $_SESSION['is_student'] = true;
-        header('Location: student_portal.php');
+        $_SESSION['user_type'] = 'student';
+        // Cache payment lockout status on login
+        refresh_payment_lockout_status();
+        header('Location: ' . (is_student_payment_locked() ? 'student_payment.php?lockout=1' : 'student_portal.php'));
         exit;
     } else {
         $error = 'Invalid credentials or inactive account';

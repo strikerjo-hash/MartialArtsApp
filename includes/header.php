@@ -41,7 +41,8 @@ $siteName = getSiteName();
         }
         /* Sidebar scrolling */
         .sidebar-nav-scroll {
-            flex: 1;
+            flex: 1 1 0%;
+            min-height: 0;
             overflow-y: auto;
             overflow-x: hidden;
         }
@@ -63,7 +64,8 @@ $siteName = getSiteName();
 <body class="bg-gray-50">
     <div class="flex h-screen overflow-hidden">
         <!-- Sidebar -->
-        <aside class="w-64 shadow-lg hidden md:block sidebar-custom">
+        <aside class="w-64 shadow-lg hidden md:flex sidebar-custom h-full flex-col overflow-hidden">
+            <!-- Sidebar Header (fixed) -->
             <div class="p-6 border-b border-white/10 flex-shrink-0">
                 <?php if ($logoPath): ?>
                     <div class="flex items-center gap-3">
@@ -76,6 +78,7 @@ $siteName = getSiteName();
                 <?php endif; ?>
             </div>
 
+            <!-- Scrollable Navigation (fills remaining space) -->
             <div class="sidebar-nav-scroll">
             <nav class="p-4">
                 <a href="index.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'index.php' ? 'active-nav' : ''; ?>">
@@ -90,10 +93,22 @@ $siteName = getSiteName();
                 </a>
                 <?php endif; ?>
 
+                <a href="parent_accounts.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'parent_accounts.php' ? 'active-nav' : ''; ?>">
+                    <span class="mr-3">👨‍👩‍👧‍👦</span>
+                    <span>Parent Accounts</span>
+                </a>
+
                 <?php if (canView('memberships.php')): ?>
                 <a href="memberships.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'memberships.php' ? 'active-nav' : ''; ?>">
                     <span class="mr-3">📋</span>
                     <span>Memberships</span>
+                </a>
+                <?php endif; ?>
+
+                <?php if (canView('discount_codes.php')): ?>
+                <a href="discount_codes.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'discount_codes.php' ? 'active-nav' : ''; ?>">
+                    <span class="mr-3">🏷️</span>
+                    <span>Discount Codes</span>
                 </a>
                 <?php endif; ?>
 
@@ -111,6 +126,11 @@ $siteName = getSiteName();
                 </a>
                 <?php endif; ?>
 
+                <a href="calendar.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'calendar.php' ? 'active-nav' : ''; ?>">
+                    <span class="mr-3">📅</span>
+                    <span>Calendar</span>
+                </a>
+
                 <?php if (canView('attendance.php')): ?>
                 <a href="attendance.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'attendance.php' ? 'active-nav' : ''; ?>">
                     <span class="mr-3">✅</span>
@@ -118,10 +138,30 @@ $siteName = getSiteName();
                 </a>
                 <?php endif; ?>
 
+                <?php if (canView('makeup_classes.php')): ?>
+                <a href="makeup_classes.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'makeup_classes.php' ? 'active-nav' : ''; ?>">
+                    <span class="mr-3">🔄</span>
+                    <span>Make-Up Classes</span>
+                </a>
+                <?php endif; ?>
+
                 <?php if (canView('payments.php')): ?>
                 <a href="payments.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'payments.php' ? 'active-nav' : ''; ?>">
                     <span class="mr-3">💰</span>
                     <span>Payments</span>
+                </a>
+                <?php
+                // Count pending event payments for the badge
+                try {
+                    $_pendingPayCount = (int)$pdo->query("SELECT COUNT(*) FROM event_registrations WHERE payment_status = 'pending'")->fetchColumn();
+                } catch (\PDOException $e) { $_pendingPayCount = 0; }
+                ?>
+                <a href="pending_payments.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'pending_payments.php' ? 'active-nav' : ''; ?>">
+                    <span class="mr-3">⏳</span>
+                    <span>Pending Payments</span>
+                    <?php if ($_pendingPayCount > 0): ?>
+                        <span class="ml-auto bg-red-500 text-white text-xs font-bold px-2 py-0.5 rounded-full"><?php echo $_pendingPayCount; ?></span>
+                    <?php endif; ?>
                 </a>
                 <?php endif; ?>
 
@@ -136,6 +176,18 @@ $siteName = getSiteName();
                 <a href="reports.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'reports.php' ? 'active-nav' : ''; ?>">
                     <span class="mr-3">📈</span>
                     <span>Reports</span>
+                </a>
+                <?php endif; ?>
+
+                <a href="tax_statement.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'tax_statement.php' ? 'active-nav' : ''; ?>">
+                    <span class="mr-3">📋</span>
+                    <span>Tax Statements</span>
+                </a>
+
+                <?php if (canView('messages.php')): ?>
+                <a href="messages.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'messages.php' ? 'active-nav' : ''; ?>">
+                    <span class="mr-3">💬</span>
+                    <span>Messages</span>
                 </a>
                 <?php endif; ?>
 
@@ -185,6 +237,17 @@ $siteName = getSiteName();
                 </a>
                 <?php endif; ?>
 
+                <?php if (getCurrentUser()['role'] === 'admin'): ?>
+                <a href="import_data.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo in_array(basename($_SERVER['PHP_SELF']), ['import_data.php', 'export_data.php']) ? 'active-nav' : ''; ?>">
+                    <span class="mr-3">🔄</span>
+                    <span>Import / Export</span>
+                </a>
+                <?php endif; ?>
+            </nav>
+            </div><!-- /.sidebar-nav-scroll -->
+
+            <!-- Sidebar Footer — always visible, pinned to bottom -->
+            <div class="flex-shrink-0 border-t border-white/10 p-4">
                 <a href="student_portal.php" class="flex items-center px-4 py-3 mb-2 rounded-lg hover:!bg-blue-500/20" target="_blank" style="color: #93C5FD;">
                     <span class="mr-3">🎓</span>
                     <span>Student Portal</span>
@@ -194,8 +257,7 @@ $siteName = getSiteName();
                     <span class="mr-3">🚪</span>
                     <span>Logout</span>
                 </a>
-            </nav>
-            </div><!-- /.sidebar-nav-scroll -->
+            </div>
         </aside>
 
         <!-- Main Content -->

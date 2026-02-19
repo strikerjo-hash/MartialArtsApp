@@ -2,6 +2,10 @@
 require_once 'config.php';
 requireLogin();
 
+// --- Idempotent migrations ---
+try { $pdo->exec("ALTER TABLE events ADD COLUMN tax_deductible TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
+try { $pdo->exec("ALTER TABLE events MODIFY COLUMN event_type ENUM('belt_test','tournament','seminar','workshop','demonstration','camp','other') NOT NULL"); } catch (PDOException $e) {}
+
 $message = '';
 
 // Handle form submissions
@@ -10,10 +14,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         switch ($_POST['action']) {
             case 'add':
                 $stmt = $pdo->prepare("
-                    INSERT INTO events (name, event_type, description, event_date, start_time, 
-                                       end_time, location, max_participants, registration_fee, 
-                                       registration_deadline, instructor_id, status, requirements)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO events (name, event_type, description, event_date, start_time,
+                                       end_time, location, max_participants, registration_fee,
+                                       registration_deadline, instructor_id, status, requirements, requires_registration, tax_deductible)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
                 $stmt->execute([
                     sanitizeInput($_POST['name']),
@@ -28,7 +32,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $_POST['registration_deadline'] ?: null,
                     $_POST['instructor_id'] ?: null,
                     $_POST['status'],
-                    sanitizeInput($_POST['requirements'])
+                    sanitizeInput($_POST['requirements']),
+                    isset($_POST['requires_registration']) ? 1 : 0,
+                    isset($_POST['tax_deductible']) ? 1 : 0
                 ]);
                 $message = showAlert('Event created successfully!', 'success');
                 break;
@@ -109,6 +115,7 @@ include 'includes/header.php';
                 <option value="seminar" <?php echo $type_filter === 'seminar' ? 'selected' : ''; ?>>Seminar</option>
                 <option value="workshop" <?php echo $type_filter === 'workshop' ? 'selected' : ''; ?>>Workshop</option>
                 <option value="demonstration" <?php echo $type_filter === 'demonstration' ? 'selected' : ''; ?>>Demonstration</option>
+                <option value="camp" <?php echo $type_filter === 'camp' ? 'selected' : ''; ?>>Camp</option>
                 <option value="other" <?php echo $type_filter === 'other' ? 'selected' : ''; ?>>Other</option>
             </select>
             
@@ -141,6 +148,7 @@ include 'includes/header.php';
                         'seminar' => 'bg-blue-500',
                         'workshop' => 'bg-green-500',
                         'demonstration' => 'bg-purple-500',
+                        'camp' => 'bg-teal-500',
                         'other' => 'bg-gray-500'
                     ];
                     echo $headerColors[$event['event_type']] ?? 'bg-gray-500';
@@ -158,9 +166,21 @@ include 'includes/header.php';
                             'cancelled' => 'bg-red-400 text-white'
                         ];
                         ?>
-                        <span class="px-2 py-1 text-xs font-semibold rounded <?php echo $statusBadges[$event['status']]; ?>">
-                            <?php echo ucfirst($event['status']); ?>
-                        </span>
+                        <div class="flex flex-col items-end gap-1">
+                            <span class="px-2 py-1 text-xs font-semibold rounded <?php echo $statusBadges[$event['status']]; ?>">
+                                <?php echo ucfirst($event['status']); ?>
+                            </span>
+                            <?php if (empty($event['requires_registration'])): ?>
+                                <span class="px-2 py-1 text-xs font-semibold rounded bg-gray-200 text-gray-700">
+                                    Info Only
+                                </span>
+                            <?php endif; ?>
+                            <?php if (!empty($event['tax_deductible'])): ?>
+                                <span class="px-2 py-1 text-xs font-semibold rounded bg-green-200 text-green-800">
+                                    Tax-Deductible
+                                </span>
+                            <?php endif; ?>
+                        </div>
                     </div>
                 </div>
                 
@@ -205,28 +225,39 @@ include 'includes/header.php';
                     
                     <!-- Registration Info -->
                     <div class="border-t border-gray-200 pt-4 mt-4">
-                        <div class="flex justify-between items-center mb-3">
-                            <div>
-                                <p class="text-xs text-gray-500">Registrations</p>
-                                <p class="text-lg font-bold text-gray-800">
-                                    <?php echo $event['total_registrations']; ?>
-                                    <?php if ($event['max_participants']): ?>
-                                        / <?php echo $event['max_participants']; ?>
-                                    <?php endif; ?>
-                                </p>
+                        <?php if (!empty($event['requires_registration'])): ?>
+                            <div class="flex justify-between items-center mb-3">
+                                <div>
+                                    <p class="text-xs text-gray-500">Registrations</p>
+                                    <p class="text-lg font-bold text-gray-800">
+                                        <?php echo $event['total_registrations']; ?>
+                                        <?php if ($event['max_participants']): ?>
+                                            / <?php echo $event['max_participants']; ?>
+                                        <?php endif; ?>
+                                    </p>
+                                </div>
+                                <div class="text-right">
+                                    <p class="text-xs text-gray-500">Fee</p>
+                                    <p class="text-lg font-bold text-green-600">
+                                        <?php echo formatMoney($event['registration_fee']); ?>
+                                    </p>
+                                </div>
                             </div>
-                            <div class="text-right">
-                                <p class="text-xs text-gray-500">Fee</p>
-                                <p class="text-lg font-bold text-green-600">
-                                    <?php echo formatMoney($event['registration_fee']); ?>
+
+                            <?php if ($event['registration_deadline']): ?>
+                                <p class="text-xs text-gray-500">
+                                    Registration deadline: <?php echo formatDate($event['registration_deadline']); ?>
                                 </p>
+                            <?php endif; ?>
+                        <?php else: ?>
+                            <div class="text-center py-2">
+                                <span class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-600 text-sm font-medium rounded-lg">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                                    </svg>
+                                    Calendar Only &mdash; No Registration
+                                </span>
                             </div>
-                        </div>
-                        
-                        <?php if ($event['registration_deadline']): ?>
-                            <p class="text-xs text-gray-500">
-                                Registration deadline: <?php echo formatDate($event['registration_deadline']); ?>
-                            </p>
                         <?php endif; ?>
                     </div>
                     
@@ -290,6 +321,7 @@ include 'includes/header.php';
                         <option value="seminar">Seminar</option>
                         <option value="workshop">Workshop</option>
                         <option value="demonstration">Demonstration</option>
+                        <option value="camp">Camp</option>
                         <option value="other">Other</option>
                     </select>
                 </div>
@@ -378,13 +410,35 @@ include 'includes/header.php';
                 <textarea name="requirements" rows="2" placeholder="e.g., Minimum belt rank, equipment needed, etc."
                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"></textarea>
             </div>
-            
+
+            <div class="bg-gray-50 rounded-lg p-4">
+                <label class="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" name="requires_registration" value="1" checked
+                           class="w-5 h-5 text-blue-600 border-gray-300 rounded focus:ring-blue-500">
+                    <div>
+                        <span class="text-sm font-medium text-gray-700">Requires Registration</span>
+                        <p class="text-xs text-gray-500 mt-0.5">Uncheck to create a calendar-only event (no student registration or payment)</p>
+                    </div>
+                </label>
+            </div>
+
+            <div class="bg-green-50 rounded-lg p-4">
+                <label class="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" name="tax_deductible" value="1"
+                           class="w-5 h-5 text-green-600 border-gray-300 rounded focus:ring-green-500">
+                    <div>
+                        <span class="text-sm font-medium text-gray-700">Tax-Deductible (Childcare/Camp)</span>
+                        <p class="text-xs text-gray-500 mt-0.5">Mark if this event qualifies as dependent care for tax purposes (e.g., afterschool program, camp)</p>
+                    </div>
+                </label>
+            </div>
+
             <div class="flex justify-end space-x-3 pt-4">
                 <button type="button" onclick="document.getElementById('addModal').classList.add('hidden')"
                         class="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">
                     Cancel
                 </button>
-                <button type="submit" 
+                <button type="submit"
                         class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">
                     Create Event
                 </button>

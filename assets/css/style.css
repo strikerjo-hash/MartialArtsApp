@@ -460,7 +460,7 @@ img {
    Registration Page
    ====================================================== */
 .register-container {
-    max-width: 520px;
+    max-width: 780px;
 }
 
 .password-hint {
@@ -468,6 +468,330 @@ img {
     opacity: .5;
     margin-bottom: 1.25rem;
     font-style: italic;
+}
+
+/* Step Indicator */
+.step-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin-bottom: 1.75rem;
+}
+
+.step-item {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+}
+
+.step-circle {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: .85rem;
+    font-weight: 700;
+    background: rgba(255,255,255,.08);
+    color: var(--text-color);
+    opacity: .5;
+    flex-shrink: 0;
+}
+
+.step-circle.active {
+    background: var(--primary-color);
+    color: #fff;
+    opacity: 1;
+}
+
+.step-circle.completed {
+    background: rgba(76,175,80,.35);
+    color: #a5d6a7;
+    opacity: 1;
+}
+
+.step-label {
+    font-size: .8rem;
+    font-weight: 600;
+    opacity: .5;
+}
+
+.step-label.active {
+    opacity: 1;
+    color: var(--accent-color);
+}
+
+.step-connector {
+    width: 40px;
+    height: 2px;
+    background: rgba(255,255,255,.1);
+    margin: 0 .5rem;
+    flex-shrink: 0;
+}
+
+.step-connector.completed {
+    background: var(--primary-color);
+}
+
+/* Waiver Box */
+.waiver-section {
+    margin-top: .5rem;
+    margin-bottom: 1.25rem;
+}
+
+.waiver-section > label:first-child {
+    display: block;
+    font-size: .95rem;
+    font-weight: 700;
+    margin-bottom: .5rem;
+    color: var(--accent-color);
+}
+
+.waiver-box {
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 1rem;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 6px;
+    background: rgba(0,0,0,.3);
+    font-size: .85rem;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    margin-bottom: .75rem;
+}
+
+.waiver-box::-webkit-scrollbar {
+    width: 6px;
+}
+.waiver-box::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.15);
+    border-radius: 3px;
+}
+
+.waiver-agree {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-size: .9rem;
+}
+
+.waiver-agree input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--primary-color);
+    flex-shrink: 0;
+}
+
+/* Plan Selection Grid */
+.plan-section-title {
+    font-size: .95rem;
+    font-weight: 700;
+    color: var(--accent-color);
+    margin-bottom: .25rem;
+}
+
+.plan-section-subtitle {
+    font-size: .8rem;
+    opacity: .6;
+    margin-bottom: 1rem;
+}
+
+.plan-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: .75rem;
+    margin-bottom: 1.25rem;
+}
+
+.plan-card {
+    position: relative;
+    cursor: pointer;
+}
+
+.plan-card input[type="radio"] {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.plan-card-inner {
+    border: 2px solid rgba(255,255,255,.1);
+    border-radius: 8px;
+    padding: 1rem;
+    transition: border-color .2s, background .2s;
+    height: 100%;
+}
+
+.plan-card-inner:hover {
+    border-color: rgba(255,255,255,.25);
+}
+
+.plan-card input[type="radio"]:checked + .plan-card-inner {
+    border-color: var(--primary-color);
+    background: rgba(255,255,255,.05);
+}
+
+.plan-card-name {
+    font-weight: 700;
+    font-size: .95rem;
+    margin-bottom: .25rem;
+}
+
+.plan-card-price {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--accent-color);
+    margin-bottom: .15rem;
+}
+
+.plan-card-duration {
+    font-size: .8rem;
+    opacity: .6;
+}
+
+.plan-card-desc {
+    font-size: .8rem;
+    opacity: .55;
+    margin-top: .4rem;
+}
+
+.plan-card-skip .plan-card-inner {
+    border-style: dashed;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100px;
+}
+
+.plan-card-skip .plan-card-name {
+    opacity: .7;
+}
+
+.plan-card-skip .plan-card-desc {
+    opacity: .45;
+}
+
+/* Payment Summary (Step 2) */
+.payment-summary-card {
+    background: rgba(0,0,0,.2);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+}
+
+.payment-summary-card h3 {
+    font-size: 1rem;
+    color: var(--accent-color);
+    margin-bottom: .75rem;
+}
+
+.payment-row {
+    display: flex;
+    justify-content: space-between;
+    padding: .35rem 0;
+    font-size: .9rem;
+}
+
+.payment-row.total {
+    border-top: 1px solid rgba(255,255,255,.1);
+    margin-top: .5rem;
+    padding-top: .75rem;
+    font-weight: 700;
+    font-size: 1.05rem;
+    color: var(--accent-color);
+}
+
+/* Fee breakdown (renderFeeBreakdownHtml CSS-var variant) */
+.fee-breakdown { margin: .25rem 0; }
+.fee-breakdown .payment-row { display: flex; justify-content: space-between; padding: .3rem 0; font-size: .9rem; }
+.fee-breakdown .text-green { color: #4caf50; font-weight: 600; }
+.fee-breakdown .fee-total-row {
+    border-top: 1px solid rgba(255,255,255,.12);
+    margin-top: .35rem;
+    padding-top: .6rem;
+}
+.fee-breakdown .fee-total-label { font-size: 1rem; font-weight: 700; color: var(--text-color); }
+.fee-breakdown .fee-total-value { font-size: 1.15rem; font-weight: 700; color: #4caf50; }
+
+/* Plan card registration fee badge */
+.plan-card-regfee {
+    font-size: .75rem;
+    color: var(--accent-color, #64b5f6);
+    margin-top: .15rem;
+    opacity: .85;
+}
+
+.payment-form-section {
+    margin-top: 1.25rem;
+}
+
+.stripe-card-element {
+    padding: .75rem .85rem;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 6px;
+    background: rgba(0,0,0,.25);
+    margin-bottom: .5rem;
+}
+
+.card-errors {
+    color: #ef9a9a;
+    font-size: .85rem;
+    min-height: 1.2rem;
+    margin-bottom: .75rem;
+}
+
+/* Success Page (Step 3) */
+.success-icon {
+    font-size: 3.5rem;
+    margin-bottom: .75rem;
+}
+
+.success-message {
+    text-align: center;
+    padding: 1rem 0;
+}
+
+.success-message h2 {
+    color: var(--accent-color);
+    font-size: 1.4rem;
+    margin-bottom: .5rem;
+}
+
+.success-message p {
+    opacity: .7;
+    margin-bottom: 1.5rem;
+}
+
+/* Gateway not configured notice */
+.gateway-notice {
+    background: rgba(255,152,0,.1);
+    border: 1px solid rgba(255,152,0,.3);
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+    font-size: .9rem;
+}
+
+.gateway-notice strong {
+    color: #ffb74d;
+}
+
+.skip-link {
+    display: block;
+    text-align: center;
+    margin-top: 1rem;
+    font-size: .85rem;
+    opacity: .6;
+}
+
+.skip-link:hover {
+    opacity: 1;
 }
 
 /* ======================================================
@@ -582,5 +906,17 @@ img {
         flex-direction: column;
         align-items: flex-start;
         gap: .5rem;
+    }
+    .plan-grid {
+        grid-template-columns: 1fr;
+    }
+    .step-label {
+        display: none;
+    }
+    .step-connector {
+        width: 24px;
+    }
+    .register-container {
+        max-width: 100%;
     }
 }

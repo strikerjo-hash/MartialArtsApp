@@ -1,5 +1,6 @@
 <?php
 require_once 'config.php';
+require_once __DIR__ . '/includes/parent_auth.php';
 requireLogin();
 
 $message = '';
@@ -7,6 +8,30 @@ $message = '';
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf();
+
+    // Promote student to parent account (sets is_parent=1)
+    if (isset($_POST['promote_to_parent'])) {
+        $promoteStudentId = (int)($_POST['student_id'] ?? 0);
+        if ($promoteStudentId) {
+            $existingCheck = student_has_parent_account($promoteStudentId);
+            if ($existingCheck) {
+                $message = showAlert('This student already has parent capabilities enabled.', 'error');
+            } else {
+                $promoted = promote_student_to_parent($promoteStudentId);
+                if ($promoted) {
+                    $studentName = htmlspecialchars($promoted['first_name'] . ' ' . $promoted['last_name']);
+                    $message = showAlert(
+                        'Parent capabilities enabled for ' . $studentName . '. ' .
+                        'Go to <a href="student_detail.php?id=' . $promoteStudentId . '" class="underline font-semibold">their student detail page</a> to link children.',
+                        'success'
+                    );
+                } else {
+                    $message = showAlert('Failed to enable parent capabilities. Please try again.', 'error');
+                }
+            }
+        }
+    }
+
     if (isset($_POST['action'])) {
         switch ($_POST['action']) {
             case 'add':
@@ -44,12 +69,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // Get all students with their current belt
 $search = $_GET['search'] ?? '';
 $status_filter = $_GET['status'] ?? '';
+$membership_filter = $_GET['membership'] ?? '';
+$payment_filter = $_GET['payment'] ?? '';
 
 $query = "
-    SELECT s.*, 
+    SELECT s.*,
            COALESCE(belt_info.belt_name, 'No Belt') as current_belt,
            COALESCE(belt_info.style_name, '-') as belt_style,
-           COALESCE(m.status, 'No Membership') as membership_status
+           COALESCE(m.membership_status, 'No Membership') as membership_status,
+           m.plan_name,
+           m.payment_status,
+           m.end_date as membership_end_date
     FROM students s
     LEFT JOIN (
         SELECT sb.student_id, b.name as belt_name, mas.name as style_name
@@ -61,11 +91,15 @@ $query = "
         )
     ) belt_info ON s.id = belt_info.student_id
     LEFT JOIN (
-        SELECT student_id, status
-        FROM memberships
-        WHERE end_date >= CURDATE()
-        ORDER BY end_date DESC
-        LIMIT 1
+        SELECT m1.student_id, m1.status as membership_status,
+               mp.name as plan_name, m1.payment_status, m1.end_date
+        FROM memberships m1
+        JOIN membership_plans mp ON m1.plan_id = mp.id
+        WHERE m1.id = (
+            SELECT m2.id FROM memberships m2
+            WHERE m2.student_id = m1.student_id
+            ORDER BY m2.end_date DESC LIMIT 1
+        )
     ) m ON s.id = m.student_id
     WHERE 1=1
 ";
@@ -75,6 +109,22 @@ if ($search) {
 }
 if ($status_filter) {
     $query .= " AND s.status = :status";
+}
+if ($membership_filter === 'active') {
+    $query .= " AND m.membership_status = 'active' AND m.end_date >= CURDATE()";
+} elseif ($membership_filter === 'expired') {
+    $query .= " AND (m.membership_status = 'expired' OR (m.membership_status IS NOT NULL AND m.end_date < CURDATE()))";
+} elseif ($membership_filter === 'none') {
+    $query .= " AND m.membership_status IS NULL";
+}
+if ($payment_filter === 'paid') {
+    $query .= " AND m.payment_status = 'paid'";
+} elseif ($payment_filter === 'pending') {
+    $query .= " AND m.payment_status = 'pending'";
+} elseif ($payment_filter === 'partial') {
+    $query .= " AND m.payment_status = 'partial'";
+} elseif ($payment_filter === 'overdue') {
+    $query .= " AND m.payment_status IN ('pending', 'partial') AND m.end_date < CURDATE()";
 }
 
 $query .= " ORDER BY s.created_at DESC";
@@ -88,6 +138,15 @@ if ($status_filter) {
 }
 $stmt->execute();
 $students = $stmt->fetchAll();
+
+// Build lookup of students who have parent capabilities (is_parent=1)
+$studentsWithParent = [];
+try {
+    $spStmt = $pdo->query("SELECT id, username FROM students WHERE is_parent = 1");
+    foreach ($spStmt->fetchAll() as $sp) {
+        $studentsWithParent[$sp['id']] = $sp['username'];
+    }
+} catch (\PDOException $e) {}
 
 include 'includes/header.php';
 ?>
@@ -106,17 +165,32 @@ include 'includes/header.php';
     <!-- Filters -->
     <div class="bg-white rounded-lg shadow p-4 mb-6">
         <form method="GET" class="flex flex-wrap gap-4">
-            <input type="text" name="search" placeholder="Search by name or email..." 
+            <input type="text" name="search" placeholder="Search by name or email..."
                    value="<?php echo htmlspecialchars($search); ?>"
                    class="flex-1 min-w-[200px] px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
-            
+
             <select name="status" class="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
                 <option value="">All Status</option>
                 <option value="active" <?php echo $status_filter === 'active' ? 'selected' : ''; ?>>Active</option>
                 <option value="inactive" <?php echo $status_filter === 'inactive' ? 'selected' : ''; ?>>Inactive</option>
                 <option value="suspended" <?php echo $status_filter === 'suspended' ? 'selected' : ''; ?>>Suspended</option>
             </select>
-            
+
+            <select name="membership" class="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                <option value="">All Memberships</option>
+                <option value="active" <?php echo $membership_filter === 'active' ? 'selected' : ''; ?>>Active Membership</option>
+                <option value="expired" <?php echo $membership_filter === 'expired' ? 'selected' : ''; ?>>Expired Membership</option>
+                <option value="none" <?php echo $membership_filter === 'none' ? 'selected' : ''; ?>>No Membership</option>
+            </select>
+
+            <select name="payment" class="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                <option value="">All Payments</option>
+                <option value="paid" <?php echo $payment_filter === 'paid' ? 'selected' : ''; ?>>Paid</option>
+                <option value="pending" <?php echo $payment_filter === 'pending' ? 'selected' : ''; ?>>Pending</option>
+                <option value="partial" <?php echo $payment_filter === 'partial' ? 'selected' : ''; ?>>Partial</option>
+                <option value="overdue" <?php echo $payment_filter === 'overdue' ? 'selected' : ''; ?>>Overdue</option>
+            </select>
+
             <button type="submit" class="bg-gray-600 hover:bg-gray-700 text-white px-6 py-2 rounded-lg">
                 Filter
             </button>
@@ -182,21 +256,60 @@ include 'includes/header.php';
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap">
                             <?php
-                            $membershipColors = [
-                                'active' => 'bg-green-100 text-green-800',
-                                'expired' => 'bg-red-100 text-red-800',
-                                'No Membership' => 'bg-gray-100 text-gray-800'
+                            $mStatus = $student['membership_status'];
+                            $isCurrentlyActive = ($mStatus === 'active' && !empty($student['membership_end_date']) && $student['membership_end_date'] >= date('Y-m-d'));
+                            $isExpired = ($mStatus === 'expired' || ($mStatus === 'active' && !empty($student['membership_end_date']) && $student['membership_end_date'] < date('Y-m-d')));
+
+                            if ($isCurrentlyActive) {
+                                $membershipBadge = 'bg-green-100 text-green-800';
+                                $membershipLabel = 'Active';
+                            } elseif ($mStatus === 'cancelled') {
+                                $membershipBadge = 'bg-red-100 text-red-800';
+                                $membershipLabel = 'Cancelled';
+                            } elseif ($isExpired) {
+                                $membershipBadge = 'bg-red-100 text-red-800';
+                                $membershipLabel = 'Expired';
+                            } elseif ($mStatus === 'No Membership') {
+                                $membershipBadge = 'bg-gray-100 text-gray-800';
+                                $membershipLabel = 'No Membership';
+                            } else {
+                                $membershipBadge = 'bg-gray-100 text-gray-800';
+                                $membershipLabel = ucfirst($mStatus);
+                            }
+
+                            $paymentColors = [
+                                'paid' => 'bg-green-100 text-green-700',
+                                'pending' => 'bg-yellow-100 text-yellow-700',
+                                'partial' => 'bg-orange-100 text-orange-700',
                             ];
                             ?>
-                            <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo $membershipColors[$student['membership_status']] ?? 'bg-gray-100 text-gray-800'; ?>">
-                                <?php echo ucfirst(str_replace('_', ' ', $student['membership_status'])); ?>
+                            <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo $membershipBadge; ?>">
+                                <?php echo $membershipLabel; ?>
                             </span>
+                            <?php if (!empty($student['plan_name'])): ?>
+                                <div class="text-xs text-gray-500 mt-1"><?php echo htmlspecialchars($student['plan_name']); ?></div>
+                            <?php endif; ?>
+                            <?php if (!empty($student['payment_status']) && $mStatus !== 'No Membership'): ?>
+                                <span class="mt-1 px-2 inline-flex text-xs leading-4 rounded-full <?php echo $paymentColors[$student['payment_status']] ?? 'bg-gray-100 text-gray-600'; ?>">
+                                    <?php echo ucfirst($student['payment_status']); ?>
+                                </span>
+                            <?php endif; ?>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
                             <a href="student_detail.php?id=<?php echo $student['id']; ?>"
                                class="text-blue-600 hover:text-blue-900 mr-3">View</a>
                             <a href="student_edit.php?id=<?php echo $student['id']; ?>"
                                class="text-green-600 hover:text-green-900 mr-3">Edit</a>
+                            <?php if (isset($studentsWithParent[$student['id']])): ?>
+                                <span class="text-green-600 mr-3 cursor-default" title="Parent account enabled">✓ Parent</span>
+                            <?php else: ?>
+                                <form method="POST" class="inline" onsubmit="return confirm('Enable parent capabilities for this student?')">
+                                    <?= csrf_field() ?>
+                                    <input type="hidden" name="promote_to_parent" value="1">
+                                    <input type="hidden" name="student_id" value="<?php echo $student['id']; ?>">
+                                    <button type="submit" class="text-purple-600 hover:text-purple-900 mr-3" title="Enable parent capabilities">Make Parent</button>
+                                </form>
+                            <?php endif; ?>
                             <form method="POST" class="inline" onsubmit="return confirmDelete('Are you sure you want to delete this student?')">
                                 <?= csrf_field() ?>
                                 <input type="hidden" name="action" value="delete">

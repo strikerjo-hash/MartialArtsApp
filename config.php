@@ -216,17 +216,77 @@ function getActiveTheme(): array
 {
     $schemes = getThemeColorSchemes();
     $key = getActiveThemeKey();
-    return $schemes[$key] ?? $schemes['blue'];
+    $theme = $schemes[$key] ?? $schemes['blue'];
+
+    // Merge with studio_config custom colours if set
+    try {
+        $pdo = get_db();
+        $stmt = $pdo->query('SELECT config_key, config_value FROM studio_config');
+        $config = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $config[$row['config_key']] = $row['config_value'];
+        }
+
+        // Map studio_config colours → theme array keys used by header/student_header
+        if (!empty($config['primary_color']))    $theme['primary']        = $config['primary_color'];
+        if (!empty($config['secondary_color']))  $theme['sidebar_bg']     = $config['secondary_color'];
+        if (!empty($config['accent_color']))     $theme['accent']         = $config['accent_color'];
+        if (!empty($config['background_color'])) $theme['gradient_from']  = $config['background_color'];
+        if (!empty($config['text_color']))        $theme['sidebar_text']   = $config['text_color'];
+        // Derive sidebar_active from primary
+        if (!empty($config['primary_color']))    $theme['sidebar_active'] = $config['primary_color'];
+        // Derive primary_light (lighten primary)
+        if (!empty($config['primary_color'])) {
+            $hex = ltrim($config['primary_color'], '#');
+            if (strlen($hex) === 6) {
+                $r = min(255, hexdec(substr($hex, 0, 2)) + 180);
+                $g = min(255, hexdec(substr($hex, 2, 2)) + 180);
+                $b = min(255, hexdec(substr($hex, 4, 2)) + 180);
+                $theme['primary_light'] = sprintf('#%02x%02x%02x', $r, $g, $b);
+            }
+        }
+    } catch (\Exception $e) {
+        // studio_config table may not exist yet — use preset as-is
+    }
+
+    return $theme;
 }
 
 function getSiteName(): string
 {
+    // Check studio_config first
+    try {
+        $pdo = get_db();
+        $stmt = $pdo->prepare("SELECT config_value FROM studio_config WHERE config_key = 'studio_name' LIMIT 1");
+        $stmt->execute();
+        $row = $stmt->fetch();
+        if ($row && !empty($row['config_value'])) {
+            return $row['config_value'];
+        }
+    } catch (\Exception $e) {}
+
+    // Fall back to settings table
     $name = getSetting('site_name', '');
     return $name !== '' ? $name : APP_NAME;
 }
 
 function getLogoPath(): string
 {
+    // Check studio_config first
+    try {
+        $pdo = get_db();
+        $stmt = $pdo->prepare("SELECT config_value FROM studio_config WHERE config_key = 'logo_url' LIMIT 1");
+        $stmt->execute();
+        $row = $stmt->fetch();
+        if ($row && !empty($row['config_value'])) {
+            $path = $row['config_value'];
+            if (file_exists($path)) {
+                return $path;
+            }
+        }
+    } catch (\Exception $e) {}
+
+    // Fall back to settings table
     $logo = getSetting('site_logo', '');
     if ($logo && file_exists('uploads/logo/' . $logo)) {
         return 'uploads/logo/' . $logo;

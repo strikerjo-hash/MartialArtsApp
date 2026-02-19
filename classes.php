@@ -2,6 +2,15 @@
 require_once 'config.php';
 requireLogin();
 
+// --- Migration: ensure class_enrollments.status ENUM includes 'dropped' and fix stale 'inactive' rows ---
+try {
+    $pdo->exec("ALTER TABLE class_enrollments MODIFY COLUMN status ENUM('active','dropped') NOT NULL DEFAULT 'active'");
+} catch (PDOException $e) {}
+try {
+    // Fix any rows that were set to 'inactive' by the old unenroll code (ENUM mismatch)
+    $pdo->exec("UPDATE class_enrollments SET status = 'dropped' WHERE status NOT IN ('active','dropped')");
+} catch (PDOException $e) {}
+
 $message = '';
 
 // Handle form submissions
@@ -37,7 +46,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 // --- Enrollment enforcement ---
                 $enrollment_error = '';
 
-                if (!$admin_override) {
+                // Check if student is already actively enrolled in this class
+                $alreadyEnrolled = $pdo->prepare("SELECT id FROM class_enrollments WHERE student_id = ? AND class_id = ? AND status = 'active'");
+                $alreadyEnrolled->execute([$student_id, $class_id]);
+                if ($alreadyEnrolled->fetch()) {
+                    $enrollment_error = 'This student is already enrolled in this class.';
+                }
+
+                if (!$enrollment_error && !$admin_override) {
                     // 1. Check for active membership
                     $memCheck = $pdo->prepare("
                         SELECT m.id, mp.classes_per_week
@@ -79,21 +95,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $message = showAlert($enrollment_error, 'error');
                 } else {
                     try {
+                        // Use ON DUPLICATE KEY UPDATE to handle re-enrollment of previously dropped students
                         $stmt = $pdo->prepare("
                             INSERT INTO class_enrollments (student_id, class_id, enrollment_date, status)
                             VALUES (?, ?, CURDATE(), 'active')
+                            ON DUPLICATE KEY UPDATE status = 'active', enrollment_date = CURDATE()
                         ");
                         $stmt->execute([$student_id, $class_id]);
                         $override_note = $admin_override ? ' (Admin Override)' : '';
                         $message = showAlert('Student enrolled successfully!' . $override_note, 'success');
                     } catch (PDOException $e) {
-                        $message = showAlert('Error: Student may already be enrolled in this class.', 'error');
+                        $message = showAlert('Error enrolling student: ' . $e->getMessage(), 'error');
                     }
                 }
                 break;
 
             case 'unenroll':
-                $pdo->prepare("UPDATE class_enrollments SET status = 'inactive' WHERE id = ?")->execute([$_POST['enrollment_id']]);
+                $pdo->prepare("UPDATE class_enrollments SET status = 'dropped' WHERE id = ?")->execute([$_POST['enrollment_id']]);
                 $message = showAlert('Student unenrolled successfully!', 'success');
                 break;
 

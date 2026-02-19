@@ -172,6 +172,33 @@ UPDATE students
  WHERE (password_hash IS NULL OR password_hash = '')
    AND (password IS NULL OR password = '');
 
+-- 10. Tax-deductible tracking columns for events and membership plans.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS tax_deductible TINYINT(1) NOT NULL DEFAULT 0;
+ALTER TABLE membership_plans ADD COLUMN IF NOT EXISTS tax_deductible TINYINT(1) NOT NULL DEFAULT 0;
+
+-- Add 'camp' to event_type enum (safe to re-run — MySQL ignores if it already includes 'camp').
+-- NOTE: If this fails on your MySQL version, the app will add it automatically on first visit to events.php.
+ALTER TABLE events MODIFY COLUMN event_type ENUM('belt_test','tournament','seminar','workshop','demonstration','camp','other') NOT NULL;
+
+-- 11. Tax statement settings.
+INSERT IGNORE INTO settings (setting_key, setting_value) VALUES
+    ('tax_business_name', ''),
+    ('tax_id_ein', ''),
+    ('tax_business_address', ''),
+    ('tax_statement_note', 'This statement is provided for informational purposes. Please consult your tax advisor.');
+
+-- 12. Afterschool program support: fixed-term plans with start/end dates.
+--     Students enrolling mid-program pay a prorated cost.
+ALTER TABLE membership_plans ADD COLUMN IF NOT EXISTS is_afterschool TINYINT(1) NOT NULL DEFAULT 0;
+ALTER TABLE membership_plans ADD COLUMN IF NOT EXISTS program_start_date DATE DEFAULT NULL;
+ALTER TABLE membership_plans ADD COLUMN IF NOT EXISTS program_end_date DATE DEFAULT NULL;
+
+-- 13. Import support: force password change and registration completion.
+--     Imported students log in with email + default password, then must
+--     change their password and complete any missing profile fields.
+ALTER TABLE students ADD COLUMN IF NOT EXISTS must_change_password TINYINT(1) NOT NULL DEFAULT 0;
+ALTER TABLE students ADD COLUMN IF NOT EXISTS registration_incomplete TINYINT(1) NOT NULL DEFAULT 0;
+
 -- ============================================================
 -- Done! Your database now supports:
 --   - Student login with username & password
@@ -180,4 +207,8 @@ UPDATE students
 --   - Studio branding / theming
 --   - Role-based permissions
 --   - Application settings
+--   - Tax-deductible program tracking
+--   - Tax statement generation
+--   - Afterschool program plans with proration
+--   - Imported student forced password change & registration completion
 -- ============================================================

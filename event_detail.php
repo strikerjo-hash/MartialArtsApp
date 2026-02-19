@@ -85,8 +85,8 @@ if (!$event) {
 
 // Get registrations
 $registrations = $pdo->prepare("
-    SELECT er.*, 
-           s.first_name, s.last_name, s.email, s.phone,
+    SELECT er.*,
+           s.first_name, s.last_name, s.email, s.phone, s.date_of_birth,
            COALESCE(b.name, 'No Belt') as current_belt
     FROM event_registrations er
     JOIN students s ON er.student_id = s.id
@@ -154,10 +154,19 @@ include 'includes/header.php';
                     <?php echo str_replace('_', ' ', $event['event_type']); ?>
                 </span>
             </div>
-            <button onclick="document.getElementById('registerModal').classList.remove('hidden')" 
-                    class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium">
-                + Register Student
-            </button>
+            <?php if (!empty($event['requires_registration'])): ?>
+                <button onclick="document.getElementById('registerModal').classList.remove('hidden')"
+                        class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium">
+                    + Register Student
+                </button>
+            <?php else: ?>
+                <span class="inline-flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-600 rounded-lg font-medium text-sm">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                    </svg>
+                    Calendar Only &mdash; No Registration
+                </span>
+            <?php endif; ?>
         </div>
         
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mt-6">
@@ -260,6 +269,7 @@ include 'includes/header.php';
                     <thead class="bg-gray-50">
                         <tr>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Student</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">DOB</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Belt</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contact</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Registered</th>
@@ -276,6 +286,9 @@ include 'includes/header.php';
                                     <div class="font-medium text-gray-900">
                                         <?php echo $reg['first_name'] . ' ' . $reg['last_name']; ?>
                                     </div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                                    <?php echo !empty($reg['date_of_birth']) ? formatDate($reg['date_of_birth']) : '<span class="text-gray-400">—</span>'; ?>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                                     <?php echo $reg['current_belt']; ?>

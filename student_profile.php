@@ -7,14 +7,19 @@
  */
 
 require_once __DIR__ . '/includes/auth.php';
+require_once __DIR__ . '/includes/parent_auth.php';
 require_once __DIR__ . '/includes/theme.php';
 require_once __DIR__ . '/includes/db.php';
 
 require_student();
+require_registration_complete();
 
 $theme     = get_theme();
 $pdo       = get_db();
 $studentId = $_SESSION['user_id'];
+
+// Fetch linked parent accounts
+$linkedParents = get_student_parents($studentId);
 
 // Load current profile.
 $stmt = $pdo->prepare('SELECT * FROM students WHERE id = :id LIMIT 1');
@@ -214,6 +219,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['change_password'])) {
 
                 <button type="submit" class="btn btn-primary">Change Password</button>
             </form>
+        </section>
+
+        <!-- Family / Parent Account -->
+        <section class="card">
+            <h2>Family Account</h2>
+            <?php if (!empty($linkedParents)): ?>
+                <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 16px; margin-bottom: 16px;">
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                        <span style="font-size: 1.3em;">👨‍👩‍👧‍👦</span>
+                        <strong style="color: #1e40af;">Linked to Parent Account</strong>
+                    </div>
+                    <p style="color: #374151; font-size: 0.9em; margin-bottom: 12px;">
+                        Your account is managed under a family/parent account. Payment methods and event registrations may be handled by your parent.
+                    </p>
+                    <?php foreach ($linkedParents as $lp): ?>
+                        <div style="background: white; border-radius: 6px; padding: 12px; margin-bottom: 8px; display: flex; align-items: center; gap: 12px;">
+                            <div style="width: 40px; height: 40px; background: #dbeafe; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #2563eb; font-size: 0.85em;">
+                                <?= strtoupper(substr($lp['first_name'], 0, 1) . substr($lp['last_name'], 0, 1)) ?>
+                            </div>
+                            <div>
+                                <div style="font-weight: 600; color: #1f2937;">
+                                    <?= htmlspecialchars($lp['first_name'] . ' ' . $lp['last_name']) ?>
+                                    <span style="color: #6b7280; font-weight: normal; font-size: 0.85em; margin-left: 4px;">(<?= htmlspecialchars(ucfirst($lp['relationship'])) ?>)</span>
+                                </div>
+                                <?php if ($lp['email']): ?>
+                                    <div style="color: #6b7280; font-size: 0.85em;"><?= htmlspecialchars($lp['email']) ?></div>
+                                <?php endif; ?>
+                                <?php if ($lp['phone']): ?>
+                                    <div style="color: #6b7280; font-size: 0.85em;"><?= htmlspecialchars($lp['phone']) ?></div>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php else: ?>
+                <p style="color: #6b7280; font-size: 0.9em;">
+                    Your account is not linked to a parent/family account. If a parent or guardian manages your membership, ask them to link your account from their family portal.
+                </p>
+            <?php endif; ?>
         </section>
     </main>
 

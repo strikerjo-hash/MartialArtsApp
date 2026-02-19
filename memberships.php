@@ -21,6 +21,23 @@ try {
     )");
 } catch (PDOException $e) {}
 
+// Billing frequency: per-plan control over upfront vs monthly installments
+try { $pdo->exec("ALTER TABLE membership_plans ADD COLUMN billing_frequency ENUM('upfront','monthly') NOT NULL DEFAULT 'upfront'"); } catch (PDOException $e) {}
+
+// Tax-deductible flag for dependent care / camp programs
+try { $pdo->exec("ALTER TABLE membership_plans ADD COLUMN tax_deductible TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
+
+// Afterschool program support: fixed-term plans with start/end dates and proration
+try { $pdo->exec("ALTER TABLE membership_plans ADD COLUMN is_afterschool TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
+try { $pdo->exec("ALTER TABLE membership_plans ADD COLUMN program_start_date DATE DEFAULT NULL"); } catch (PDOException $e) {}
+try { $pdo->exec("ALTER TABLE membership_plans ADD COLUMN program_end_date DATE DEFAULT NULL"); } catch (PDOException $e) {}
+
+// Day-of-month for monthly billing (capped at 28 for safety)
+try { $pdo->exec("ALTER TABLE memberships ADD COLUMN billing_day TINYINT DEFAULT NULL"); } catch (PDOException $e) {}
+
+// Track how many monthly installments have been charged in the current cycle
+try { $pdo->exec("ALTER TABLE memberships ADD COLUMN monthly_charges_made INT NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
+
 $message = '';
 
 // Flash message from cron.php
@@ -34,14 +51,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['action'])) {
         switch ($_POST['action']) {
             case 'add_plan':
-                $stmt = $pdo->prepare("INSERT INTO membership_plans (name, description, duration_months, price, classes_per_week, status) VALUES (?, ?, ?, ?, ?, ?)");
-                $stmt->execute([sanitizeInput($_POST['name']), sanitizeInput($_POST['description']), $_POST['duration_months'], $_POST['price'], $_POST['classes_per_week'], $_POST['status']]);
+                $billing_freq = (isset($_POST['billing_frequency']) && $_POST['billing_frequency'] === 'monthly') ? 'monthly' : 'upfront';
+                $reg_fee = max(0, (float) ($_POST['registration_fee'] ?? 0));
+                $tax_ded = isset($_POST['tax_deductible']) ? 1 : 0;
+                $is_afterschool = isset($_POST['is_afterschool']) ? 1 : 0;
+                $program_start = $is_afterschool ? (trim($_POST['program_start_date'] ?? '') ?: null) : null;
+                $program_end   = $is_afterschool ? (trim($_POST['program_end_date']   ?? '') ?: null) : null;
+
+                if ($is_afterschool && (!$program_start || !$program_end || $program_end <= $program_start)) {
+                    $message = showAlert('Afterschool plans require a valid start date before the end date.', 'error');
+                    break;
+                }
+
+                // Auto-compute duration_months from program dates for afterschool plans
+                $duration_months = $is_afterschool
+                    ? max(1, (int) round((strtotime($program_end) - strtotime($program_start)) / (30.44 * 86400)))
+                    : (int) $_POST['duration_months'];
+
+                $stmt = $pdo->prepare("INSERT INTO membership_plans (name, description, duration_months, price, classes_per_week, status, billing_frequency, registration_fee, tax_deductible, is_afterschool, program_start_date, program_end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->execute([sanitizeInput($_POST['name']), sanitizeInput($_POST['description']), $duration_months, $_POST['price'], $_POST['classes_per_week'], $_POST['status'], $billing_freq, $reg_fee, $tax_ded, $is_afterschool, $program_start, $program_end]);
                 $message = showAlert('Membership plan created successfully!', 'success');
                 break;
 
             case 'edit_plan':
-                $stmt = $pdo->prepare("UPDATE membership_plans SET name = ?, description = ?, duration_months = ?, price = ?, classes_per_week = ?, status = ? WHERE id = ?");
-                $stmt->execute([sanitizeInput($_POST['name']), sanitizeInput($_POST['description']), $_POST['duration_months'], $_POST['price'], $_POST['classes_per_week'], $_POST['status'], $_POST['plan_id']]);
+                $billing_freq = (isset($_POST['billing_frequency']) && $_POST['billing_frequency'] === 'monthly') ? 'monthly' : 'upfront';
+                $reg_fee = max(0, (float) ($_POST['registration_fee'] ?? 0));
+                $tax_ded = isset($_POST['tax_deductible']) ? 1 : 0;
+                $is_afterschool = isset($_POST['is_afterschool']) ? 1 : 0;
+                $program_start = $is_afterschool ? (trim($_POST['program_start_date'] ?? '') ?: null) : null;
+                $program_end   = $is_afterschool ? (trim($_POST['program_end_date']   ?? '') ?: null) : null;
+
+                if ($is_afterschool && (!$program_start || !$program_end || $program_end <= $program_start)) {
+                    $message = showAlert('Afterschool plans require a valid start date before the end date.', 'error');
+                    break;
+                }
+
+                // Auto-compute duration_months from program dates for afterschool plans
+                $duration_months = $is_afterschool
+                    ? max(1, (int) round((strtotime($program_end) - strtotime($program_start)) / (30.44 * 86400)))
+                    : (int) $_POST['duration_months'];
+
+                $stmt = $pdo->prepare("UPDATE membership_plans SET name = ?, description = ?, duration_months = ?, price = ?, classes_per_week = ?, status = ?, billing_frequency = ?, registration_fee = ?, tax_deductible = ?, is_afterschool = ?, program_start_date = ?, program_end_date = ? WHERE id = ?");
+                $stmt->execute([sanitizeInput($_POST['name']), sanitizeInput($_POST['description']), $duration_months, $_POST['price'], $_POST['classes_per_week'], $_POST['status'], $billing_freq, $reg_fee, $tax_ded, $is_afterschool, $program_start, $program_end, $_POST['plan_id']]);
                 $message = showAlert('Membership plan updated successfully!', 'success');
                 break;
 
@@ -61,13 +112,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $plan_id = $_POST['plan_id'];
                 $auto_renew = isset($_POST['auto_renew']) ? 1 : 0;
 
-                $plan = $pdo->prepare("SELECT duration_months, price FROM membership_plans WHERE id = ?");
+                $plan = $pdo->prepare("SELECT duration_months, price, billing_frequency, is_afterschool, program_start_date, program_end_date FROM membership_plans WHERE id = ?");
                 $plan->execute([$plan_id]);
                 $plan_data = $plan->fetch();
-                $end_date = date('Y-m-d', strtotime($start_date . ' + ' . $plan_data['duration_months'] . ' months'));
 
-                $stmt = $pdo->prepare("INSERT INTO memberships (student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, auto_renew) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-                $stmt->execute([$_POST['student_id'], $plan_id, $start_date, $end_date, 'active', $_POST['payment_status'], $_POST['amount_paid'], $auto_renew]);
+                // Afterschool plans: use fixed program end date, force no auto-renew
+                if (!empty($plan_data['is_afterschool'])) {
+                    if ($start_date > $plan_data['program_end_date']) {
+                        $message = showAlert('Cannot enroll — this afterschool program has already ended.', 'error');
+                        break;
+                    }
+                    $end_date = $plan_data['program_end_date'];
+                    $auto_renew = 0;
+                } else {
+                    $end_date = date('Y-m-d', strtotime($start_date . ' + ' . $plan_data['duration_months'] . ' months'));
+                }
+
+                // For monthly plans, set billing_day (capped at 28) and monthly_charges_made
+                $billing_day = null;
+                $monthly_charges = 0;
+                if (($plan_data['billing_frequency'] ?? 'upfront') === 'monthly') {
+                    $billing_day = min((int) date('j', strtotime($start_date)), 28);
+                    // If the admin marked it as paid, count the first installment
+                    if ($_POST['payment_status'] === 'paid' && $_POST['amount_paid'] > 0) {
+                        $monthly_charges = 1;
+                    }
+                }
+
+                $stmt = $pdo->prepare("INSERT INTO memberships (student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, auto_renew, billing_day, monthly_charges_made) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$_POST['student_id'], $plan_id, $start_date, $end_date, 'active', $_POST['payment_status'], $_POST['amount_paid'], $auto_renew, $billing_day, $monthly_charges]);
 
                 if ($_POST['payment_status'] === 'paid' && $_POST['amount_paid'] > 0) {
                     $membership_id = $pdo->lastInsertId();
@@ -96,7 +169,7 @@ $plans = $pdo->query("SELECT * FROM membership_plans ORDER BY price ASC")->fetch
 
 // Get memberships (filtered)
 $status_filter = $_GET['status'] ?? 'active';
-$query = "SELECT m.*, s.first_name, s.last_name, s.email, mp.name as plan_name, mp.price as plan_price FROM memberships m JOIN students s ON m.student_id = s.id JOIN membership_plans mp ON m.plan_id = mp.id WHERE 1=1";
+$query = "SELECT m.*, s.first_name, s.last_name, s.email, mp.name as plan_name, mp.price as plan_price, mp.billing_frequency FROM memberships m JOIN students s ON m.student_id = s.id JOIN membership_plans mp ON m.plan_id = mp.id WHERE 1=1";
 if ($status_filter) { $query .= " AND m.status = :status"; }
 $query .= " ORDER BY m.created_at DESC";
 $stmt = $pdo->prepare($query);
@@ -162,19 +235,46 @@ include 'includes/header.php';
                 <div class="bg-white rounded-lg shadow-lg overflow-hidden">
                     <div class="bg-gradient-to-r from-blue-500 to-blue-600 text-white p-6">
                         <h3 class="text-2xl font-bold mb-2"><?php echo $plan['name']; ?></h3>
-                        <p class="text-3xl font-bold"><?php echo formatMoney($plan['price']); ?></p>
-                        <p class="text-sm opacity-90">per <?php echo $plan['duration_months']; ?> month(s)</p>
+                        <?php
+                        $isMonthly = (isset($plan['billing_frequency']) && $plan['billing_frequency'] === 'monthly' && $plan['duration_months'] > 1);
+                        $monthlyAmount = $isMonthly ? round($plan['price'] / $plan['duration_months'], 2) : 0;
+                        ?>
+                        <?php if ($isMonthly): ?>
+                            <p class="text-3xl font-bold"><?php echo formatMoney($monthlyAmount); ?><span class="text-base font-normal">/mo</span></p>
+                            <p class="text-sm opacity-90"><?php echo formatMoney($plan['price']); ?> total over <?php echo $plan['duration_months']; ?> months</p>
+                        <?php else: ?>
+                            <p class="text-3xl font-bold"><?php echo formatMoney($plan['price']); ?></p>
+                            <p class="text-sm opacity-90">per <?php echo $plan['duration_months']; ?> month(s)</p>
+                        <?php endif; ?>
+                        <?php if (isset($plan['registration_fee']) && $plan['registration_fee'] > 0): ?>
+                            <p class="text-sm opacity-90">+ <?php echo formatMoney($plan['registration_fee']); ?> registration fee</p>
+                        <?php endif; ?>
                     </div>
                     <div class="p-6">
                         <p class="text-gray-700 mb-4"><?php echo $plan['description']; ?></p>
                         <ul class="space-y-2 text-gray-600">
                             <li>&#10003; <?php echo $plan['classes_per_week'] == 99 ? 'Unlimited' : $plan['classes_per_week']; ?> classes/week</li>
                             <li>&#10003; <?php echo $plan['duration_months']; ?> month duration</li>
-                            <li>&#10003; Auto-renewable subscription</li>
+                            <li>&#10003; <?php echo $isMonthly ? 'Billed monthly' : 'Billed upfront'; ?></li>
+                            <?php if (!empty($plan['is_afterschool'])): ?>
+                                <li>&#10003; Fixed-term (no auto-renewal)</li>
+                                <li>&#10003; Mid-program proration available</li>
+                            <?php else: ?>
+                                <li>&#10003; Auto-renewable subscription</li>
+                            <?php endif; ?>
                         </ul>
-                        <div class="mt-4">
+                        <div class="mt-4 flex items-center gap-2 flex-wrap">
                             <span class="px-3 py-1 text-sm rounded-full <?php echo $plan['status'] === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'; ?>"><?php echo ucfirst($plan['status']); ?></span>
+                            <?php if (!empty($plan['is_afterschool'])): ?>
+                                <span class="px-3 py-1 text-sm rounded-full bg-indigo-100 text-indigo-800 font-semibold">Afterschool</span>
+                            <?php endif; ?>
+                            <?php if (!empty($plan['tax_deductible'])): ?>
+                                <span class="px-3 py-1 text-sm rounded-full bg-green-100 text-green-800 font-semibold">Tax-Deductible</span>
+                            <?php endif; ?>
                         </div>
+                        <?php if (!empty($plan['is_afterschool']) && $plan['program_start_date'] && $plan['program_end_date']): ?>
+                            <p class="text-sm text-indigo-700 mt-2">&#128197; Program: <?php echo date('M j, Y', strtotime($plan['program_start_date'])); ?> &ndash; <?php echo date('M j, Y', strtotime($plan['program_end_date'])); ?></p>
+                        <?php endif; ?>
                         <?php if (getCurrentUser()['role'] === 'admin'): ?>
                         <div class="mt-4 pt-4 border-t border-gray-200 flex space-x-2">
                             <button onclick="editPlan(<?php echo htmlspecialchars(json_encode($plan)); ?>)" class="flex-1 text-blue-600 hover:text-blue-800 text-sm font-medium">Edit</button>
@@ -219,7 +319,13 @@ include 'includes/header.php';
                             <div class="font-medium text-gray-900"><?php echo $m['first_name'] . ' ' . $m['last_name']; ?></div>
                             <div class="text-sm text-gray-500"><?php echo $m['email']; ?></div>
                         </td>
-                        <td class="px-6 py-4 whitespace-nowrap"><div class="text-sm text-gray-900"><?php echo $m['plan_name']; ?></div><div class="text-sm text-gray-500"><?php echo formatMoney($m['plan_price']); ?></div></td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm text-gray-900"><?php echo $m['plan_name']; ?></div>
+                            <div class="text-sm text-gray-500"><?php echo formatMoney($m['plan_price']); ?></div>
+                            <?php if (isset($m['billing_day']) && $m['billing_day']): ?>
+                                <div class="text-xs text-blue-600">Monthly &middot; Day <?php echo $m['billing_day']; ?></div>
+                            <?php endif; ?>
+                        </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                             <?php echo formatDate($m['start_date']); ?> &ndash; <?php echo formatDate($m['end_date']); ?>
                             <?php $days_left = (strtotime($m['end_date']) - time()) / 86400; if ($m['status'] === 'active' && $days_left > 0 && $days_left <= 30): ?>
@@ -274,12 +380,54 @@ include 'includes/header.php';
             <input type="hidden" name="action" value="add_plan">
             <div><label class="block text-sm font-medium text-gray-700 mb-1">Plan Name *</label><input type="text" name="name" required placeholder="e.g., Premium Monthly" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"></div>
             <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><textarea name="description" rows="2" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"></textarea></div>
-            <div class="grid grid-cols-3 gap-4">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Duration (months) *</label><input type="number" name="duration_months" min="1" required value="1" class="w-full px-3 py-2 border border-gray-300 rounded-lg"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Price *</label><input type="number" name="price" step="0.01" min="0" required class="w-full px-3 py-2 border border-gray-300 rounded-lg"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Classes/Week *</label><input type="number" name="classes_per_week" min="1" max="99" required placeholder="99=unlimited" class="w-full px-3 py-2 border border-gray-300 rounded-lg"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Registration Fee</label><input type="number" name="registration_fee" step="0.01" min="0" value="0" class="w-full px-3 py-2 border border-gray-300 rounded-lg"><p class="text-xs text-gray-500 mt-1">One-time fee for new enrollees</p></div>
             </div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Status</label><select name="status" class="w-full px-3 py-2 border border-gray-300 rounded-lg"><option value="active">Active</option><option value="inactive">Inactive</option></select></div>
+            <div class="grid grid-cols-2 gap-4">
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Status</label><select name="status" class="w-full px-3 py-2 border border-gray-300 rounded-lg"><option value="active">Active</option><option value="inactive">Inactive</option></select></div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Billing Frequency</label>
+                    <select name="billing_frequency" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                        <option value="upfront">Upfront (full price at once)</option>
+                        <option value="monthly">Monthly Installments</option>
+                    </select>
+                    <p class="text-xs text-gray-500 mt-1">Monthly = total price &divide; duration charged each month</p>
+                </div>
+            </div>
+            <div class="bg-green-50 border border-green-200 rounded-lg p-3">
+                <label class="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" name="tax_deductible" value="1" class="w-5 h-5 text-green-600 border-gray-300 rounded focus:ring-green-500">
+                    <div>
+                        <span class="text-sm font-medium text-gray-700">Tax-Deductible (Afterschool/Camp)</span>
+                        <p class="text-xs text-gray-500 mt-0.5">Mark if this plan qualifies as dependent care for tax purposes</p>
+                    </div>
+                </label>
+            </div>
+            <div class="bg-indigo-50 border border-indigo-200 rounded-lg p-3">
+                <label class="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" name="is_afterschool" value="1" id="add_is_afterschool" onchange="toggleAfterschoolFields('add')" class="w-5 h-5 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
+                    <div>
+                        <span class="text-sm font-medium text-gray-700">Afterschool Program (Fixed Term)</span>
+                        <p class="text-xs text-gray-500 mt-0.5">Set a fixed start &amp; end date — students enrolling mid-program pay a prorated amount</p>
+                    </div>
+                </label>
+                <div id="add_afterschool_fields" class="hidden mt-3 grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Program Start Date *</label>
+                        <input type="date" name="program_start_date" id="add_program_start_date" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-indigo-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Program End Date *</label>
+                        <input type="date" name="program_end_date" id="add_program_end_date" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-indigo-500">
+                    </div>
+                    <div class="col-span-2">
+                        <p class="text-xs text-indigo-600">&#128161; Duration will be auto-calculated from the program dates. Auto-renewal is disabled for afterschool plans.</p>
+                    </div>
+                </div>
+            </div>
             <div class="flex justify-end space-x-3 pt-4">
                 <button type="button" onclick="document.getElementById('addPlanModal').classList.add('hidden')" class="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Cancel</button>
                 <button type="submit" class="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg">Create Plan</button>
@@ -322,12 +470,54 @@ include 'includes/header.php';
             <input type="hidden" name="action" value="edit_plan"><input type="hidden" name="plan_id" id="edit_plan_id">
             <div><label class="block text-sm font-medium text-gray-700 mb-1">Plan Name *</label><input type="text" name="name" id="edit_name" required class="w-full px-3 py-2 border border-gray-300 rounded-lg"></div>
             <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><textarea name="description" id="edit_description" rows="2" class="w-full px-3 py-2 border border-gray-300 rounded-lg"></textarea></div>
-            <div class="grid grid-cols-3 gap-4">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Duration (months)</label><input type="number" name="duration_months" id="edit_duration_months" min="1" required class="w-full px-3 py-2 border border-gray-300 rounded-lg"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Price</label><input type="number" name="price" id="edit_price" step="0.01" min="0" required class="w-full px-3 py-2 border border-gray-300 rounded-lg"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Classes/Week</label><input type="number" name="classes_per_week" id="edit_classes_per_week" min="1" max="99" required class="w-full px-3 py-2 border border-gray-300 rounded-lg"></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Registration Fee</label><input type="number" name="registration_fee" id="edit_registration_fee" step="0.01" min="0" value="0" class="w-full px-3 py-2 border border-gray-300 rounded-lg"><p class="text-xs text-gray-500 mt-1">One-time fee for new enrollees</p></div>
             </div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Status</label><select name="status" id="edit_status" class="w-full px-3 py-2 border border-gray-300 rounded-lg"><option value="active">Active</option><option value="inactive">Inactive</option></select></div>
+            <div class="grid grid-cols-2 gap-4">
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Status</label><select name="status" id="edit_status" class="w-full px-3 py-2 border border-gray-300 rounded-lg"><option value="active">Active</option><option value="inactive">Inactive</option></select></div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Billing Frequency</label>
+                    <select name="billing_frequency" id="edit_billing_frequency" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                        <option value="upfront">Upfront (full price at once)</option>
+                        <option value="monthly">Monthly Installments</option>
+                    </select>
+                    <p class="text-xs text-gray-500 mt-1">Monthly = total price &divide; duration charged each month</p>
+                </div>
+            </div>
+            <div class="bg-green-50 border border-green-200 rounded-lg p-3">
+                <label class="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" name="tax_deductible" value="1" id="edit_tax_deductible" class="w-5 h-5 text-green-600 border-gray-300 rounded focus:ring-green-500">
+                    <div>
+                        <span class="text-sm font-medium text-gray-700">Tax-Deductible (Afterschool/Camp)</span>
+                        <p class="text-xs text-gray-500 mt-0.5">Mark if this plan qualifies as dependent care for tax purposes</p>
+                    </div>
+                </label>
+            </div>
+            <div class="bg-indigo-50 border border-indigo-200 rounded-lg p-3">
+                <label class="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" name="is_afterschool" value="1" id="edit_is_afterschool" onchange="toggleAfterschoolFields('edit')" class="w-5 h-5 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
+                    <div>
+                        <span class="text-sm font-medium text-gray-700">Afterschool Program (Fixed Term)</span>
+                        <p class="text-xs text-gray-500 mt-0.5">Set a fixed start &amp; end date — students enrolling mid-program pay a prorated amount</p>
+                    </div>
+                </label>
+                <div id="edit_afterschool_fields" class="hidden mt-3 grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Program Start Date *</label>
+                        <input type="date" name="program_start_date" id="edit_program_start_date" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-indigo-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Program End Date *</label>
+                        <input type="date" name="program_end_date" id="edit_program_end_date" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-indigo-500">
+                    </div>
+                    <div class="col-span-2">
+                        <p class="text-xs text-indigo-600">&#128161; Duration will be auto-calculated from the program dates. Auto-renewal is disabled for afterschool plans.</p>
+                    </div>
+                </div>
+            </div>
             <div class="flex justify-end space-x-3 pt-4">
                 <button type="button" onclick="document.getElementById('editPlanModal').classList.add('hidden')" class="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Cancel</button>
                 <button type="submit" class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Update Plan</button>
@@ -337,6 +527,51 @@ include 'includes/header.php';
 </div>
 
 <script>
+function toggleAfterschoolFields(prefix) {
+    var checked = document.getElementById(prefix + '_is_afterschool').checked;
+    var fields = document.getElementById(prefix + '_afterschool_fields');
+    var durationInput = document.querySelector('#' + prefix + (prefix === 'add' ? 'PlanModal' : 'PlanModal') + ' input[name="duration_months"]')
+                     || document.getElementById(prefix + '_duration_months');
+
+    if (checked) {
+        fields.classList.remove('hidden');
+        // For add modal, find the duration field by name in the parent form
+        if (prefix === 'add') {
+            var addForm = document.querySelector('#addPlanModal form');
+            var durField = addForm ? addForm.querySelector('input[name="duration_months"]') : null;
+            if (durField) {
+                durField.closest('div').style.opacity = '0.4';
+                durField.removeAttribute('required');
+                durField.value = '';
+                durField.placeholder = 'Auto';
+            }
+        } else {
+            if (durationInput) {
+                durationInput.closest('div').style.opacity = '0.4';
+                durationInput.removeAttribute('required');
+                durationInput.placeholder = 'Auto';
+            }
+        }
+    } else {
+        fields.classList.add('hidden');
+        if (prefix === 'add') {
+            var addForm = document.querySelector('#addPlanModal form');
+            var durField = addForm ? addForm.querySelector('input[name="duration_months"]') : null;
+            if (durField) {
+                durField.closest('div').style.opacity = '1';
+                durField.setAttribute('required', 'required');
+                durField.placeholder = '';
+            }
+        } else {
+            if (durationInput) {
+                durationInput.closest('div').style.opacity = '1';
+                durationInput.setAttribute('required', 'required');
+                durationInput.placeholder = '';
+            }
+        }
+    }
+}
+
 function editPlan(plan) {
     document.getElementById('edit_plan_id').value = plan.id;
     document.getElementById('edit_name').value = plan.name;
@@ -345,6 +580,17 @@ function editPlan(plan) {
     document.getElementById('edit_price').value = plan.price;
     document.getElementById('edit_classes_per_week').value = plan.classes_per_week;
     document.getElementById('edit_status').value = plan.status;
+    document.getElementById('edit_billing_frequency').value = plan.billing_frequency || 'upfront';
+    document.getElementById('edit_registration_fee').value = plan.registration_fee || 0;
+    document.getElementById('edit_tax_deductible').checked = (plan.tax_deductible == 1);
+
+    // Afterschool fields
+    var isAfterschool = (plan.is_afterschool == 1);
+    document.getElementById('edit_is_afterschool').checked = isAfterschool;
+    document.getElementById('edit_program_start_date').value = plan.program_start_date || '';
+    document.getElementById('edit_program_end_date').value = plan.program_end_date || '';
+    toggleAfterschoolFields('edit');
+
     document.getElementById('editPlanModal').classList.remove('hidden');
 }
 </script>

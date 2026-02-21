@@ -13,15 +13,92 @@ try {
 
 $message = '';
 
+// --- Migration: create rooms table and add room_id to classes ---
+try {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS rooms (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        sort_order INT DEFAULT 0,
+        status ENUM('active','inactive') DEFAULT 'active',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )");
+} catch (PDOException $e) {}
+try {
+    $pdo->exec("ALTER TABLE classes ADD COLUMN room_id INT DEFAULT NULL");
+} catch (PDOException $e) {} // column already exists — ignore
+// Seed a default room if none exist
+try {
+    $roomCount = $pdo->query("SELECT COUNT(*) FROM rooms")->fetchColumn();
+    if ($roomCount == 0) {
+        $pdo->exec("INSERT INTO rooms (name, sort_order) VALUES ('Main Room', 1)");
+    }
+} catch (PDOException $e) {}
+
+// --- Migration: expand skill_level ENUM with new warrior/belt levels ---
+try {
+    $pdo->exec("ALTER TABLE classes MODIFY COLUMN skill_level
+        ENUM('beginner','intermediate','advanced','all',
+             'black_belt','ninja','beginner_warrior','intermediate_warrior','advanced_warrior')
+        DEFAULT 'all'");
+} catch (PDOException $e) {}
+
+// AJAX handler for schedule drag-and-drop updates (must come BEFORE verify_csrf)
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'update_schedule' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    header('Content-Type: application/json');
+    $classId = (int)($_POST['class_id'] ?? 0);
+    $newDay = $_POST['day_of_week'] ?? '';
+    $newRoomId = isset($_POST['room_id']) ? (int)$_POST['room_id'] : null;
+    $newStartTime = $_POST['start_time'] ?? null;
+    $validDays = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+    if (!$classId || !in_array($newDay, $validDays)) {
+        echo json_encode(['success' => false, 'error' => 'Invalid parameters']);
+        exit;
+    }
+    try {
+        $updates = ['day_of_week = ?'];
+        $params = [$newDay];
+
+        if ($newRoomId) {
+            $updates[] = 'room_id = ?';
+            $params[] = $newRoomId;
+        }
+
+        if ($newStartTime && preg_match('/^\d{2}:\d{2}$/', $newStartTime)) {
+            // Preserve class duration: compute new end_time from old duration
+            $old = $pdo->prepare("SELECT start_time, end_time FROM classes WHERE id = ?");
+            $old->execute([$classId]);
+            $oldRow = $old->fetch();
+            if ($oldRow) {
+                $oldDuration = strtotime($oldRow['end_time']) - strtotime($oldRow['start_time']);
+                $newEndTime = date('H:i:s', strtotime($newStartTime) + $oldDuration);
+                $updates[] = 'start_time = ?';
+                $params[] = $newStartTime . ':00';
+                $updates[] = 'end_time = ?';
+                $params[] = $newEndTime;
+            }
+        }
+
+        $params[] = $classId;
+        $sql = 'UPDATE classes SET ' . implode(', ', $updates) . ' WHERE id = ?';
+        $pdo->prepare($sql)->execute($params);
+
+        echo json_encode(['success' => true]);
+    } catch (PDOException $e) {
+        echo json_encode(['success' => false, 'error' => 'Database error']);
+    }
+    exit;
+}
+
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    verify_csrf();
     if (isset($_POST['action'])) {
         switch ($_POST['action']) {
             case 'add':
                 $stmt = $pdo->prepare("
                     INSERT INTO classes (name, style_id, instructor_id, day_of_week, start_time,
-                                       end_time, max_students, skill_level, description, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       end_time, max_students, skill_level, description, status, room_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
                 $stmt->execute([
                     sanitizeInput($_POST['name']),
@@ -33,7 +110,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $_POST['max_students'] ?: 20,
                     $_POST['skill_level'],
                     sanitizeInput($_POST['description']),
-                    $_POST['status']
+                    $_POST['status'],
+                    $_POST['room_id'] ?: null
                 ]);
                 $message = showAlert('Class created successfully!', 'success');
                 break;
@@ -115,6 +193,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $message = showAlert('Student unenrolled successfully!', 'success');
                 break;
 
+            case 'edit':
+                $stmt = $pdo->prepare("
+                    UPDATE classes SET name=?, style_id=?, instructor_id=?, day_of_week=?,
+                        start_time=?, end_time=?, max_students=?, skill_level=?, description=?, status=?, room_id=?
+                    WHERE id = ?
+                ");
+                $stmt->execute([
+                    sanitizeInput($_POST['name']),
+                    $_POST['style_id'],
+                    $_POST['instructor_id'] ?: null,
+                    $_POST['day_of_week'],
+                    $_POST['start_time'],
+                    $_POST['end_time'],
+                    $_POST['max_students'] ?: 20,
+                    $_POST['skill_level'],
+                    sanitizeInput($_POST['description']),
+                    $_POST['status'],
+                    $_POST['room_id'] ?: null,
+                    $_POST['class_id']
+                ]);
+                $message = showAlert('Class updated successfully!', 'success');
+                break;
+
             case 'delete':
                 $stmt = $pdo->prepare("DELETE FROM classes WHERE id = ?");
                 $stmt->execute([$_POST['class_id']]);
@@ -126,21 +227,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // Get all classes with enrollment counts
 $day_filter = $_GET['day'] ?? '';
+$room_filter = $_GET['room'] ?? '';
+
+// Fetch active rooms for dropdowns, filters, and tabs
+$rooms = $pdo->query("SELECT * FROM rooms WHERE status='active' ORDER BY sort_order, name")->fetchAll();
+// Also fetch all rooms (including inactive) for display on existing classes
+$allRooms = $pdo->query("SELECT * FROM rooms ORDER BY sort_order, name")->fetchAll();
 
 $query = "
     SELECT c.*,
            u.full_name as instructor_name,
            mas.name as style_name,
+           r.name as room_name,
+           r.status as room_status,
            COUNT(ce.id) as enrolled_count
     FROM classes c
     LEFT JOIN users u ON c.instructor_id = u.id
     LEFT JOIN martial_arts_styles mas ON c.style_id = mas.id
+    LEFT JOIN rooms r ON c.room_id = r.id
     LEFT JOIN class_enrollments ce ON c.id = ce.class_id AND ce.status = 'active'
     WHERE 1=1
 ";
 
 if ($day_filter) {
     $query .= " AND c.day_of_week = :day";
+}
+if ($room_filter) {
+    $query .= " AND c.room_id = :room";
 }
 
 $query .= " GROUP BY c.id ORDER BY
@@ -150,6 +263,9 @@ $query .= " GROUP BY c.id ORDER BY
 $stmt = $pdo->prepare($query);
 if ($day_filter) {
     $stmt->bindValue(':day', $day_filter);
+}
+if ($room_filter) {
+    $stmt->bindValue(':room', (int)$room_filter, PDO::PARAM_INT);
 }
 $stmt->execute();
 $classes = $stmt->fetchAll();
@@ -181,28 +297,54 @@ include 'includes/header.php';
 
     <div class="flex justify-between items-center mb-6">
         <h1 class="text-3xl font-bold text-gray-800">Classes</h1>
-        <button onclick="document.getElementById('addModal').classList.remove('hidden')"
+        <button onclick="openAddModal()"
                 class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium">
             + Add Class
         </button>
     </div>
 
-    <!-- Filter by Day -->
+    <!-- View Toggle + Day Filter + Room Filter -->
     <div class="bg-white rounded-lg shadow p-4 mb-6">
-        <div class="flex flex-wrap gap-2">
-            <a href="classes.php" class="px-4 py-2 rounded-lg text-sm <?php echo $day_filter === '' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'; ?>">
-                All Days
-            </a>
-            <?php foreach (['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as $day): ?>
-                <a href="?day=<?php echo $day; ?>"
-                   class="px-4 py-2 rounded-lg text-sm <?php echo $day_filter === $day ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'; ?>">
-                    <?php echo $day; ?>
+        <div class="flex flex-wrap items-center justify-between gap-4">
+            <div class="flex flex-wrap gap-2">
+                <a href="classes.php<?php echo $room_filter ? '?room='.$room_filter : ''; ?>" class="px-4 py-2 rounded-lg text-sm <?php echo $day_filter === '' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'; ?>">
+                    All Days
                 </a>
-            <?php endforeach; ?>
+                <?php foreach (['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as $day): ?>
+                    <a href="?day=<?php echo $day; ?><?php echo $room_filter ? '&room='.$room_filter : ''; ?>"
+                       class="px-4 py-2 rounded-lg text-sm <?php echo $day_filter === $day ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'; ?>">
+                        <?php echo $day; ?>
+                    </a>
+                <?php endforeach; ?>
+            </div>
+            <div class="flex items-center gap-3">
+                <?php if (count($rooms) > 1): ?>
+                <select onchange="filterByRoom(this.value)"
+                        class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500">
+                    <option value="">All Rooms</option>
+                    <?php foreach ($rooms as $room): ?>
+                        <option value="<?php echo $room['id']; ?>" <?php echo $room_filter == $room['id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($room['name']); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <?php endif; ?>
+                <div class="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+                    <button id="btnCardView" onclick="setView('cards')"
+                            class="px-4 py-1.5 rounded-md text-sm font-medium bg-white shadow text-gray-800">
+                        Cards
+                    </button>
+                    <button id="btnScheduleView" onclick="setView('schedule')"
+                            class="px-4 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700">
+                        Schedule
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
 
-    <!-- Classes by Day -->
+    <!-- Classes by Day (Card View) -->
+    <div id="cardView">
     <?php
     $days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
     if ($day_filter) {
@@ -255,8 +397,20 @@ include 'includes/header.php';
 
                                     <div class="flex items-center text-sm text-gray-600">
                                         <span class="mr-2">&#128202;</span>
-                                        <span class="capitalize"><?php echo $class['skill_level']; ?> Level</span>
+                                        <span><?php echo skillLevelLabel($class['skill_level']); ?></span>
                                     </div>
+
+                                    <?php if ($class['room_name']): ?>
+                                        <div class="flex items-center text-sm text-gray-600">
+                                            <span class="mr-2">&#127970;</span>
+                                            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                                                <?php echo htmlspecialchars($class['room_name']); ?>
+                                                <?php if ($class['room_status'] === 'inactive'): ?>
+                                                    <span class="ml-1 text-red-500">(Inactive)</span>
+                                                <?php endif; ?>
+                                            </span>
+                                        </div>
+                                    <?php endif; ?>
                                 </div>
 
                                 <?php if ($class['description']): ?>
@@ -277,7 +431,16 @@ include 'includes/header.php';
                                                 class="text-green-600 hover:text-green-900 text-sm">
                                             Roster
                                         </button>
+                                        <button onclick="editClass(<?php echo htmlspecialchars(json_encode($class), ENT_QUOTES); ?>)"
+                                                class="text-yellow-600 hover:text-yellow-900 text-sm">
+                                            Edit
+                                        </button>
+                                        <button onclick="copyClass(<?php echo htmlspecialchars(json_encode($class), ENT_QUOTES); ?>)"
+                                                class="text-purple-600 hover:text-purple-900 text-sm">
+                                            Copy
+                                        </button>
                                         <form method="POST" class="inline" onsubmit="return confirmDelete('Delete this class?')">
+                                            <?php echo csrf_field(); ?>
                                             <input type="hidden" name="action" value="delete">
                                             <input type="hidden" name="class_id" value="<?php echo $class['id']; ?>">
                                             <button type="submit" class="text-red-600 hover:text-red-900 text-sm">Delete</button>
@@ -291,6 +454,222 @@ include 'includes/header.php';
             <?php endif; ?>
         </div>
     <?php endforeach; ?>
+    </div><!-- /cardView -->
+
+    <!-- Weekly Schedule (Kanban View with Time Slots) -->
+    <div id="scheduleView" class="hidden">
+        <?php if (count($rooms) > 1): ?>
+        <div class="flex flex-wrap gap-2 mb-4" id="roomTabs">
+            <button onclick="filterKanbanRoom('')"
+                    class="room-tab px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white"
+                    data-room="">
+                All Rooms
+            </button>
+            <?php foreach ($rooms as $room): ?>
+                <button onclick="filterKanbanRoom('<?php echo $room['id']; ?>')"
+                        class="room-tab px-4 py-2 rounded-lg text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300"
+                        data-room="<?php echo $room['id']; ?>">
+                    <?php echo htmlspecialchars($room['name']); ?>
+                </button>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+
+        <?php
+        $hoursOfOp = getHoursOfOperation();
+        $slotInterval = getScheduleSlotInterval();
+        $dayNames = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+
+        // Build per-frame slot data with 1-hour padding
+        $frameSlotsData = [];
+        foreach ($hoursOfOp as $fi => $frame) {
+            $frameSlotsData[$fi] = generateTimeSlotsForFrame($frame, $slotInterval);
+        }
+
+        // Assign each class to the best board (frame index), or mark as orphan
+        $classBoardAssignment = []; // classId => frameIndex
+        $orphanedClasses = [];
+
+        foreach ($classes as $c) {
+            $classStartTs = strtotime($c['start_time']);
+            $assigned = false;
+
+            // Priority 1: class falls within a frame's actual operating hours
+            foreach ($hoursOfOp as $fi => $frame) {
+                $fStart = strtotime($frame['start']);
+                $fEnd   = strtotime($frame['end']);
+                if ($classStartTs >= $fStart && $classStartTs < $fEnd) {
+                    $classBoardAssignment[$c['id']] = $fi;
+                    $assigned = true;
+                    break;
+                }
+            }
+
+            // Priority 2: class falls in a padding zone — assign to nearest frame
+            if (!$assigned) {
+                $bestFrame = null;
+                $bestDistance = PHP_INT_MAX;
+                foreach ($hoursOfOp as $fi => $frame) {
+                    $pStart = strtotime($frameSlotsData[$fi]['slots'][0] ?? $frame['start']);
+                    $pEnd   = strtotime(end($frameSlotsData[$fi]['slots']) ?? $frame['end']);
+                    if (is_array($frameSlotsData[$fi]['slots']) && !empty($frameSlotsData[$fi]['slots'])) {
+                        $pStart = strtotime($frameSlotsData[$fi]['slots'][0]);
+                        $lastSlot = $frameSlotsData[$fi]['slots'][count($frameSlotsData[$fi]['slots']) - 1];
+                        $pEnd = strtotime($lastSlot) + ($slotInterval * 60);
+                    }
+                    if ($classStartTs >= $pStart && $classStartTs < $pEnd) {
+                        $fStart = strtotime($frame['start']);
+                        $fEnd   = strtotime($frame['end']);
+                        $dist = min(abs($classStartTs - $fStart), abs($classStartTs - $fEnd));
+                        if ($dist < $bestDistance) {
+                            $bestDistance = $dist;
+                            $bestFrame = $fi;
+                        }
+                    }
+                }
+                if ($bestFrame !== null) {
+                    $classBoardAssignment[$c['id']] = $bestFrame;
+                    $assigned = true;
+                }
+            }
+
+            if (!$assigned) {
+                $orphanedClasses[] = $c;
+            }
+        }
+        ?>
+
+        <style>
+            .kanban-grid { min-width: 900px; }
+            .kanban-cell { border-right: 1px solid #e5e7eb; border-bottom: 1px solid #f3f4f6; }
+            .kanban-cell:hover { background-color: #f0f9ff; }
+            .kanban-cell-padding { background-color: #f9fafb; border-right: 1px solid #e5e7eb; border-bottom: 1px solid #f3f4f6; }
+            .kanban-cell-padding:hover { background-color: #f3f4f6; }
+            .kanban-time-padding { color: #d1d5db; }
+        </style>
+
+        <?php foreach ($hoursOfOp as $frameIndex => $frame):
+            $frameSlotInfo = $frameSlotsData[$frameIndex];
+            $frameLabel = htmlspecialchars($frame['label']);
+            $startFormatted = date('g:i A', strtotime($frame['start']));
+            $endFormatted   = date('g:i A', strtotime($frame['end']));
+        ?>
+
+        <div class="mb-8">
+            <h3 class="text-lg font-bold text-gray-700 mb-3">
+                <i class="fas fa-clock text-blue-500 mr-1"></i>
+                <?php echo $frameLabel; ?>
+                <span class="text-sm font-normal text-gray-500">
+                    (<?php echo $startFormatted; ?> &ndash; <?php echo $endFormatted; ?>)
+                </span>
+            </h3>
+
+            <div class="overflow-x-auto pb-2">
+                <div class="kanban-grid grid gap-px bg-gray-200 rounded-lg overflow-hidden"
+                     style="grid-template-columns: 80px repeat(7, minmax(120px, 1fr));">
+
+                    <!-- Header row: corner + day names -->
+                    <div class="bg-gray-100 p-2 text-xs font-bold text-gray-500 text-center sticky top-0 z-10">Time</div>
+                    <?php foreach ($dayNames as $kday): ?>
+                    <div class="bg-gray-100 p-2 sticky top-0 z-10">
+                        <h3 class="font-bold text-gray-700 text-sm text-center uppercase tracking-wider"><?php echo substr($kday, 0, 3); ?></h3>
+                    </div>
+                    <?php endforeach; ?>
+
+                    <!-- Time slot rows -->
+                    <?php foreach ($frameSlotInfo['slots'] as $slot):
+                        $slotTs = strtotime($slot);
+                        $frameStartTs = strtotime($frame['start']);
+                        $frameEndTs   = strtotime($frame['end']);
+                        $isPadding = ($slotTs < $frameStartTs || $slotTs >= $frameEndTs);
+                    ?>
+                        <!-- Time label cell -->
+                        <div class="bg-white p-1 text-xs text-right pr-2 flex items-center justify-end <?php echo $isPadding ? 'kanban-time-padding' : 'text-gray-500'; ?>"
+                             style="font-size: 11px; min-height: 52px;">
+                            <?php echo date('g:i A', $slotTs); ?>
+                        </div>
+
+                        <!-- Day cells for this time slot -->
+                        <?php foreach ($dayNames as $kday): ?>
+                        <div class="<?php echo $isPadding ? 'kanban-cell-padding' : 'bg-white kanban-cell'; ?> p-0.5 min-h-[52px] transition-colors"
+                             data-day="<?php echo $kday; ?>"
+                             data-time="<?php echo $slot; ?>"
+                             ondragover="event.preventDefault(); this.classList.add('bg-blue-50')"
+                             ondragleave="this.classList.remove('bg-blue-50')"
+                             ondrop="handleDrop(event, '<?php echo $kday; ?>', '<?php echo $slot; ?>'); this.classList.remove('bg-blue-50')">
+                            <?php
+                            // Render cards assigned to this board whose start_time falls in this slot
+                            $slotStart = $slotTs;
+                            $slotEnd = $slotStart + ($slotInterval * 60);
+                            $slotClasses = array_filter($classes, function($c) use ($kday, $slotStart, $slotEnd, $frameIndex, $classBoardAssignment) {
+                                if ($c['day_of_week'] !== $kday) return false;
+                                if (($classBoardAssignment[$c['id']] ?? -1) !== $frameIndex) return false;
+                                $classStart = strtotime($c['start_time']);
+                                return $classStart >= $slotStart && $classStart < $slotEnd;
+                            });
+                            foreach ($slotClasses as $kclass):
+                            ?>
+                            <div class="bg-white rounded shadow-sm p-1.5 cursor-move border-l-4 <?php echo $kclass['status'] === 'active' ? 'border-blue-500' : 'border-gray-300'; ?> hover:shadow-md transition-shadow kanban-card text-xs mb-0.5"
+                                 draggable="true"
+                                 data-class-id="<?php echo $kclass['id']; ?>"
+                                 data-room-id="<?php echo $kclass['room_id'] ?? ''; ?>"
+                                 data-start-time="<?php echo $kclass['start_time']; ?>"
+                                 data-end-time="<?php echo $kclass['end_time']; ?>"
+                                 ondragstart="handleDragStart(event, <?php echo $kclass['id']; ?>)">
+                                <div class="font-semibold text-gray-800 truncate" title="<?php echo htmlspecialchars($kclass['name']); ?>">
+                                    <?php echo htmlspecialchars($kclass['name']); ?>
+                                </div>
+                                <div class="text-blue-600 font-medium">
+                                    <?php echo date('g:i', strtotime($kclass['start_time'])); ?>-<?php echo date('g:i A', strtotime($kclass['end_time'])); ?>
+                                </div>
+                                <?php if ($kclass['instructor_name']): ?>
+                                    <div class="text-gray-400 truncate"><?php echo htmlspecialchars($kclass['instructor_name']); ?></div>
+                                <?php endif; ?>
+                                <?php if ($kclass['room_name']): ?>
+                                    <span class="inline-block px-1 py-0.5 rounded text-[9px] font-medium bg-indigo-100 text-indigo-700 mt-0.5">
+                                        <?php echo htmlspecialchars($kclass['room_name']); ?>
+                                    </span>
+                                <?php endif; ?>
+                                <div class="flex items-center justify-between mt-1 pt-0.5 border-t border-gray-100">
+                                    <span class="text-gray-400"><?php echo $kclass['enrolled_count']; ?>/<?php echo $kclass['max_students']; ?></span>
+                                    <button onclick="editClass(<?php echo htmlspecialchars(json_encode($kclass), ENT_QUOTES); ?>); event.stopPropagation();"
+                                            class="text-blue-600 hover:text-blue-800 font-medium">Edit</button>
+                                </div>
+                            </div>
+                            <?php endforeach; ?>
+                        </div>
+                        <?php endforeach; ?>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+        </div>
+
+        <?php endforeach; ?>
+
+        <p class="text-xs text-gray-400 mt-2 text-center">
+            Drag and drop classes to reschedule. Dropping onto a time slot updates both the day and start time.
+            <a href="settings.php" class="text-blue-500 hover:underline ml-1">Configure hours of operation</a>
+        </p>
+
+        <?php
+        // Classes Outside Configured Hours warning (orphanedClasses computed in board-assignment logic above)
+        if (!empty($orphanedClasses)): ?>
+        <div class="mt-4 bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+            <h4 class="text-sm font-semibold text-yellow-800 mb-2">Classes Outside Configured Hours</h4>
+            <p class="text-xs text-yellow-700 mb-2">These classes fall outside your configured hours of operation. Edit them or update your hours in <a href="settings.php" class="text-blue-600 hover:underline">Settings</a>.</p>
+            <div class="flex flex-wrap gap-2">
+                <?php foreach ($orphanedClasses as $oc): ?>
+                <div class="bg-white rounded p-2 shadow-sm border border-yellow-300 text-xs">
+                    <span class="font-medium"><?php echo htmlspecialchars($oc['name']); ?></span>
+                    <span class="text-gray-500 ml-1"><?php echo $oc['day_of_week']; ?> <?php echo date('g:i A', strtotime($oc['start_time'])); ?></span>
+                    <button onclick="editClass(<?php echo htmlspecialchars(json_encode($oc), ENT_QUOTES); ?>)"
+                            class="text-blue-600 hover:text-blue-800 ml-1 font-medium">Edit</button>
+                </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+        <?php endif; ?>
+    </div>
 </div>
 
 <!-- Add Class Modal -->
@@ -302,7 +681,8 @@ include 'includes/header.php';
                     class="text-gray-600 hover:text-gray-800">&#10005;</button>
         </div>
 
-        <form method="POST" class="space-y-4">
+        <form method="POST" class="space-y-4" id="addClassForm">
+            <?php echo csrf_field(); ?>
             <input type="hidden" name="action" value="add">
 
             <div>
@@ -364,7 +744,7 @@ include 'includes/header.php';
                 </div>
             </div>
 
-            <div class="grid grid-cols-3 gap-4">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Max Students</label>
                     <input type="number" name="max_students" min="1" value="20"
@@ -375,10 +755,9 @@ include 'includes/header.php';
                     <label class="block text-sm font-medium text-gray-700 mb-1">Skill Level *</label>
                     <select name="skill_level" required
                             class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
-                        <option value="all">All Levels</option>
-                        <option value="beginner">Beginner</option>
-                        <option value="intermediate">Intermediate</option>
-                        <option value="advanced">Advanced</option>
+                        <?php foreach (skillLevelOptions() as $val => $label): ?>
+                            <option value="<?php echo $val; ?>"><?php echo $label; ?></option>
+                        <?php endforeach; ?>
                     </select>
                 </div>
 
@@ -388,6 +767,17 @@ include 'includes/header.php';
                             class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
                         <option value="active">Active</option>
                         <option value="inactive">Inactive</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Room</label>
+                    <select name="room_id"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                        <option value="">No Room</option>
+                        <?php foreach ($rooms as $room): ?>
+                            <option value="<?php echo $room['id']; ?>"><?php echo htmlspecialchars($room['name']); ?></option>
+                        <?php endforeach; ?>
                     </select>
                 </div>
             </div>
@@ -412,6 +802,137 @@ include 'includes/header.php';
     </div>
 </div>
 
+<!-- Edit Class Modal -->
+<div id="editModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+    <div class="relative top-10 mx-auto p-5 border w-full max-w-2xl shadow-lg rounded-md bg-white my-10">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-xl font-bold text-gray-800">Edit Class</h3>
+            <button onclick="document.getElementById('editModal').classList.add('hidden')"
+                    class="text-gray-600 hover:text-gray-800">&#10005;</button>
+        </div>
+
+        <form method="POST" class="space-y-4">
+            <?php echo csrf_field(); ?>
+            <input type="hidden" name="action" value="edit">
+            <input type="hidden" name="class_id" id="edit_class_id">
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Class Name *</label>
+                <input type="text" name="name" id="edit_name" required placeholder="e.g., Advanced Karate"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+            </div>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Martial Art Style *</label>
+                    <select name="style_id" id="edit_style_id" required
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                        <option value="">Select Style</option>
+                        <?php foreach ($styles as $style): ?>
+                            <option value="<?php echo $style['id']; ?>"><?php echo htmlspecialchars($style['name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Instructor</label>
+                    <select name="instructor_id" id="edit_instructor_id"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                        <option value="">Select Instructor</option>
+                        <?php foreach ($instructors as $instructor): ?>
+                            <option value="<?php echo $instructor['id']; ?>"><?php echo htmlspecialchars($instructor['full_name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Day of Week *</label>
+                    <select name="day_of_week" id="edit_day_of_week" required
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                        <option value="">Select Day</option>
+                        <option value="Monday">Monday</option>
+                        <option value="Tuesday">Tuesday</option>
+                        <option value="Wednesday">Wednesday</option>
+                        <option value="Thursday">Thursday</option>
+                        <option value="Friday">Friday</option>
+                        <option value="Saturday">Saturday</option>
+                        <option value="Sunday">Sunday</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Start Time *</label>
+                    <input type="time" name="start_time" id="edit_start_time" required
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">End Time *</label>
+                    <input type="time" name="end_time" id="edit_end_time" required
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Max Students</label>
+                    <input type="number" name="max_students" id="edit_max_students" min="1" value="20"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Skill Level *</label>
+                    <select name="skill_level" id="edit_skill_level" required
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                        <?php foreach (skillLevelOptions() as $val => $label): ?>
+                            <option value="<?php echo $val; ?>"><?php echo $label; ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
+                    <select name="status" id="edit_status"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                        <option value="active">Active</option>
+                        <option value="inactive">Inactive</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Room</label>
+                    <select name="room_id" id="edit_room_id"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                        <option value="">No Room</option>
+                        <?php foreach ($rooms as $room): ?>
+                            <option value="<?php echo $room['id']; ?>"><?php echo htmlspecialchars($room['name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                <textarea name="description" id="edit_description" rows="2"
+                          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"></textarea>
+            </div>
+
+            <div class="flex justify-end space-x-3 pt-4">
+                <button type="button" onclick="document.getElementById('editModal').classList.add('hidden')"
+                        class="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">
+                    Cancel
+                </button>
+                <button type="submit"
+                        class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">
+                    Save Changes
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <!-- Enroll Student Modal (with enforcement) -->
 <div id="enrollModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
     <div class="relative top-20 mx-auto p-5 border w-full max-w-md shadow-lg rounded-md bg-white">
@@ -422,6 +943,7 @@ include 'includes/header.php';
         </div>
 
         <form method="POST" class="space-y-4" id="enrollForm">
+            <?php echo csrf_field(); ?>
             <input type="hidden" name="action" value="enroll">
             <input type="hidden" name="class_id" id="enroll_class_id">
 
@@ -491,6 +1013,8 @@ include 'includes/header.php';
 </div>
 
 <script>
+const csrfToken = <?php echo json_encode(csrf_token()); ?>;
+
 // Student data for client-side eligibility check
 const studentData = <?php echo json_encode(array_map(function($s) {
     return [
@@ -584,6 +1108,7 @@ function viewEnrolled(classId, className) {
                 + '<div class="flex items-center space-x-3">'
                 + '<span class="text-xs text-gray-400">Enrolled: ' + s.enrollment_date + '</span>'
                 + '<form method="POST" class="inline" onsubmit="return confirmDelete(\'Unenroll this student?\')">'
+                + '<input type="hidden" name="csrf_token" value="' + csrfToken + '">'
                 + '<input type="hidden" name="action" value="unenroll">'
                 + '<input type="hidden" name="enrollment_id" value="' + s.enrollment_id + '">'
                 + '<button type="submit" class="text-red-600 hover:text-red-800 text-xs">Unenroll</button>'
@@ -595,6 +1120,189 @@ function viewEnrolled(classId, className) {
     }
 
     document.getElementById('rosterModal').classList.remove('hidden');
+}
+
+// ── Open Add modal (reset form first to clear stale copy data) ──
+function openAddModal() {
+    var form = document.getElementById('addClassForm');
+    if (form) form.reset();
+    document.getElementById('addModal').classList.remove('hidden');
+}
+
+// ── Edit Class — pre-fill edit modal with class data ──
+function editClass(classData) {
+    document.getElementById('edit_class_id').value = classData.id;
+    document.getElementById('edit_name').value = classData.name || '';
+    document.getElementById('edit_style_id').value = classData.style_id || '';
+    document.getElementById('edit_instructor_id').value = classData.instructor_id || '';
+    document.getElementById('edit_day_of_week').value = classData.day_of_week || '';
+    document.getElementById('edit_start_time').value = classData.start_time || '';
+    document.getElementById('edit_end_time').value = classData.end_time || '';
+    document.getElementById('edit_max_students').value = classData.max_students || 20;
+    document.getElementById('edit_skill_level').value = classData.skill_level || 'all';
+    document.getElementById('edit_description').value = classData.description || '';
+    document.getElementById('edit_status').value = classData.status || 'active';
+    document.getElementById('edit_room_id').value = classData.room_id || '';
+    document.getElementById('editModal').classList.remove('hidden');
+}
+
+// ── Copy Class — pre-fill ADD modal and let user create a new class ──
+function copyClass(classData) {
+    var form = document.getElementById('addClassForm');
+    if (form) form.reset();
+    form.querySelector('[name="name"]').value = classData.name + ' (Copy)';
+    form.querySelector('[name="style_id"]').value = classData.style_id || '';
+    form.querySelector('[name="instructor_id"]').value = classData.instructor_id || '';
+    form.querySelector('[name="day_of_week"]').value = classData.day_of_week || '';
+    form.querySelector('[name="start_time"]').value = classData.start_time || '';
+    form.querySelector('[name="end_time"]').value = classData.end_time || '';
+    form.querySelector('[name="max_students"]').value = classData.max_students || 20;
+    form.querySelector('[name="skill_level"]').value = classData.skill_level || 'all';
+    form.querySelector('[name="description"]').value = classData.description || '';
+    form.querySelector('[name="status"]').value = classData.status || 'active';
+    form.querySelector('[name="room_id"]').value = classData.room_id || '';
+    document.getElementById('addModal').classList.remove('hidden');
+}
+
+// ── View Toggle: Cards vs Schedule ──
+function setView(view) {
+    var cardView = document.getElementById('cardView');
+    var scheduleView = document.getElementById('scheduleView');
+    var btnCard = document.getElementById('btnCardView');
+    var btnSchedule = document.getElementById('btnScheduleView');
+
+    if (view === 'schedule') {
+        cardView.classList.add('hidden');
+        scheduleView.classList.remove('hidden');
+        btnCard.className = 'px-4 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700';
+        btnSchedule.className = 'px-4 py-1.5 rounded-md text-sm font-medium bg-white shadow text-gray-800';
+    } else {
+        cardView.classList.remove('hidden');
+        scheduleView.classList.add('hidden');
+        btnCard.className = 'px-4 py-1.5 rounded-md text-sm font-medium bg-white shadow text-gray-800';
+        btnSchedule.className = 'px-4 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700';
+    }
+    localStorage.setItem('classesView', view);
+}
+
+// ── Room filter (page-level — reloads with room query param) ──
+function filterByRoom(roomId) {
+    var params = new URLSearchParams(window.location.search);
+    if (roomId) {
+        params.set('room', roomId);
+    } else {
+        params.delete('room');
+    }
+    window.location.search = params.toString();
+}
+
+// ── Kanban room tab filter (client-side, no reload) ──
+function filterKanbanRoom(roomId) {
+    // Update tab styling
+    document.querySelectorAll('.room-tab').forEach(function(btn) {
+        if (btn.getAttribute('data-room') === roomId) {
+            btn.className = 'room-tab px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white';
+        } else {
+            btn.className = 'room-tab px-4 py-2 rounded-lg text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300';
+        }
+    });
+    // Show/hide cards
+    document.querySelectorAll('.kanban-card').forEach(function(card) {
+        if (!roomId || card.getAttribute('data-room-id') === roomId) {
+            card.style.display = '';
+        } else {
+            card.style.display = 'none';
+        }
+    });
+    localStorage.setItem('kanbanRoomFilter', roomId);
+}
+
+// Restore saved view on page load
+document.addEventListener('DOMContentLoaded', function() {
+    var saved = localStorage.getItem('classesView');
+    if (saved === 'schedule') setView('schedule');
+    // Restore kanban room filter
+    var savedRoom = localStorage.getItem('kanbanRoomFilter');
+    if (savedRoom) filterKanbanRoom(savedRoom);
+});
+
+// ── Drag and Drop for Kanban Schedule ──
+var draggedClassId = null;
+
+function handleDragStart(event, classId) {
+    draggedClassId = classId;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', classId);
+    event.target.style.opacity = '0.4';
+    event.target.addEventListener('dragend', function() {
+        this.style.opacity = '1';
+    }, { once: true });
+}
+
+function handleDrop(event, newDay, newTime) {
+    event.preventDefault();
+    var classId = event.dataTransfer.getData('text/plain');
+    if (!classId) return;
+
+    var card = document.querySelector('[data-class-id="' + classId + '"]');
+    if (!card) return;
+
+    // Move card into the target cell
+    var targetCell = event.currentTarget;
+    targetCell.appendChild(card);
+
+    // Build AJAX form data
+    var fd = new FormData();
+    fd.append('class_id', classId);
+    fd.append('day_of_week', newDay);
+    if (newTime) {
+        fd.append('start_time', newTime);
+    }
+
+    fetch('classes.php?ajax=update_schedule', { method: 'POST', body: fd })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                card.classList.add('ring-2', 'ring-green-400');
+                setTimeout(function() { card.classList.remove('ring-2', 'ring-green-400'); }, 1000);
+
+                // Update card time display client-side (preserving duration)
+                if (newTime) {
+                    var oldStart = card.getAttribute('data-start-time');
+                    var oldEnd = card.getAttribute('data-end-time');
+                    if (oldStart && oldEnd) {
+                        var durationMs = new Date('2000-01-01T' + oldEnd) - new Date('2000-01-01T' + oldStart);
+                        var newStartDate = new Date('2000-01-01T' + newTime + ':00');
+                        var newEndDate = new Date(newStartDate.getTime() + durationMs);
+                        var newEndStr = ('0' + newEndDate.getHours()).slice(-2) + ':' + ('0' + newEndDate.getMinutes()).slice(-2) + ':00';
+
+                        card.setAttribute('data-start-time', newTime + ':00');
+                        card.setAttribute('data-end-time', newEndStr);
+
+                        var timeEl = card.querySelector('.text-blue-600');
+                        if (timeEl) {
+                            timeEl.textContent = formatTime12(newTime) + '-' + formatTime12(newEndStr.substring(0, 5));
+                        }
+                    }
+                }
+            } else {
+                alert('Failed to update schedule: ' + (data.error || 'Unknown error'));
+                location.reload();
+            }
+        })
+        .catch(function() {
+            alert('Network error. Please try again.');
+            location.reload();
+        });
+}
+
+function formatTime12(time24) {
+    var parts = time24.split(':');
+    var h = parseInt(parts[0]);
+    var m = parts[1];
+    var ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    return h + ':' + m + ' ' + ampm;
 }
 </script>
 

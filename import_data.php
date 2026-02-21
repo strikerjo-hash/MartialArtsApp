@@ -159,96 +159,6 @@ function deduplicateCSVRows(array $rows): array
 }
 
 /**
- * Distribute a total payment amount proportionally across calendar years.
- *
- * MyStudio CSV exports only give an aggregate "Total Payments" figure with no
- * per-transaction dates.  Rather than dumping the whole amount on the student's
- * join date (which distorts year-based financial reports), we estimate an even
- * monthly rate and allocate it across each calendar year the student was active.
- *
- * Historical payments are distributed from the join year through the **previous**
- * calendar year (prior to the import date).  The current year is excluded so
- * that live payments being collected now are not mixed with estimated imports.
- *
- * If the student joined in the current year, the full amount is placed on the
- * join date (only one year of data).
- *
- * @return array  List of ['year' => int, 'amount' => float, 'payment_date' => 'Y-m-d']
- */
-function distributePaymentsAcrossYears(float $totalPayments, string $joinDate, ?string $importDate = null): array
-{
-    if ($totalPayments <= 0) return [];
-
-    $importDate  = $importDate ?: date('Y-m-d');
-    $joinYear    = (int) date('Y', strtotime($joinDate));
-    $joinMonth   = (int) date('m', strtotime($joinDate));
-    $joinDay     = (int) date('d', strtotime($joinDate));
-    $importYear  = (int) date('Y', strtotime($importDate));
-
-    // If student joined this year (or somehow in the future), put everything
-    // on the join date as a single entry — there is no historical spread.
-    if ($joinYear >= $importYear) {
-        return [[
-            'year'         => $joinYear,
-            'amount'       => $totalPayments,
-            'payment_date' => $joinDate,
-        ]];
-    }
-
-    // Distribute across joinYear … (importYear - 1)
-    $lastYear = $importYear - 1;
-
-    // Calculate active months per calendar year
-    $yearMonths = [];
-    for ($y = $joinYear; $y <= $lastYear; $y++) {
-        if ($y === $joinYear) {
-            // Partial first year: from join month through December
-            $yearMonths[$y] = 12 - $joinMonth + 1;
-        } else {
-            $yearMonths[$y] = 12;
-        }
-    }
-
-    $totalMonths = array_sum($yearMonths);
-    if ($totalMonths <= 0) $totalMonths = 1;
-
-    $monthlyRate = $totalPayments / $totalMonths;
-
-    // Build per-year records
-    $records    = [];
-    $runningSum = 0.0;
-
-    foreach ($yearMonths as $y => $months) {
-        $amount = round($monthlyRate * $months, 2);
-        $runningSum += $amount;
-
-        // Payment date: join anniversary in that year (or actual join date for first year)
-        if ($y === $joinYear) {
-            $payDate = $joinDate;
-        } else {
-            // Use the join month/day in this year; clamp day if needed (e.g. Jan 31 → Feb 28)
-            $dayInMonth = min($joinDay, (int) date('t', mktime(0, 0, 0, $joinMonth, 1, $y)));
-            $payDate = sprintf('%04d-%02d-%02d', $y, $joinMonth, $dayInMonth);
-        }
-
-        $records[] = [
-            'year'         => $y,
-            'amount'       => $amount,
-            'payment_date' => $payDate,
-        ];
-    }
-
-    // Fix rounding so amounts sum exactly to totalPayments
-    $diff = round($totalPayments - $runningSum, 2);
-    if ($diff != 0.0 && !empty($records)) {
-        // Adjust the last (most recent) year
-        $records[count($records) - 1]['amount'] = round($records[count($records) - 1]['amount'] + $diff, 2);
-    }
-
-    return $records;
-}
-
-/**
  * Find duplicate students by first_name + last_name (already in database).
  */
 function findDuplicateStudents(PDO $pdo, array $rows): array
@@ -290,7 +200,6 @@ function executeImport(PDO $pdo, array $rows, array $options): array
         'adults_self_enrolled' => 0,
         'parents_created'      => 0,
         'parent_links_created' => 0,
-        'payments_created'     => 0,
         'errors'               => [],
         'details'              => [],
         'is_dry_run'           => $options['dry_run'] ?? true,
@@ -298,10 +207,7 @@ function executeImport(PDO $pdo, array $rows, array $options): array
 
     $isDryRun       = $options['dry_run'] ?? true;
     $createParents  = $options['create_parents'] ?? true;
-    $importPayments = $options['import_payments'] ?? true;
     $dupAction      = $options['duplicate_action'] ?? 'skip';
-    $batchId        = date('YmdHis');      // shared across all records in this import
-    $importDate     = date('Y-m-d');       // for payment year distribution
 
     if (!$isDryRun) {
         $pdo->beginTransaction();
@@ -489,33 +395,6 @@ function executeImport(PDO $pdo, array $rows, array $options): array
                 }
             }
 
-            // --- Payment records (distributed across calendar years) ---
-            if ($importPayments && $totalPayments > 0 && ($studentId || $isDryRun)) {
-                $yearPayments = distributePaymentsAcrossYears($totalPayments, $joinDate, $importDate);
-
-                foreach ($yearPayments as $yp) {
-                    if (!$isDryRun && $studentId) {
-                        $pdo->prepare("
-                            INSERT INTO payments (student_id, payment_type, amount, payment_method, payment_date, receipt_number, notes)
-                            VALUES (?, 'other', ?, 'other', ?, ?, ?)
-                        ")->execute([
-                            $studentId,
-                            $yp['amount'],
-                            $yp['payment_date'],
-                            generateReceiptNumber(),
-                            "[MyStudio Import #{$batchId}] Historical - {$yp['year']} (~$" . number_format($yp['amount'], 2) . "/yr from $" . number_format($totalPayments, 2) . " total)",
-                        ]);
-                    }
-                    $results['payments_created']++;
-                }
-
-                // Attach year breakdown to the detail entry for display
-                $lastIdx = count($results['details']) - 1;
-                if ($lastIdx >= 0) {
-                    $results['details'][$lastIdx]['payment_breakdown'] = $yearPayments;
-                    $results['details'][$lastIdx]['total_payments'] = $totalPayments;
-                }
-            }
         }
 
         if (!$isDryRun) {
@@ -577,13 +456,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $results = executeImport($pdo, $rows, [
                 'dry_run'          => $isDryRun,
                 'create_parents'   => isset($_POST['create_parents']),
-                'import_payments'  => isset($_POST['import_payments']),
                 'duplicate_action' => $_POST['duplicate_action'] ?? 'skip',
             ]);
             $_SESSION['import_results'] = $results;
             $_SESSION['import_options'] = [
                 'create_parents'   => isset($_POST['create_parents']),
-                'import_payments'  => isset($_POST['import_payments']),
                 'duplicate_action' => $_POST['duplicate_action'] ?? 'skip',
             ];
             header('Location: import_data.php?step=3');
@@ -650,7 +527,8 @@ include 'includes/header.php';
     <div class="flex justify-between items-center mb-6">
         <h1 class="text-3xl font-bold text-gray-800">Import / Export Data</h1>
         <div class="space-x-3">
-            <a href="import_data.php" class="px-4 py-2 rounded-lg font-medium text-sm <?php echo $step <= 3 ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'; ?>">Import</a>
+            <a href="import_data.php" class="px-4 py-2 rounded-lg font-medium text-sm <?php echo $step <= 3 ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'; ?>">Import Students</a>
+            <a href="import_payments.php" class="px-4 py-2 rounded-lg font-medium text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">Import Payments</a>
             <a href="export_data.php" class="px-4 py-2 rounded-lg font-medium text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">Export</a>
         </div>
     </div>
@@ -797,7 +675,6 @@ elseif ($step === 2 && !empty($importRows)): ?>
                 <div><span class="text-gray-500">Participant Last Name</span> &rarr; <span class="font-medium text-green-700">Student Last Name</span></div>
                 <div><span class="text-gray-500">Customer First/Last</span> &rarr; <span class="font-medium text-green-700">Parent Account</span></div>
                 <div><span class="text-gray-500">Participant Since</span> &rarr; <span class="font-medium text-green-700">Join Date</span></div>
-                <div><span class="text-gray-500">Total Payments</span> &rarr; <span class="font-medium text-green-700">Distributed Across Years</span></div>
                 <div><span class="text-gray-500">Past Due</span> &rarr; <span class="font-medium text-green-700">Student Notes</span></div>
             </div>
         </div>
@@ -846,18 +723,6 @@ elseif ($step === 2 && !empty($importRows)): ?>
                         <td class="px-3 py-2 text-gray-600"><?php echo htmlspecialchars($row['Participant Since'] ?? ''); ?></td>
                         <td class="px-3 py-2 text-right text-gray-800">
                             $<?php echo number_format((float)($row['Total Payments'] ?? 0), 2); ?>
-                            <?php
-                            $previewJoinDate = parseMyStudioDate($row['Participant Since'] ?? '');
-                            $previewTotal = (float)($row['Total Payments'] ?? 0);
-                            if ($previewJoinDate && $previewTotal > 0) {
-                                $previewJoinYear = (int) date('Y', strtotime($previewJoinDate));
-                                $previewCurrentYear = (int) date('Y');
-                                $previewYears = max(1, $previewCurrentYear - $previewJoinYear);
-                                if ($previewYears > 1) {
-                                    echo '<br><span class="text-xs text-gray-400">~$' . number_format($previewTotal / $previewYears, 0) . '/yr over ' . $previewYears . 'yr</span>';
-                                }
-                            }
-                            ?>
                         </td>
                         <td class="px-3 py-2 text-right <?php echo (float)($row['Past Due'] ?? 0) > 0 ? 'text-red-600 font-semibold' : 'text-gray-400'; ?>">
                             $<?php echo number_format((float)($row['Past Due'] ?? 0), 2); ?>
@@ -897,16 +762,6 @@ elseif ($step === 2 && !empty($importRows)): ?>
             </div>
         </div>
 
-        <!-- Payment Year Distribution Info -->
-        <div class="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
-            <h3 class="font-semibold text-green-800 mb-2">📊 Payment Year Distribution</h3>
-            <div class="text-sm text-green-700 space-y-1">
-                <p>Total payment amounts from MyStudio will be <strong>distributed proportionally across each calendar year</strong> the student was active (from join year through <?php echo date('Y') - 1; ?>).</p>
-                <p>This ensures financial reports and tax statements show accurate per-year revenue instead of lumping all historical payments into the join year.</p>
-                <p class="text-xs text-green-600 mt-1"><strong>Note:</strong> The current year (<?php echo date('Y'); ?>) is excluded from historical distribution — only real payments collected this year will appear in <?php echo date('Y'); ?> reports.</p>
-            </div>
-        </div>
-
         <form method="POST" class="space-y-6">
             <input type="hidden" name="action" value="execute_import">
             <?php echo csrf_field(); ?>
@@ -918,13 +773,6 @@ elseif ($step === 2 && !empty($importRows)): ?>
                     <div>
                         <span class="font-medium text-gray-700">Create Parent Accounts</span>
                         <p class="text-xs text-gray-500">Create parent accounts from Customer names and link to their children (~<?php echo count($uniqueParents); ?> parents)</p>
-                    </div>
-                </label>
-                <label class="flex items-center gap-3 cursor-pointer">
-                    <input type="checkbox" name="import_payments" value="1" checked class="w-5 h-5 text-blue-600 rounded">
-                    <div>
-                        <span class="font-medium text-gray-700">Import Payment History</span>
-                        <p class="text-xs text-gray-500">Distribute each student's total payments across their active years (one record per calendar year)</p>
                     </div>
                 </label>
             </div>
@@ -1012,7 +860,7 @@ elseif ($step === 3 && $importResults): ?>
     <?php endif; ?>
 
     <!-- Summary Cards -->
-    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 mb-6">
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
         <div class="bg-white rounded-lg shadow p-4 text-center">
             <div class="text-2xl font-bold text-green-600"><?php echo $importResults['students_created']; ?></div>
             <div class="text-xs text-gray-600">Students Created</div>
@@ -1036,11 +884,6 @@ elseif ($step === 3 && $importResults): ?>
         <div class="bg-white rounded-lg shadow p-4 text-center">
             <div class="text-2xl font-bold text-indigo-600"><?php echo $importResults['parent_links_created']; ?></div>
             <div class="text-xs text-gray-600">Parent Links</div>
-        </div>
-        <div class="bg-white rounded-lg shadow p-4 text-center">
-            <div class="text-2xl font-bold text-teal-600"><?php echo $importResults['payments_created']; ?></div>
-            <div class="text-xs text-gray-600">Payment Records</div>
-            <div class="text-xs text-gray-400">(across years)</div>
         </div>
     </div>
 
@@ -1070,7 +913,6 @@ elseif ($step === 3 && $importResults): ?>
                         <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
                         <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
                         <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Details</th>
-                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Payment Distribution</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-gray-200">
@@ -1093,22 +935,6 @@ elseif ($step === 3 && $importResults): ?>
                             </span>
                         </td>
                         <td class="px-4 py-2 text-gray-600 text-xs"><?php echo htmlspecialchars($detail['reason']); ?></td>
-                        <td class="px-4 py-2 text-xs">
-                            <?php if (!empty($detail['payment_breakdown'])): ?>
-                                <div class="flex flex-wrap gap-1">
-                                    <?php foreach ($detail['payment_breakdown'] as $yp): ?>
-                                        <span class="inline-block px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 border border-teal-200">
-                                            <?php echo $yp['year']; ?>: $<?php echo number_format($yp['amount'], 2); ?>
-                                        </span>
-                                    <?php endforeach; ?>
-                                </div>
-                                <?php if (!empty($detail['total_payments'])): ?>
-                                    <div class="text-gray-400 mt-0.5">Total: $<?php echo number_format($detail['total_payments'], 2); ?></div>
-                                <?php endif; ?>
-                            <?php else: ?>
-                                <span class="text-gray-400">&mdash;</span>
-                            <?php endif; ?>
-                        </td>
                     </tr>
                     <?php endforeach; ?>
                 </tbody>

@@ -238,7 +238,7 @@ $siteName = getSiteName();
                 <?php endif; ?>
 
                 <?php if (getCurrentUser()['role'] === 'admin'): ?>
-                <a href="import_data.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo in_array(basename($_SERVER['PHP_SELF']), ['import_data.php', 'export_data.php']) ? 'active-nav' : ''; ?>">
+                <a href="import_data.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo in_array(basename($_SERVER['PHP_SELF']), ['import_data.php', 'import_payments.php', 'export_data.php']) ? 'active-nav' : ''; ?>">
                     <span class="mr-3">🔄</span>
                     <span>Import / Export</span>
                 </a>

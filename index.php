@@ -28,7 +28,7 @@ try {
 // Recent students
 $recentStudents = $pdo->query("
     SELECT first_name, last_name, join_date, status
-    FROM students ORDER BY id DESC LIMIT 5
+    FROM students ORDER BY join_date DESC LIMIT 5
 ")->fetchAll();
 
 // Upcoming events

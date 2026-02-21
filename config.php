@@ -298,7 +298,7 @@ function getLogoPath(): string
 
 function sanitizeInput(string $data): string
 {
-    return htmlspecialchars(strip_tags(trim($data)), ENT_QUOTES, 'UTF-8');
+    return strip_tags(trim($data));
 }
 
 function showAlert(string $message, string $type = 'info'): string
@@ -337,4 +337,105 @@ function formatDateTime(?string $datetime): string
 function formatMoney($amount): string
 {
     return '$' . number_format((float)$amount, 2);
+}
+
+// ---------- Skill Level Helpers ----------
+
+function skillLevelLabel(string $level): string
+{
+    $labels = [
+        'all'                  => 'All Levels',
+        'beginner'             => 'Beginner',
+        'intermediate'         => 'Intermediate',
+        'advanced'             => 'Advanced',
+        'black_belt'           => 'Black Belt',
+        'ninja'                => 'Ninja',
+        'beginner_warrior'     => 'Beginner Warrior',
+        'intermediate_warrior' => 'Intermediate Warrior',
+        'advanced_warrior'     => 'Advanced Warrior',
+    ];
+    return $labels[$level] ?? ucfirst(str_replace('_', ' ', $level));
+}
+
+function skillLevelOptions(): array
+{
+    return [
+        'all'                  => 'All Levels',
+        'beginner'             => 'Beginner',
+        'intermediate'         => 'Intermediate',
+        'advanced'             => 'Advanced',
+        'black_belt'           => 'Black Belt',
+        'ninja'                => 'Ninja',
+        'beginner_warrior'     => 'Beginner Warrior',
+        'intermediate_warrior' => 'Intermediate Warrior',
+        'advanced_warrior'     => 'Advanced Warrior',
+    ];
+}
+
+// ---------- Hours of Operation / Schedule Helpers ----------
+
+function getHoursOfOperation(): array
+{
+    $json = getSetting('hours_of_operation', '');
+    $hours = $json ? json_decode($json, true) : null;
+    if (!is_array($hours) || empty($hours)) {
+        return [['label' => 'Full Day', 'start' => '06:00', 'end' => '21:00']];
+    }
+    return $hours;
+}
+
+function getScheduleSlotInterval(): int
+{
+    $interval = (int) getSetting('schedule_slot_interval', '30');
+    return max(15, min(120, $interval));
+}
+
+/**
+ * Generate flat array of time slot strings (e.g. ['06:00', '06:30', '07:00', ...])
+ * spanning all configured hours-of-operation frames.
+ */
+function generateTimeSlots(): array
+{
+    $hours = getHoursOfOperation();
+    $interval = getScheduleSlotInterval();
+    $slots = [];
+
+    foreach ($hours as $frame) {
+        $start = strtotime($frame['start']);
+        $end   = strtotime($frame['end']);
+        for ($t = $start; $t < $end; $t += $interval * 60) {
+            $slots[] = date('H:i', $t);
+        }
+    }
+
+    $slots = array_unique($slots);
+    sort($slots);
+    return $slots;
+}
+
+/**
+ * Generate time slots for a SINGLE hours-of-operation frame,
+ * including 1-hour padding before and after.
+ *
+ * @return array ['slots' => ['HH:MM', ...], 'frame_start' => 'HH:MM', 'frame_end' => 'HH:MM']
+ */
+function generateTimeSlotsForFrame(array $frame, int $interval): array
+{
+    $frameStart = strtotime($frame['start']);
+    $frameEnd   = strtotime($frame['end']);
+
+    // 1 hour padding, clamped to 00:00 and 23:59
+    $paddedStart = max(strtotime('00:00'), $frameStart - 3600);
+    $paddedEnd   = min(strtotime('23:59'), $frameEnd + 3600);
+
+    $slots = [];
+    for ($t = $paddedStart; $t < $paddedEnd; $t += $interval * 60) {
+        $slots[] = date('H:i', $t);
+    }
+
+    return [
+        'slots'       => $slots,
+        'frame_start' => $frame['start'],
+        'frame_end'   => $frame['end'],
+    ];
 }

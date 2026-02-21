@@ -374,7 +374,8 @@ include 'includes/header.php';
     <div class="flex justify-between items-center mb-6">
         <h1 class="text-3xl font-bold text-gray-800">Import / Export Data</h1>
         <div class="space-x-3">
-            <a href="import_data.php" class="px-4 py-2 rounded-lg font-medium text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">Import</a>
+            <a href="import_data.php" class="px-4 py-2 rounded-lg font-medium text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">Import Students</a>
+            <a href="import_payments.php" class="px-4 py-2 rounded-lg font-medium text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">Import Payments</a>
             <a href="export_data.php" class="px-4 py-2 rounded-lg font-medium text-sm bg-blue-600 text-white">Export</a>
         </div>
     </div>

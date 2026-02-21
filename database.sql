@@ -110,7 +110,7 @@ CREATE TABLE classes (
     start_time TIME NOT NULL,
     end_time TIME NOT NULL,
     max_students INT DEFAULT 20,
-    skill_level ENUM('beginner', 'intermediate', 'advanced', 'all') DEFAULT 'all',
+    skill_level ENUM('beginner', 'intermediate', 'advanced', 'all', 'black_belt', 'ninja', 'beginner_warrior', 'intermediate_warrior', 'advanced_warrior') DEFAULT 'all',
     description TEXT,
     status ENUM('active', 'inactive') DEFAULT 'active',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

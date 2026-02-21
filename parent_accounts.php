@@ -53,8 +53,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
+// Search & filter parameters
+$search = $_GET['search'] ?? '';
+$status_filter = $_GET['status'] ?? '';
+$children_filter = $_GET['children'] ?? '';
+
 // Fetch all students with is_parent=1, with child counts
-$parents = $pdo->query("
+$query = "
     SELECT s.*,
            COUNT(DISTINCT ps.student_id) as child_count,
            GROUP_CONCAT(DISTINCT CONCAT(cs.first_name, ' ', cs.last_name) ORDER BY cs.first_name SEPARATOR ', ') as children_names
@@ -62,9 +67,38 @@ $parents = $pdo->query("
     LEFT JOIN parent_students ps ON ps.parent_id = s.id
     LEFT JOIN students cs ON cs.id = ps.student_id
     WHERE s.is_parent = 1
-    GROUP BY s.id
-    ORDER BY s.first_name, s.last_name
-")->fetchAll();
+";
+
+if ($search) {
+    $query .= " AND (s.first_name LIKE :search1 OR s.last_name LIKE :search2 OR s.email LIKE :search3 OR s.username LIKE :search4)";
+}
+if ($status_filter) {
+    $query .= " AND s.status = :status";
+}
+
+$query .= " GROUP BY s.id";
+
+if ($children_filter === 'linked') {
+    $query .= " HAVING child_count > 0";
+} elseif ($children_filter === 'none') {
+    $query .= " HAVING child_count = 0";
+}
+
+$query .= " ORDER BY s.first_name, s.last_name";
+
+$stmt = $pdo->prepare($query);
+if ($search) {
+    $searchVal = "%$search%";
+    $stmt->bindValue(':search1', $searchVal);
+    $stmt->bindValue(':search2', $searchVal);
+    $stmt->bindValue(':search3', $searchVal);
+    $stmt->bindValue(':search4', $searchVal);
+}
+if ($status_filter) {
+    $stmt->bindValue(':status', $status_filter);
+}
+$stmt->execute();
+$parents = $stmt->fetchAll();
 
 include 'includes/header.php';
 ?>
@@ -80,16 +114,50 @@ include 'includes/header.php';
                 + Enable Parent for Student
             </button>
             <div class="text-sm text-gray-500">
-                <?= count($parents) ?> parent account<?= count($parents) !== 1 ? 's' : '' ?>
+                <?= count($parents) ?> parent account<?= count($parents) !== 1 ? 's' : '' ?><?php if ($search || $status_filter || $children_filter): ?> found<?php endif; ?>
             </div>
         </div>
+    </div>
+
+    <!-- Search & Filters -->
+    <div class="bg-white rounded-lg shadow p-4 mb-6">
+        <form method="GET" class="flex flex-wrap gap-4">
+            <input type="text" name="search" placeholder="Search by name, email, or username..."
+                   value="<?php echo htmlspecialchars($search); ?>"
+                   class="flex-1 min-w-[200px] px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+
+            <select name="status" class="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                <option value="">All Status</option>
+                <option value="active" <?php echo $status_filter === 'active' ? 'selected' : ''; ?>>Active</option>
+                <option value="inactive" <?php echo $status_filter === 'inactive' ? 'selected' : ''; ?>>Inactive</option>
+                <option value="suspended" <?php echo $status_filter === 'suspended' ? 'selected' : ''; ?>>Suspended</option>
+            </select>
+
+            <select name="children" class="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                <option value="">All Children</option>
+                <option value="linked" <?php echo $children_filter === 'linked' ? 'selected' : ''; ?>>Has Children Linked</option>
+                <option value="none" <?php echo $children_filter === 'none' ? 'selected' : ''; ?>>No Children Linked</option>
+            </select>
+
+            <button type="submit" class="bg-gray-600 hover:bg-gray-700 text-white px-6 py-2 rounded-lg">
+                Filter
+            </button>
+            <a href="parent_accounts.php" class="bg-gray-300 hover:bg-gray-400 text-gray-800 px-6 py-2 rounded-lg">
+                Reset
+            </a>
+        </form>
     </div>
 
     <?php if (empty($parents)): ?>
         <div class="bg-white rounded-lg shadow p-12 text-center">
             <div class="text-6xl mb-4">👨‍👩‍👧‍👦</div>
-            <h2 class="text-2xl font-bold text-gray-800 mb-2">No Parent Accounts</h2>
-            <p class="text-gray-600">Promote a student to a parent account to enable them to manage their children from the student portal.</p>
+            <?php if ($search || $status_filter || $children_filter): ?>
+                <h2 class="text-2xl font-bold text-gray-800 mb-2">No Results Found</h2>
+                <p class="text-gray-600">No parent accounts match your search criteria. <a href="parent_accounts.php" class="text-blue-600 hover:underline">Reset filters</a></p>
+            <?php else: ?>
+                <h2 class="text-2xl font-bold text-gray-800 mb-2">No Parent Accounts</h2>
+                <p class="text-gray-600">Promote a student to a parent account to enable them to manage their children from the student portal.</p>
+            <?php endif; ?>
         </div>
     <?php else: ?>
         <div class="bg-white rounded-lg shadow overflow-hidden">

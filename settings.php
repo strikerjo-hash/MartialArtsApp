@@ -266,6 +266,93 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $message = showAlert('Square settings saved! Stripe has been automatically disabled.', 'success');
     }
 
+    // ── Room Management ──
+    if (isset($_POST['add_room'])) {
+        $roomName = sanitizeInput($_POST['room_name'] ?? '');
+        if ($roomName) {
+            $maxOrder = $pdo->query("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM rooms")->fetchColumn();
+            $pdo->prepare("INSERT INTO rooms (name, sort_order) VALUES (?, ?)")->execute([$roomName, $maxOrder]);
+            $message = showAlert('Room "' . htmlspecialchars($roomName) . '" added successfully!', 'success');
+        } else {
+            $message = showAlert('Room name is required.', 'error');
+        }
+    }
+
+    if (isset($_POST['edit_room'])) {
+        $roomId = (int)($_POST['room_id'] ?? 0);
+        $roomName = sanitizeInput($_POST['room_name'] ?? '');
+        if ($roomId && $roomName) {
+            $pdo->prepare("UPDATE rooms SET name = ? WHERE id = ?")->execute([$roomName, $roomId]);
+            $message = showAlert('Room updated successfully!', 'success');
+        }
+    }
+
+    if (isset($_POST['toggle_room_status'])) {
+        $roomId = (int)($_POST['room_id'] ?? 0);
+        if ($roomId) {
+            $current = $pdo->prepare("SELECT status FROM rooms WHERE id = ?");
+            $current->execute([$roomId]);
+            $row = $current->fetch();
+            if ($row) {
+                $newStatus = $row['status'] === 'active' ? 'inactive' : 'active';
+                $pdo->prepare("UPDATE rooms SET status = ? WHERE id = ?")->execute([$newStatus, $roomId]);
+                $message = showAlert('Room ' . ($newStatus === 'active' ? 'activated' : 'deactivated') . ' successfully!', 'success');
+            }
+        }
+    }
+
+    if (isset($_POST['reorder_room'])) {
+        $roomId = (int)($_POST['room_id'] ?? 0);
+        $direction = $_POST['direction'] ?? '';
+        if ($roomId && in_array($direction, ['up', 'down'])) {
+            $currentRoom = $pdo->prepare("SELECT id, sort_order FROM rooms WHERE id = ?");
+            $currentRoom->execute([$roomId]);
+            $cr = $currentRoom->fetch();
+            if ($cr) {
+                if ($direction === 'up') {
+                    $neighbor = $pdo->prepare("SELECT id, sort_order FROM rooms WHERE sort_order < ? ORDER BY sort_order DESC LIMIT 1");
+                } else {
+                    $neighbor = $pdo->prepare("SELECT id, sort_order FROM rooms WHERE sort_order > ? ORDER BY sort_order ASC LIMIT 1");
+                }
+                $neighbor->execute([$cr['sort_order']]);
+                $nr = $neighbor->fetch();
+                if ($nr) {
+                    $pdo->prepare("UPDATE rooms SET sort_order = ? WHERE id = ?")->execute([$nr['sort_order'], $cr['id']]);
+                    $pdo->prepare("UPDATE rooms SET sort_order = ? WHERE id = ?")->execute([$cr['sort_order'], $nr['id']]);
+                }
+            }
+        }
+    }
+
+    // Hours of Operation
+    if (isset($_POST['save_hours_of_operation'])) {
+        verify_csrf();
+        $frames = [];
+        $labels = $_POST['hop_label'] ?? [];
+        $starts = $_POST['hop_start'] ?? [];
+        $ends   = $_POST['hop_end'] ?? [];
+
+        for ($i = 0; $i < count($starts); $i++) {
+            $label = trim($labels[$i] ?? '');
+            $start = trim($starts[$i] ?? '');
+            $end   = trim($ends[$i] ?? '');
+            if ($start && $end) {
+                $frames[] = [
+                    'label' => $label ?: ('Frame ' . ($i + 1)),
+                    'start' => $start,
+                    'end'   => $end,
+                ];
+            }
+        }
+
+        saveSetting('hours_of_operation', json_encode($frames));
+
+        $slotInterval = max(15, min(120, (int)($_POST['schedule_slot_interval'] ?? 30)));
+        saveSetting('schedule_slot_interval', (string)$slotInterval);
+
+        $message = showAlert('Hours of operation saved successfully!', 'success');
+    }
+
     // Testing & Debug: payment lockout test toggle
     if (isset($_POST['save_test_settings'])) {
         verify_csrf();
@@ -364,6 +451,208 @@ include 'includes/header.php';
                         Save Membership Settings
                     </button>
                 </form>
+            </div>
+
+            <!-- Rooms / Locations -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6 border-t-4 border-indigo-500">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Rooms / Locations</h2>
+                <p class="text-sm text-gray-600 mb-4">Manage the rooms or training areas in your studio. Classes can be assigned to a room for scheduling purposes.</p>
+
+                <?php
+                try {
+                    $pdo->exec("CREATE TABLE IF NOT EXISTS rooms (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        name VARCHAR(100) NOT NULL,
+                        sort_order INT DEFAULT 0,
+                        status ENUM('active','inactive') DEFAULT 'active',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )");
+                } catch (PDOException $e) {}
+                $allRooms = $pdo->query("SELECT r.*, (SELECT COUNT(*) FROM classes c WHERE c.room_id = r.id) as class_count FROM rooms r ORDER BY r.sort_order, r.name")->fetchAll();
+                ?>
+
+                <?php if (!empty($allRooms)): ?>
+                <div class="space-y-2 mb-4">
+                    <?php foreach ($allRooms as $ri => $room): ?>
+                    <div class="flex items-center justify-between p-3 rounded-lg border <?php echo $room['status'] === 'active' ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-200 opacity-60'; ?>">
+                        <div class="flex items-center gap-3">
+                            <div class="flex flex-col gap-1">
+                                <form method="POST" class="inline"><?php echo csrf_field(); ?>
+                                    <input type="hidden" name="reorder_room" value="1">
+                                    <input type="hidden" name="room_id" value="<?php echo $room['id']; ?>">
+                                    <input type="hidden" name="direction" value="up">
+                                    <button type="submit" class="text-gray-400 hover:text-gray-600 text-xs" title="Move up">&#9650;</button>
+                                </form>
+                                <form method="POST" class="inline"><?php echo csrf_field(); ?>
+                                    <input type="hidden" name="reorder_room" value="1">
+                                    <input type="hidden" name="room_id" value="<?php echo $room['id']; ?>">
+                                    <input type="hidden" name="direction" value="down">
+                                    <button type="submit" class="text-gray-400 hover:text-gray-600 text-xs" title="Move down">&#9660;</button>
+                                </form>
+                            </div>
+                            <div>
+                                <span class="font-medium text-gray-800"><?php echo htmlspecialchars($room['name']); ?></span>
+                                <span class="text-xs text-gray-400 ml-2"><?php echo $room['class_count']; ?> class<?php echo $room['class_count'] != 1 ? 'es' : ''; ?></span>
+                                <?php if ($room['status'] === 'inactive'): ?>
+                                    <span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-gray-200 text-gray-500">Inactive</span>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button onclick="editRoom(<?php echo $room['id']; ?>, '<?php echo addslashes(htmlspecialchars($room['name'])); ?>')"
+                                    class="text-blue-600 hover:text-blue-800 text-sm">Edit</button>
+                            <form method="POST" class="inline" onsubmit="return confirm('<?php echo $room['status'] === 'active' ? 'Deactivate' : 'Reactivate'; ?> this room?')">
+                                <?php echo csrf_field(); ?>
+                                <input type="hidden" name="toggle_room_status" value="1">
+                                <input type="hidden" name="room_id" value="<?php echo $room['id']; ?>">
+                                <button type="submit" class="<?php echo $room['status'] === 'active' ? 'text-orange-600 hover:text-orange-800' : 'text-green-600 hover:text-green-800'; ?> text-sm">
+                                    <?php echo $room['status'] === 'active' ? 'Deactivate' : 'Activate'; ?>
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+                <?php else: ?>
+                <p class="text-sm text-gray-500 mb-4">No rooms configured yet. Add your first room below.</p>
+                <?php endif; ?>
+
+                <!-- Add Room -->
+                <form method="POST" class="flex gap-3 items-end">
+                    <?php echo csrf_field(); ?>
+                    <div class="flex-1">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Add New Room</label>
+                        <input type="text" name="room_name" required placeholder="e.g., Main Floor, Studio B, Mat Room..."
+                               class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-indigo-500">
+                    </div>
+                    <button type="submit" name="add_room" value="1"
+                            class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm whitespace-nowrap">
+                        + Add Room
+                    </button>
+                </form>
+
+                <!-- Edit Room Modal (simple inline) -->
+                <div id="editRoomModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+                    <div class="relative top-20 mx-auto p-5 border w-full max-w-md shadow-lg rounded-md bg-white">
+                        <h3 class="text-lg font-bold text-gray-800 mb-4">Edit Room Name</h3>
+                        <form method="POST" class="space-y-4">
+                            <?php echo csrf_field(); ?>
+                            <input type="hidden" name="edit_room" value="1">
+                            <input type="hidden" name="room_id" id="editRoomId">
+                            <input type="text" name="room_name" id="editRoomName" required
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-indigo-500">
+                            <div class="flex justify-end gap-3">
+                                <button type="button" onclick="document.getElementById('editRoomModal').classList.add('hidden')"
+                                        class="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Cancel</button>
+                                <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg">Save</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+                <script>
+                function editRoom(id, name) {
+                    document.getElementById('editRoomId').value = id;
+                    document.getElementById('editRoomName').value = name;
+                    document.getElementById('editRoomModal').classList.remove('hidden');
+                }
+                </script>
+            </div>
+
+            <!-- Hours of Operation / Schedule Time Slots -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6 border-t-4 border-blue-500">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Hours of Operation</h2>
+                <p class="text-sm text-gray-600 mb-4">
+                    Define your studio's hours of operation. The Kanban schedule board will display
+                    time slots based on these hours. You can add multiple time frames (e.g.,
+                    morning and evening sessions).
+                </p>
+
+                <form method="POST" class="space-y-4">
+                    <?php echo csrf_field(); ?>
+
+                    <!-- Slot interval -->
+                    <div class="max-w-xs">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Time Slot Interval</label>
+                        <?php $currentInterval = getSetting('schedule_slot_interval', '30'); ?>
+                        <select name="schedule_slot_interval"
+                                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                            <option value="15" <?php echo $currentInterval == '15' ? 'selected' : ''; ?>>15 minutes</option>
+                            <option value="30" <?php echo $currentInterval == '30' ? 'selected' : ''; ?>>30 minutes</option>
+                            <option value="45" <?php echo $currentInterval == '45' ? 'selected' : ''; ?>>45 minutes</option>
+                            <option value="60" <?php echo $currentInterval == '60' ? 'selected' : ''; ?>>1 hour</option>
+                        </select>
+                        <p class="text-xs text-gray-500 mt-1">Controls the granularity of time slots on the schedule board</p>
+                    </div>
+
+                    <!-- Time Frames container -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Time Frames</label>
+                        <div id="hopFrames" class="space-y-3">
+                            <?php
+                            $frames = getHoursOfOperation();
+                            foreach ($frames as $i => $frame):
+                            ?>
+                            <div class="flex flex-wrap items-end gap-3 p-3 bg-gray-50 rounded-lg hop-frame">
+                                <div class="flex-1 min-w-[120px]">
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">Label</label>
+                                    <input type="text" name="hop_label[]" value="<?php echo htmlspecialchars($frame['label']); ?>"
+                                           placeholder="e.g., Morning"
+                                           class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">Start</label>
+                                    <input type="time" name="hop_start[]" value="<?php echo $frame['start']; ?>" required
+                                           class="px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">End</label>
+                                    <input type="time" name="hop_end[]" value="<?php echo $frame['end']; ?>" required
+                                           class="px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                </div>
+                                <button type="button" onclick="this.closest('.hop-frame').remove()"
+                                        class="text-red-500 hover:text-red-700 px-2 py-2 text-sm font-medium">Remove</button>
+                            </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+
+                    <button type="button" onclick="addHopFrame()"
+                            class="text-blue-600 hover:text-blue-800 text-sm font-medium">
+                        + Add Time Frame
+                    </button>
+
+                    <div class="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-700">
+                        <strong>Note:</strong> If no time frames are configured, the schedule board
+                        defaults to 6:00 AM - 9:00 PM.
+                    </div>
+
+                    <button type="submit" name="save_hours_of_operation" value="1"
+                            class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">
+                        Save Hours of Operation
+                    </button>
+                </form>
+
+                <script>
+                function addHopFrame() {
+                    var container = document.getElementById('hopFrames');
+                    var html = '<div class="flex flex-wrap items-end gap-3 p-3 bg-gray-50 rounded-lg hop-frame">'
+                        + '<div class="flex-1 min-w-[120px]">'
+                        + '<label class="block text-xs font-medium text-gray-600 mb-1">Label</label>'
+                        + '<input type="text" name="hop_label[]" placeholder="e.g., Evening" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">'
+                        + '</div>'
+                        + '<div>'
+                        + '<label class="block text-xs font-medium text-gray-600 mb-1">Start</label>'
+                        + '<input type="time" name="hop_start[]" required class="px-3 py-2 border border-gray-300 rounded-lg text-sm">'
+                        + '</div>'
+                        + '<div>'
+                        + '<label class="block text-xs font-medium text-gray-600 mb-1">End</label>'
+                        + '<input type="time" name="hop_end[]" required class="px-3 py-2 border border-gray-300 rounded-lg text-sm">'
+                        + '</div>'
+                        + '<button type="button" onclick="this.closest(\'.hop-frame\').remove()" class="text-red-500 hover:text-red-700 px-2 py-2 text-sm font-medium">Remove</button>'
+                        + '</div>';
+                    container.insertAdjacentHTML('beforeend', html);
+                }
+                </script>
             </div>
 
             <!-- Belt Testing Cycle & Notifications -->

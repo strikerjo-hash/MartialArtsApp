@@ -927,7 +927,7 @@ include 'includes/header.php';
                             <tr class="hover:bg-gray-50 bulk-row" data-student-id="<?php echo $st['id']; ?>">
                                 <td class="px-3 py-2 font-medium text-gray-800">
                                     <?php echo $stName; ?>
-                                    <input type="hidden" name="bulk_student_id[<?php echo $si; ?>]" value="<?php echo $st['id']; ?>">
+                                    <input type="hidden" data-name="bulk_student_id[]" value="<?php echo $st['id']; ?>">
                                 </td>
                                 <td class="px-3 py-2 bulk-current-rank" data-student-id="<?php echo $st['id']; ?>">
                                     <?php
@@ -950,17 +950,17 @@ include 'includes/header.php';
                                     ?>
                                 </td>
                                 <td class="px-3 py-2">
-                                    <select name="bulk_belt_id[<?php echo $si; ?>]" class="bulk-belt-select w-full px-2 py-1 border border-gray-300 rounded text-sm">
+                                    <select data-name="bulk_belt_id[]" class="bulk-belt-select w-full px-2 py-1 border border-gray-300 rounded text-sm">
                                         <option value="">— skip —</option>
                                     </select>
-                                    <input type="hidden" name="bulk_style_id[<?php echo $si; ?>]" class="bulk-style-hidden" value="">
+                                    <input type="hidden" data-name="bulk_style_id[]" class="bulk-style-hidden" value="">
                                 </td>
                                 <td class="px-3 py-2">
-                                    <input type="date" name="bulk_date[<?php echo $si; ?>]" value="<?php echo date('Y-m-d'); ?>"
+                                    <input type="date" data-name="bulk_date[]" value="<?php echo date('Y-m-d'); ?>"
                                            class="bulk-date-input w-full px-2 py-1 border border-gray-300 rounded text-sm">
                                 </td>
                                 <td class="px-3 py-2">
-                                    <input type="text" name="bulk_bb_number[<?php echo $si; ?>]" placeholder="—"
+                                    <input type="text" data-name="bulk_bb_number[]" placeholder="—"
                                            class="bulk-bb-input w-24 px-2 py-1 border border-gray-300 rounded text-sm hidden">
                                 </td>
                             </tr>
@@ -979,6 +979,29 @@ include 'includes/header.php';
                     </button>
                 </div>
             </div>
+
+            <script>
+            document.getElementById('bulkAssignForm').addEventListener('submit', function(e) {
+                // Only activate name attributes on rows where a belt was actually selected
+                var hasAny = false;
+                document.querySelectorAll('#bulkAssignBody tr.bulk-row').forEach(function(row) {
+                    var beltSelect = row.querySelector('.bulk-belt-select');
+                    var inputs = row.querySelectorAll('[data-name]');
+                    if (beltSelect && beltSelect.value) {
+                        // Belt was selected — promote data-name to name so it POSTs
+                        inputs.forEach(function(inp) {
+                            inp.setAttribute('name', inp.getAttribute('data-name'));
+                        });
+                        hasAny = true;
+                    }
+                    // If no belt selected, inputs have no name → not included in POST
+                });
+                if (!hasAny) {
+                    e.preventDefault();
+                    alert('Please select at least one belt to assign.');
+                }
+            });
+            </script>
         </form>
     </div>
 </div>

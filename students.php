@@ -105,7 +105,7 @@ $query = "
 ";
 
 if ($search) {
-    $query .= " AND (s.first_name LIKE :search OR s.last_name LIKE :search OR s.email LIKE :search)";
+    $query .= " AND (s.first_name LIKE :search1 OR s.last_name LIKE :search2 OR s.email LIKE :search3)";
 }
 if ($status_filter) {
     $query .= " AND s.status = :status";
@@ -131,7 +131,10 @@ $query .= " ORDER BY s.created_at DESC";
 
 $stmt = $pdo->prepare($query);
 if ($search) {
-    $stmt->bindValue(':search', "%$search%");
+    $searchVal = "%$search%";
+    $stmt->bindValue(':search1', $searchVal);
+    $stmt->bindValue(':search2', $searchVal);
+    $stmt->bindValue(':search3', $searchVal);
 }
 if ($status_filter) {
     $stmt->bindValue(':status', $status_filter);

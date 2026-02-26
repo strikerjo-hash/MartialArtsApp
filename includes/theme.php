@@ -30,7 +30,15 @@ function get_theme(): array
 
     try {
         $pdo  = get_db();
-        $stmt = $pdo->query('SELECT config_key, config_value FROM studio_config');
+        $schoolId = function_exists('current_school_id') ? current_school_id() : 1;
+        // Check if studio_config has school_id column
+        $cols = $pdo->query("SHOW COLUMNS FROM studio_config LIKE 'school_id'")->fetchAll();
+        if (!empty($cols)) {
+            $stmt = $pdo->prepare('SELECT config_key, config_value FROM studio_config WHERE school_id = ?');
+            $stmt->execute([$schoolId]);
+        } else {
+            $stmt = $pdo->query('SELECT config_key, config_value FROM studio_config');
+        }
         $rows = $stmt->fetchAll();
 
         foreach ($rows as $row) {

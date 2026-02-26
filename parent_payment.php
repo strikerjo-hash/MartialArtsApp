@@ -32,7 +32,9 @@ $pmOwnerCol = $isStudentParent ? 'student_id' : 'parent_id';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_method'])) {
     verify_csrf();
     $methodId = (int)($_POST['method_id'] ?? 0);
-    $pdo->prepare("DELETE FROM {$pmTable} WHERE id = ? AND {$pmOwnerCol} = ?")->execute([$methodId, $parentId]);
+    $params = [$methodId, $parentId];
+    school_param($params);
+    $pdo->prepare("DELETE FROM {$pmTable} WHERE id = ? AND {$pmOwnerCol} = ?" . school_where())->execute($params);
     $message = showAlert('Payment method removed.', 'success');
 }
 
@@ -40,8 +42,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_method'])) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_default'])) {
     verify_csrf();
     $methodId = (int)($_POST['method_id'] ?? 0);
-    $pdo->prepare("UPDATE {$pmTable} SET is_default = 0 WHERE {$pmOwnerCol} = ?")->execute([$parentId]);
-    $pdo->prepare("UPDATE {$pmTable} SET is_default = 1 WHERE id = ? AND {$pmOwnerCol} = ?")->execute([$methodId, $parentId]);
+    $params = [$parentId];
+    school_param($params);
+    $pdo->prepare("UPDATE {$pmTable} SET is_default = 0 WHERE {$pmOwnerCol} = ?" . school_where())->execute($params);
+    $params = [$methodId, $parentId];
+    school_param($params);
+    $pdo->prepare("UPDATE {$pmTable} SET is_default = 1 WHERE id = ? AND {$pmOwnerCol} = ?" . school_where())->execute($params);
     $message = showAlert('Default payment method updated.', 'success');
 }
 
@@ -74,8 +80,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_method'])) {
 }
 
 // ---------- Load existing methods ----------
-$methods = $pdo->prepare("SELECT * FROM {$pmTable} WHERE {$pmOwnerCol} = ? ORDER BY is_default DESC, created_at DESC");
-$methods->execute([$parentId]);
+$params = [$parentId];
+school_param($params);
+$methods = $pdo->prepare("SELECT * FROM {$pmTable} WHERE {$pmOwnerCol} = ?" . school_where() . " ORDER BY is_default DESC, created_at DESC");
+$methods->execute($params);
 $methods = $methods->fetchAll();
 
 // Gateway info for frontend
@@ -91,15 +99,17 @@ $recentPayments = [];
 if (!empty($childIds)) {
     $placeholders = implode(',', array_fill(0, count($childIds), '?'));
     try {
+        $params = $childIds;
+        school_param($params);
         $payStmt = $pdo->prepare("
             SELECT p.*, s.first_name, s.last_name
             FROM payments p
             JOIN students s ON s.id = p.student_id
-            WHERE p.student_id IN ({$placeholders})
+            WHERE p.student_id IN ({$placeholders})" . school_where('p') . "
             ORDER BY p.payment_date DESC
             LIMIT 20
         ");
-        $payStmt->execute($childIds);
+        $payStmt->execute($params);
         $recentPayments = $payStmt->fetchAll();
     } catch (\PDOException $e) {}
 }

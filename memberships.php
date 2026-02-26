@@ -2,41 +2,7 @@
 require_once 'config.php';
 requireLogin();
 
-// --- Idempotent migrations ---
-try { $pdo->exec("ALTER TABLE memberships ADD COLUMN auto_renew TINYINT(1) NOT NULL DEFAULT 1"); } catch (PDOException $e) {}
-
-try {
-    $pdo->exec("CREATE TABLE IF NOT EXISTS renewal_log (
-        id INT PRIMARY KEY AUTO_INCREMENT,
-        membership_id INT NOT NULL,
-        student_id INT NOT NULL,
-        action ENUM('renewed','expired','payment_failed','no_gateway') NOT NULL,
-        old_end_date DATE,
-        new_end_date DATE,
-        amount DECIMAL(10,2),
-        notes TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (membership_id) REFERENCES memberships(id) ON DELETE CASCADE,
-        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
-    )");
-} catch (PDOException $e) {}
-
-// Billing frequency: per-plan control over upfront vs monthly installments
-try { $pdo->exec("ALTER TABLE membership_plans ADD COLUMN billing_frequency ENUM('upfront','monthly') NOT NULL DEFAULT 'upfront'"); } catch (PDOException $e) {}
-
-// Tax-deductible flag for dependent care / camp programs
-try { $pdo->exec("ALTER TABLE membership_plans ADD COLUMN tax_deductible TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
-
-// Afterschool program support: fixed-term plans with start/end dates and proration
-try { $pdo->exec("ALTER TABLE membership_plans ADD COLUMN is_afterschool TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
-try { $pdo->exec("ALTER TABLE membership_plans ADD COLUMN program_start_date DATE DEFAULT NULL"); } catch (PDOException $e) {}
-try { $pdo->exec("ALTER TABLE membership_plans ADD COLUMN program_end_date DATE DEFAULT NULL"); } catch (PDOException $e) {}
-
-// Day-of-month for monthly billing (capped at 28 for safety)
-try { $pdo->exec("ALTER TABLE memberships ADD COLUMN billing_day TINYINT DEFAULT NULL"); } catch (PDOException $e) {}
-
-// Track how many monthly installments have been charged in the current cycle
-try { $pdo->exec("ALTER TABLE memberships ADD COLUMN monthly_charges_made INT NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
+// Migrations have been moved to migrate.php
 
 $message = '';
 
@@ -48,6 +14,7 @@ if (isset($_SESSION['flash_message'])) {
 
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    verify_csrf();
     if (isset($_POST['action'])) {
         switch ($_POST['action']) {
             case 'add_plan':
@@ -55,6 +22,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $reg_fee = max(0, (float) ($_POST['registration_fee'] ?? 0));
                 $tax_ded = isset($_POST['tax_deductible']) ? 1 : 0;
                 $is_afterschool = isset($_POST['is_afterschool']) ? 1 : 0;
+                $is_grandfathered = isset($_POST['is_grandfathered']) ? 1 : 0;
                 $program_start = $is_afterschool ? (trim($_POST['program_start_date'] ?? '') ?: null) : null;
                 $program_end   = $is_afterschool ? (trim($_POST['program_end_date']   ?? '') ?: null) : null;
 
@@ -68,8 +36,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ? max(1, (int) round((strtotime($program_end) - strtotime($program_start)) / (30.44 * 86400)))
                     : (int) $_POST['duration_months'];
 
-                $stmt = $pdo->prepare("INSERT INTO membership_plans (name, description, duration_months, price, classes_per_week, status, billing_frequency, registration_fee, tax_deductible, is_afterschool, program_start_date, program_end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                $stmt->execute([sanitizeInput($_POST['name']), sanitizeInput($_POST['description']), $duration_months, $_POST['price'], $_POST['classes_per_week'], $_POST['status'], $billing_freq, $reg_fee, $tax_ded, $is_afterschool, $program_start, $program_end]);
+                $stmt = $pdo->prepare("INSERT INTO membership_plans (school_id, name, description, duration_months, price, classes_per_week, status, billing_frequency, registration_fee, tax_deductible, is_afterschool, program_start_date, program_end_date, is_grandfathered) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->execute([current_school_id(), sanitizeInput($_POST['name']), sanitizeInput($_POST['description']), $duration_months, $_POST['price'], $_POST['classes_per_week'], $_POST['status'], $billing_freq, $reg_fee, $tax_ded, $is_afterschool, $program_start, $program_end, $is_grandfathered]);
                 $message = showAlert('Membership plan created successfully!', 'success');
                 break;
 
@@ -78,6 +46,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $reg_fee = max(0, (float) ($_POST['registration_fee'] ?? 0));
                 $tax_ded = isset($_POST['tax_deductible']) ? 1 : 0;
                 $is_afterschool = isset($_POST['is_afterschool']) ? 1 : 0;
+                $is_grandfathered = isset($_POST['is_grandfathered']) ? 1 : 0;
                 $program_start = $is_afterschool ? (trim($_POST['program_start_date'] ?? '') ?: null) : null;
                 $program_end   = $is_afterschool ? (trim($_POST['program_end_date']   ?? '') ?: null) : null;
 
@@ -91,18 +60,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ? max(1, (int) round((strtotime($program_end) - strtotime($program_start)) / (30.44 * 86400)))
                     : (int) $_POST['duration_months'];
 
-                $stmt = $pdo->prepare("UPDATE membership_plans SET name = ?, description = ?, duration_months = ?, price = ?, classes_per_week = ?, status = ?, billing_frequency = ?, registration_fee = ?, tax_deductible = ?, is_afterschool = ?, program_start_date = ?, program_end_date = ? WHERE id = ?");
-                $stmt->execute([sanitizeInput($_POST['name']), sanitizeInput($_POST['description']), $duration_months, $_POST['price'], $_POST['classes_per_week'], $_POST['status'], $billing_freq, $reg_fee, $tax_ded, $is_afterschool, $program_start, $program_end, $_POST['plan_id']]);
+                $params = [sanitizeInput($_POST['name']), sanitizeInput($_POST['description']), $duration_months, $_POST['price'], $_POST['classes_per_week'], $_POST['status'], $billing_freq, $reg_fee, $tax_ded, $is_afterschool, $program_start, $program_end, $is_grandfathered, $_POST['plan_id']];
+                school_param($params);
+                $stmt = $pdo->prepare("UPDATE membership_plans SET name = ?, description = ?, duration_months = ?, price = ?, classes_per_week = ?, status = ?, billing_frequency = ?, registration_fee = ?, tax_deductible = ?, is_afterschool = ?, program_start_date = ?, program_end_date = ?, is_grandfathered = ? WHERE id = ?" . school_where());
+                $stmt->execute($params);
                 $message = showAlert('Membership plan updated successfully!', 'success');
                 break;
 
             case 'delete_plan':
-                $check = $pdo->prepare("SELECT COUNT(*) as count FROM memberships WHERE plan_id = ? AND status = 'active'");
-                $check->execute([$_POST['plan_id']]);
+                $check_params = [$_POST['plan_id']];
+                school_param($check_params);
+                $check = $pdo->prepare("SELECT COUNT(*) as count FROM memberships WHERE plan_id = ? AND status = 'active'" . school_where());
+                $check->execute($check_params);
                 if ($check->fetch()['count'] > 0) {
                     $message = showAlert('Cannot delete plan with active memberships! Deactivate it instead.', 'error');
                 } else {
-                    $pdo->prepare("DELETE FROM membership_plans WHERE id = ?")->execute([$_POST['plan_id']]);
+                    $del_params = [$_POST['plan_id']];
+                    school_param($del_params);
+                    $pdo->prepare("DELETE FROM membership_plans WHERE id = ?" . school_where())->execute($del_params);
                     $message = showAlert('Membership plan deleted successfully!', 'success');
                 }
                 break;
@@ -139,25 +114,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 }
 
-                $stmt = $pdo->prepare("INSERT INTO memberships (student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, auto_renew, billing_day, monthly_charges_made) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                $stmt->execute([$_POST['student_id'], $plan_id, $start_date, $end_date, 'active', $_POST['payment_status'], $_POST['amount_paid'], $auto_renew, $billing_day, $monthly_charges]);
+                $stmt = $pdo->prepare("INSERT INTO memberships (school_id, student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, auto_renew, billing_day, monthly_charges_made) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->execute([current_school_id(), $_POST['student_id'], $plan_id, $start_date, $end_date, 'active', $_POST['payment_status'], $_POST['amount_paid'], $auto_renew, $billing_day, $monthly_charges]);
 
                 if ($_POST['payment_status'] === 'paid' && $_POST['amount_paid'] > 0) {
                     $membership_id = $pdo->lastInsertId();
-                    $pdo->prepare("INSERT INTO payments (student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes) VALUES (?, 'membership', ?, ?, ?, ?, ?, ?)")
-                        ->execute([$_POST['student_id'], $membership_id, $_POST['amount_paid'], $_POST['payment_method'], date('Y-m-d'), generateReceiptNumber(), 'Membership payment']);
+                    $pdo->prepare("INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes) VALUES (?, ?, 'membership', ?, ?, ?, ?, ?, ?)")
+                        ->execute([current_school_id(), $_POST['student_id'], $membership_id, $_POST['amount_paid'], $_POST['payment_method'], date('Y-m-d'), generateReceiptNumber(), 'Membership payment']);
                 }
                 $message = showAlert('Membership added successfully!', 'success');
                 break;
 
             case 'cancel_membership':
-                $pdo->prepare("UPDATE memberships SET status = 'cancelled' WHERE id = ?")->execute([$_POST['membership_id']]);
+                $cancel_params = [$_POST['membership_id']];
+                school_param($cancel_params);
+                $pdo->prepare("UPDATE memberships SET status = 'cancelled' WHERE id = ?" . school_where())->execute($cancel_params);
                 $message = showAlert('Membership cancelled!', 'success');
                 break;
 
             case 'toggle_auto_renew':
                 $new_value = $_POST['auto_renew_value'] == '1' ? 1 : 0;
-                $pdo->prepare("UPDATE memberships SET auto_renew = ? WHERE id = ?")->execute([$new_value, $_POST['membership_id']]);
+                $toggle_params = [$new_value, $_POST['membership_id']];
+                school_param($toggle_params);
+                $pdo->prepare("UPDATE memberships SET auto_renew = ? WHERE id = ?" . school_where())->execute($toggle_params);
                 $message = showAlert('Auto-renewal ' . ($new_value ? 'enabled' : 'disabled') . '!', 'success');
                 break;
         }
@@ -165,28 +144,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // Get all membership plans
-$plans = $pdo->query("SELECT * FROM membership_plans ORDER BY price ASC")->fetchAll();
+$plans_params = [];
+school_param($plans_params);
+$plans_stmt = $pdo->prepare("SELECT * FROM membership_plans " . school_where_clause() . " ORDER BY price ASC");
+$plans_stmt->execute($plans_params);
+$plans = $plans_stmt->fetchAll();
 
 // Get memberships (filtered)
 $status_filter = $_GET['status'] ?? 'active';
 $query = "SELECT m.*, s.first_name, s.last_name, s.email, mp.name as plan_name, mp.price as plan_price, mp.billing_frequency FROM memberships m JOIN students s ON m.student_id = s.id JOIN membership_plans mp ON m.plan_id = mp.id WHERE 1=1";
+if (!is_viewing_all_schools()) { $query .= " AND m.school_id = :school_id"; }
 if ($status_filter) { $query .= " AND m.status = :status"; }
-$query .= " ORDER BY m.created_at DESC";
+$query .= " ORDER BY m.created_at DESC LIMIT 500";
 $stmt = $pdo->prepare($query);
+if (!is_viewing_all_schools()) { $stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
 if ($status_filter) { $stmt->bindValue(':status', $status_filter); }
 $stmt->execute();
 $memberships = $stmt->fetchAll();
 
 // Get expiring soon (within 7 days)
-$expiring_soon = $pdo->query("
+$expiring_params = [];
+school_param($expiring_params);
+$expiring_stmt = $pdo->prepare("
     SELECT m.*, s.first_name, s.last_name, mp.name as plan_name
     FROM memberships m JOIN students s ON m.student_id = s.id JOIN membership_plans mp ON m.plan_id = mp.id
-    WHERE m.status = 'active' AND m.end_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)
+    WHERE m.status = 'active' AND m.end_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)" . school_where('m') . "
     ORDER BY m.end_date ASC
-")->fetchAll();
+");
+$expiring_stmt->execute($expiring_params);
+$expiring_soon = $expiring_stmt->fetchAll();
 
 // Get active students for dropdown
-$students = $pdo->query("SELECT id, first_name, last_name FROM students WHERE status = 'active' ORDER BY first_name, last_name")->fetchAll();
+$students_params = [];
+school_param($students_params);
+$students_stmt = $pdo->prepare("SELECT id, first_name, last_name FROM students WHERE status = 'active'" . school_where() . " ORDER BY first_name, last_name");
+$students_stmt->execute($students_params);
+$students = $students_stmt->fetchAll();
 
 include 'includes/header.php';
 ?>
@@ -197,7 +190,11 @@ include 'includes/header.php';
     <div class="flex justify-between items-center mb-6">
         <h1 class="text-3xl font-bold text-gray-800">Memberships</h1>
         <div class="space-x-3 flex items-center">
-            <?php if (getCurrentUser()['role'] === 'admin'): ?>
+            <?php if (in_array(getCurrentUser()['role'], ['admin', 'super_admin'])): ?>
+                <a href="test_renewals.php"
+                   class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-medium text-sm">
+                    &#128269; Test Renewals
+                </a>
                 <a href="cron.php" onclick="return confirm('Run membership renewal processing now?')"
                    class="bg-orange-600 hover:bg-orange-700 text-white px-4 py-2 rounded-lg font-medium text-sm">
                     ⟳ Process Renewals
@@ -271,14 +268,18 @@ include 'includes/header.php';
                             <?php if (!empty($plan['tax_deductible'])): ?>
                                 <span class="px-3 py-1 text-sm rounded-full bg-green-100 text-green-800 font-semibold">Tax-Deductible</span>
                             <?php endif; ?>
+                            <?php if (!empty($plan['is_grandfathered'])): ?>
+                                <span class="px-3 py-1 text-sm rounded-full bg-amber-100 text-amber-800 font-semibold">Grandfathered</span>
+                            <?php endif; ?>
                         </div>
                         <?php if (!empty($plan['is_afterschool']) && $plan['program_start_date'] && $plan['program_end_date']): ?>
                             <p class="text-sm text-indigo-700 mt-2">&#128197; Program: <?php echo date('M j, Y', strtotime($plan['program_start_date'])); ?> &ndash; <?php echo date('M j, Y', strtotime($plan['program_end_date'])); ?></p>
                         <?php endif; ?>
-                        <?php if (getCurrentUser()['role'] === 'admin'): ?>
+                        <?php if (in_array(getCurrentUser()['role'], ['admin', 'super_admin'])): ?>
                         <div class="mt-4 pt-4 border-t border-gray-200 flex space-x-2">
                             <button onclick="editPlan(<?php echo htmlspecialchars(json_encode($plan)); ?>)" class="flex-1 text-blue-600 hover:text-blue-800 text-sm font-medium">Edit</button>
                             <form method="POST" class="flex-1" onsubmit="return confirmDelete('Delete this plan?')">
+                                <?php echo csrf_field(); ?>
                                 <input type="hidden" name="action" value="delete_plan">
                                 <input type="hidden" name="plan_id" value="<?php echo $plan['id']; ?>">
                                 <button type="submit" class="w-full text-red-600 hover:text-red-800 text-sm font-medium">Delete</button>
@@ -344,6 +345,7 @@ include 'includes/header.php';
                         <td class="px-6 py-4 whitespace-nowrap">
                             <?php if ($m['status'] === 'active'): ?>
                                 <form method="POST" class="inline">
+                                    <?php echo csrf_field(); ?>
                                     <input type="hidden" name="action" value="toggle_auto_renew">
                                     <input type="hidden" name="membership_id" value="<?php echo $m['id']; ?>">
                                     <input type="hidden" name="auto_renew_value" value="<?php echo (isset($m['auto_renew']) && $m['auto_renew']) ? '0' : '1'; ?>">
@@ -357,6 +359,7 @@ include 'includes/header.php';
                             <a href="student_detail.php?id=<?php echo $m['student_id']; ?>" class="text-blue-600 hover:text-blue-900 mr-3">View</a>
                             <?php if ($m['status'] === 'active'): ?>
                                 <form method="POST" class="inline" onsubmit="return confirmDelete('Cancel this membership?')">
+                                    <?php echo csrf_field(); ?>
                                     <input type="hidden" name="action" value="cancel_membership">
                                     <input type="hidden" name="membership_id" value="<?php echo $m['id']; ?>">
                                     <button type="submit" class="text-red-600 hover:text-red-900">Cancel</button>
@@ -377,6 +380,7 @@ include 'includes/header.php';
     <div class="relative top-20 mx-auto p-5 border w-full max-w-2xl shadow-lg rounded-md bg-white">
         <div class="flex justify-between items-center mb-4"><h3 class="text-xl font-bold text-gray-800">Create Membership Plan</h3><button onclick="document.getElementById('addPlanModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button></div>
         <form method="POST" class="space-y-4">
+            <?php echo csrf_field(); ?>
             <input type="hidden" name="action" value="add_plan">
             <div><label class="block text-sm font-medium text-gray-700 mb-1">Plan Name *</label><input type="text" name="name" required placeholder="e.g., Premium Monthly" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"></div>
             <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><textarea name="description" rows="2" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"></textarea></div>
@@ -428,6 +432,15 @@ include 'includes/header.php';
                     </div>
                 </div>
             </div>
+            <div class="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <label class="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" name="is_grandfathered" value="1" class="w-5 h-5 text-amber-600 border-gray-300 rounded focus:ring-amber-500">
+                    <div>
+                        <span class="text-sm font-medium text-gray-700">Grandfathered Plan (Legacy Pricing)</span>
+                        <p class="text-xs text-gray-500 mt-0.5">Hidden from student self-signup. Can only be assigned to students by an admin.</p>
+                    </div>
+                </label>
+            </div>
             <div class="flex justify-end space-x-3 pt-4">
                 <button type="button" onclick="document.getElementById('addPlanModal').classList.add('hidden')" class="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Cancel</button>
                 <button type="submit" class="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg">Create Plan</button>
@@ -441,9 +454,10 @@ include 'includes/header.php';
     <div class="relative top-20 mx-auto p-5 border w-full max-w-2xl shadow-lg rounded-md bg-white">
         <div class="flex justify-between items-center mb-4"><h3 class="text-xl font-bold text-gray-800">Add Membership</h3><button onclick="document.getElementById('addMembershipModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button></div>
         <form method="POST" class="space-y-4">
+            <?php echo csrf_field(); ?>
             <input type="hidden" name="action" value="add_membership">
             <div><label class="block text-sm font-medium text-gray-700 mb-1">Student *</label><select name="student_id" required class="w-full px-3 py-2 border border-gray-300 rounded-lg"><option value="">Choose a student...</option><?php foreach ($students as $s): ?><option value="<?php echo $s['id']; ?>"><?php echo htmlspecialchars($s['first_name'] . ' ' . $s['last_name']); ?></option><?php endforeach; ?></select></div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Plan *</label><select name="plan_id" required class="w-full px-3 py-2 border border-gray-300 rounded-lg"><option value="">Choose a plan...</option><?php foreach ($plans as $p): ?><?php if ($p['status'] === 'active'): ?><option value="<?php echo $p['id']; ?>"><?php echo $p['name']; ?> - <?php echo formatMoney($p['price']); ?> (<?php echo $p['duration_months']; ?>mo)</option><?php endif; ?><?php endforeach; ?></select></div>
+            <div><label class="block text-sm font-medium text-gray-700 mb-1">Plan *</label><select name="plan_id" required class="w-full px-3 py-2 border border-gray-300 rounded-lg"><option value="">Choose a plan...</option><?php foreach ($plans as $p): ?><?php if ($p['status'] === 'active'): ?><option value="<?php echo $p['id']; ?>"><?php echo $p['name']; ?><?php if (!empty($p['is_grandfathered'])): ?> (Grandfathered)<?php endif; ?> - <?php echo formatMoney($p['price']); ?> (<?php echo $p['duration_months']; ?>mo)</option><?php endif; ?><?php endforeach; ?></select></div>
             <div><label class="block text-sm font-medium text-gray-700 mb-1">Start Date *</label><input type="date" name="start_date" value="<?php echo date('Y-m-d'); ?>" required class="w-full px-3 py-2 border border-gray-300 rounded-lg"></div>
             <div class="grid grid-cols-2 gap-4">
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Payment Status *</label><select name="payment_status" required class="w-full px-3 py-2 border border-gray-300 rounded-lg"><option value="paid">Paid</option><option value="pending">Pending</option><option value="partial">Partial</option></select></div>
@@ -467,6 +481,7 @@ include 'includes/header.php';
     <div class="relative top-20 mx-auto p-5 border w-full max-w-2xl shadow-lg rounded-md bg-white">
         <div class="flex justify-between items-center mb-4"><h3 class="text-xl font-bold text-gray-800">Edit Plan</h3><button onclick="document.getElementById('editPlanModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button></div>
         <form method="POST" class="space-y-4">
+            <?php echo csrf_field(); ?>
             <input type="hidden" name="action" value="edit_plan"><input type="hidden" name="plan_id" id="edit_plan_id">
             <div><label class="block text-sm font-medium text-gray-700 mb-1">Plan Name *</label><input type="text" name="name" id="edit_name" required class="w-full px-3 py-2 border border-gray-300 rounded-lg"></div>
             <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><textarea name="description" id="edit_description" rows="2" class="w-full px-3 py-2 border border-gray-300 rounded-lg"></textarea></div>
@@ -517,6 +532,15 @@ include 'includes/header.php';
                         <p class="text-xs text-indigo-600">&#128161; Duration will be auto-calculated from the program dates. Auto-renewal is disabled for afterschool plans.</p>
                     </div>
                 </div>
+            </div>
+            <div class="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <label class="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" name="is_grandfathered" value="1" id="edit_is_grandfathered" class="w-5 h-5 text-amber-600 border-gray-300 rounded focus:ring-amber-500">
+                    <div>
+                        <span class="text-sm font-medium text-gray-700">Grandfathered Plan (Legacy Pricing)</span>
+                        <p class="text-xs text-gray-500 mt-0.5">Hidden from student self-signup. Can only be assigned to students by an admin.</p>
+                    </div>
+                </label>
             </div>
             <div class="flex justify-end space-x-3 pt-4">
                 <button type="button" onclick="document.getElementById('editPlanModal').classList.add('hidden')" class="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Cancel</button>
@@ -583,6 +607,9 @@ function editPlan(plan) {
     document.getElementById('edit_billing_frequency').value = plan.billing_frequency || 'upfront';
     document.getElementById('edit_registration_fee').value = plan.registration_fee || 0;
     document.getElementById('edit_tax_deductible').checked = (plan.tax_deductible == 1);
+
+    // Grandfathered flag
+    document.getElementById('edit_is_grandfathered').checked = (plan.is_grandfathered == 1);
 
     // Afterschool fields
     var isAfterschool = (plan.is_afterschool == 1);

@@ -22,88 +22,102 @@ $child = parent_verify_child($parentId, $childId);
 $children = get_parent_children($parentId);
 
 // Current belt
+$params = [$childId];
 $beltStmt = $pdo->prepare("
     SELECT sb.*, b.name as belt_name, b.color, mas.name as style_name, b.rank_order
     FROM student_belts sb
     JOIN belts b ON sb.belt_id = b.id
     JOIN martial_arts_styles mas ON sb.style_id = mas.id
-    WHERE sb.student_id = ?
+    WHERE sb.student_id = ?" . school_where('sb') . "
     ORDER BY sb.awarded_date DESC
     LIMIT 1
 ");
-$beltStmt->execute([$childId]);
+school_param($params);
+$beltStmt->execute($params);
 $currentBelt = $beltStmt->fetch();
 
 // Active membership
+$params = [$childId];
 $memStmt = $pdo->prepare("
     SELECT m.*, mp.name as plan_name, mp.price, mp.classes_per_week, mp.duration_months, mp.billing_frequency
     FROM memberships m
     JOIN membership_plans mp ON m.plan_id = mp.id
-    WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()
+    WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()" . school_where('m') . "
     ORDER BY m.end_date DESC LIMIT 1
 ");
-$memStmt->execute([$childId]);
+school_param($params);
+$memStmt->execute($params);
 $membership = $memStmt->fetch();
 
 // Enrolled classes (schedule)
+$params = [$childId];
 $schedStmt = $pdo->prepare("
     SELECT c.name as class_name, c.day_of_week, c.start_time, c.end_time
     FROM class_enrollments ce
     JOIN classes c ON ce.class_id = c.id
-    WHERE ce.student_id = ? AND ce.status = 'active'
+    WHERE ce.student_id = ? AND ce.status = 'active'" . school_where('ce') . "
     ORDER BY FIELD(c.day_of_week, 'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'), c.start_time
 ");
-$schedStmt->execute([$childId]);
+school_param($params);
+$schedStmt->execute($params);
 $schedule = $schedStmt->fetchAll();
 
 // Attendance stats
+$params = [$childId];
 $statsStmt = $pdo->prepare("
     SELECT
         COUNT(*) as total,
         SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) as present,
         SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) as absent,
         SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) as late
-    FROM attendance WHERE student_id = ?
+    FROM attendance WHERE student_id = ?" . school_where() . "
 ");
-$statsStmt->execute([$childId]);
+school_param($params);
+$statsStmt->execute($params);
 $stats = $statsStmt->fetch();
 $attendanceRate = ($stats['total'] > 0) ? round(($stats['present'] / $stats['total']) * 100) : 0;
 
 // Upcoming events (registered + calendar-only)
+$params = [$childId];
 $evStmt = $pdo->prepare("
     SELECT e.id, e.name, e.event_date, e.start_time, e.event_type, e.location, e.requires_registration,
            er.payment_status, er.attendance_status
     FROM events e
     LEFT JOIN event_registrations er ON er.event_id = e.id AND er.student_id = ?
     WHERE e.event_date >= CURDATE()
-      AND (er.id IS NOT NULL OR e.requires_registration = 0)
+      AND (er.id IS NOT NULL OR e.requires_registration = 0)" . school_where('e') . "
     ORDER BY e.event_date ASC
     LIMIT 8
 ");
-$evStmt->execute([$childId]);
+school_param($params);
+$evStmt->execute($params);
 $upcomingEvents = $evStmt->fetchAll();
 
 // Recent attendance (last 15)
+$params = [$childId];
 $attStmt = $pdo->prepare("
     SELECT a.*, c.name as class_name
     FROM attendance a
     JOIN classes c ON a.class_id = c.id
-    WHERE a.student_id = ?
+    WHERE a.student_id = ?" . school_where('a') . "
     ORDER BY a.attendance_date DESC LIMIT 15
 ");
-$attStmt->execute([$childId]);
+school_param($params);
+$attStmt->execute($params);
 $recentAttendance = $attStmt->fetchAll();
 
 // Belt history
+$params = [$childId];
 $beltHistStmt = $pdo->prepare("
     SELECT sb.*, b.name as belt_name, b.color, mas.name as style_name
     FROM student_belts sb
     JOIN belts b ON sb.belt_id = b.id
     JOIN martial_arts_styles mas ON sb.style_id = mas.id
-    WHERE sb.student_id = ?
+    WHERE sb.student_id = ?" . school_where('sb') . "
     ORDER BY sb.awarded_date DESC
 ");
-$beltHistStmt->execute([$childId]);
+school_param($params);
+$beltHistStmt->execute($params);
 $beltHistory = $beltHistStmt->fetchAll();
 
 include 'includes/parent_header.php';

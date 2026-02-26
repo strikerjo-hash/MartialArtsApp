@@ -23,6 +23,7 @@ $gwReady = is_gateway_ready();
 // Handle POST actions
 // ---------------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    verify_csrf();
     $selectedIds = $_POST['registration_ids'] ?? [];
     $selectedIds = array_map('intval', $selectedIds);
     $selectedIds = array_filter($selectedIds);
@@ -44,16 +45,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 }
 
                 // Fetch registrations with student + event info
-                $regStmt = $pdo->prepare("
+                $regQuery = "
                     SELECT er.id, er.student_id, er.event_id, er.parent_id,
                            e.name AS event_name, e.registration_fee,
                            s.first_name, s.last_name
                     FROM event_registrations er
                     JOIN events e ON er.event_id = e.id
                     JOIN students s ON s.id = er.student_id
-                    WHERE er.id IN ({$placeholders}) AND er.payment_status = 'pending'
-                ");
-                $regStmt->execute($selectedIds);
+                    WHERE er.id IN ({$placeholders}) AND er.payment_status = 'pending'"
+                    . school_where('s');
+                $regParams = $selectedIds;
+                school_param($regParams);
+                $regStmt = $pdo->prepare($regQuery);
+                $regStmt->execute($regParams);
                 $regs = $regStmt->fetchAll();
 
                 $successCount = 0;
@@ -64,7 +68,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     $baseFee = (float)$reg['registration_fee'];
                     if ($baseFee <= 0) {
                         // No fee — just mark as waived
-                        $pdo->prepare("UPDATE event_registrations SET payment_status = 'waived', amount_paid = 0 WHERE id = ?")->execute([$reg['id']]);
+                        $wParams = [$reg['id']];
+                        school_param($wParams);
+                        $pdo->prepare("UPDATE event_registrations SET payment_status = 'waived', amount_paid = 0 WHERE id = ?" . school_where())->execute($wParams);
                         $successCount++;
                         continue;
                     }
@@ -98,7 +104,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     $result = charge_student($chargeStudentId, $totalToCharge, $desc);
 
                     if ($result['success']) {
-                        $pdo->prepare("UPDATE event_registrations SET payment_status = 'paid', amount_paid = ? WHERE id = ?")->execute([$totalToCharge, $reg['id']]);
+                        $upParams = [$totalToCharge, $reg['id']];
+                        school_param($upParams);
+                        $pdo->prepare("UPDATE event_registrations SET payment_status = 'paid', amount_paid = ? WHERE id = ?" . school_where())->execute($upParams);
 
                         // Record in payments table
                         $payNotes = $desc . ' | Txn: ' . ($result['transaction_id'] ?? 'N/A');
@@ -107,28 +115,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         }
                         $pdo->prepare("
                             INSERT INTO payments (student_id, payment_type, reference_id, amount,
-                                                payment_method, payment_date, receipt_number, notes)
-                            VALUES (?, 'event', ?, ?, 'credit_card', CURDATE(), ?, ?)
+                                                payment_method, payment_date, receipt_number, notes, school_id)
+                            VALUES (?, 'event', ?, ?, 'credit_card', CURDATE(), ?, ?, ?)
                         ")->execute([
                             $reg['student_id'],
                             $reg['event_id'],
                             $result['amount_charged'] ?? $totalToCharge,
                             generateReceiptNumber(),
-                            $payNotes
+                            $payNotes,
+                            current_school_id()
                         ]);
 
                         // Record credit if used
                         if (($result['credit_used'] ?? 0) > 0) {
                             $pdo->prepare("
                                 INSERT INTO payments (student_id, payment_type, reference_id, amount,
-                                                    payment_method, payment_date, receipt_number, notes)
-                                VALUES (?, 'event', ?, ?, 'account_credit', CURDATE(), ?, ?)
+                                                    payment_method, payment_date, receipt_number, notes, school_id)
+                                VALUES (?, 'event', ?, ?, 'account_credit', CURDATE(), ?, ?, ?)
                             ")->execute([
                                 $chargeStudentId,
                                 $reg['event_id'],
                                 $result['credit_used'],
                                 generateReceiptNumber(),
-                                'Account credit applied (admin processed) — ' . $reg['event_name']
+                                'Account credit applied (admin processed) — ' . $reg['event_name'],
+                                current_school_id()
                             ]);
                         }
 
@@ -160,35 +170,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $method = sanitizeInput($_POST['manual_method'] ?? 'cash');
                 $notes  = sanitizeInput($_POST['manual_notes'] ?? '');
 
-                $regStmt = $pdo->prepare("
+                $regQuery2 = "
                     SELECT er.id, er.student_id, er.event_id,
                            e.name AS event_name, e.registration_fee,
                            s.first_name, s.last_name
                     FROM event_registrations er
                     JOIN events e ON er.event_id = e.id
                     JOIN students s ON s.id = er.student_id
-                    WHERE er.id IN ({$placeholders}) AND er.payment_status = 'pending'
-                ");
-                $regStmt->execute($selectedIds);
+                    WHERE er.id IN ({$placeholders}) AND er.payment_status = 'pending'"
+                    . school_where('s');
+                $regParams2 = $selectedIds;
+                school_param($regParams2);
+                $regStmt = $pdo->prepare($regQuery2);
+                $regStmt->execute($regParams2);
                 $regs = $regStmt->fetchAll();
 
                 $count = 0;
                 foreach ($regs as $reg) {
                     $fee = (float)$reg['registration_fee'];
-                    $pdo->prepare("UPDATE event_registrations SET payment_status = 'paid', amount_paid = ? WHERE id = ?")->execute([$fee, $reg['id']]);
+                    $upParams2 = [$fee, $reg['id']];
+                    school_param($upParams2);
+                    $pdo->prepare("UPDATE event_registrations SET payment_status = 'paid', amount_paid = ? WHERE id = ?" . school_where())->execute($upParams2);
 
                     // Record payment
                     $pdo->prepare("
                         INSERT INTO payments (student_id, payment_type, reference_id, amount,
-                                            payment_method, payment_date, receipt_number, notes)
-                        VALUES (?, 'event', ?, ?, ?, CURDATE(), ?, ?)
+                                            payment_method, payment_date, receipt_number, notes, school_id)
+                        VALUES (?, 'event', ?, ?, ?, CURDATE(), ?, ?, ?)
                     ")->execute([
                         $reg['student_id'],
                         $reg['event_id'],
                         $fee,
                         $method,
                         generateReceiptNumber(),
-                        'Event: ' . $reg['event_name'] . ' — ' . $reg['first_name'] . ' ' . $reg['last_name'] . ($notes ? " | {$notes}" : '') . ' (admin marked paid)'
+                        'Event: ' . $reg['event_name'] . ' — ' . $reg['first_name'] . ' ' . $reg['last_name'] . ($notes ? " | {$notes}" : '') . ' (admin marked paid)',
+                        current_school_id()
                     ]);
                     $count++;
                 }
@@ -350,6 +366,7 @@ include 'includes/header.php';
 
     <!-- Action Bar -->
     <form method="POST" id="pendingForm">
+        <?= csrf_field() ?>
         <div class="bg-white rounded-lg shadow mb-4">
             <div class="px-6 py-4 border-b border-gray-200 flex flex-wrap items-center justify-between gap-4">
                 <div class="flex items-center gap-4">

@@ -11,44 +11,71 @@ require_once 'config.php';
 requireLogin();
 
 // Dashboard statistics
-$studentCount = (int)$pdo->query("SELECT COUNT(*) FROM students WHERE status = 'active'")->fetchColumn();
-$classCount   = (int)$pdo->query("SELECT COUNT(*) FROM classes WHERE status = 'active'")->fetchColumn();
-$todayAttend  = (int)$pdo->query("SELECT COUNT(*) FROM attendance WHERE attendance_date = CURDATE()")->fetchColumn();
+$params = [];
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM students WHERE status = 'active'" . school_where());
+school_param($params);
+$stmt->execute($params);
+$studentCount = (int)$stmt->fetchColumn();
+
+$params = [];
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM classes WHERE status = 'active'" . school_where());
+school_param($params);
+$stmt->execute($params);
+$classCount = (int)$stmt->fetchColumn();
+
+$params = [];
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE attendance_date = CURDATE()" . school_where());
+school_param($params);
+$stmt->execute($params);
+$todayAttend = (int)$stmt->fetchColumn();
 
 // Pending registrations count
 $pendingCount = 0;
 try {
-    $pendingCount = (int)$pdo->query("
+    $params = [];
+    $stmt = $pdo->prepare("
         SELECT COUNT(*) FROM students s
         JOIN memberships m ON s.id = m.student_id
-        WHERE s.status = 'inactive' AND m.status = 'cancelled' AND m.payment_status = 'pending'
-    ")->fetchColumn();
+        WHERE s.status = 'inactive' AND m.status = 'cancelled' AND m.payment_status = 'pending'" . school_where('s'));
+    school_param($params);
+    $stmt->execute($params);
+    $pendingCount = (int)$stmt->fetchColumn();
 } catch (\PDOException $e) {}
 
 // Recent students
-$recentStudents = $pdo->query("
+$params = [];
+$stmt = $pdo->prepare("
     SELECT first_name, last_name, join_date, status
-    FROM students ORDER BY join_date DESC LIMIT 5
-")->fetchAll();
+    FROM students WHERE 1=1" . school_where() . "
+    ORDER BY join_date DESC LIMIT 5");
+school_param($params);
+$stmt->execute($params);
+$recentStudents = $stmt->fetchAll();
 
 // Upcoming events
 $upcomingEvents = [];
 try {
-    $upcomingEvents = $pdo->query("
+    $params = [];
+    $stmt = $pdo->prepare("
         SELECT id, name, event_type, event_date, location, start_time, status
-        FROM events WHERE event_date >= CURDATE()
-        ORDER BY event_date ASC LIMIT 5
-    ")->fetchAll();
+        FROM events WHERE event_date >= CURDATE()" . school_where() . "
+        ORDER BY event_date ASC LIMIT 5");
+    school_param($params);
+    $stmt->execute($params);
+    $upcomingEvents = $stmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // Monthly revenue
 $monthlyRevenue = 0;
 try {
-    $monthlyRevenue = (float)$pdo->query("
+    $params = [];
+    $stmt = $pdo->prepare("
         SELECT COALESCE(SUM(amount), 0) FROM payments
         WHERE MONTH(payment_date) = MONTH(CURDATE()) AND YEAR(payment_date) = YEAR(CURDATE())
-        AND status = 'completed'
-    ")->fetchColumn();
+        AND status = 'completed'" . school_where());
+    school_param($params);
+    $stmt->execute($params);
+    $monthlyRevenue = (float)$stmt->fetchColumn();
 } catch (\PDOException $e) {}
 
 include 'includes/header.php';
@@ -237,6 +264,31 @@ include 'includes/header.php';
             </a>
         </div>
     </div>
+
+    <?php if (in_array(getCurrentUser()['role'], ['admin', 'super_admin'])): ?>
+    <!-- Admin Testing Tools -->
+    <div class="mt-6 bg-white rounded-lg shadow p-6">
+        <h2 class="text-lg font-semibold text-gray-800 mb-4">Testing &amp; Diagnostics</h2>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <a href="seed_test_data.php" class="flex flex-col items-center p-4 bg-green-50 rounded-lg hover:bg-green-100 transition">
+                <span class="text-2xl mb-2">&#127793;</span>
+                <span class="text-sm font-medium text-gray-700">Seed Test Data</span>
+            </a>
+            <a href="test_regression.php" class="flex flex-col items-center p-4 bg-indigo-50 rounded-lg hover:bg-indigo-100 transition">
+                <span class="text-2xl mb-2">&#9989;</span>
+                <span class="text-sm font-medium text-gray-700">Regression Tests</span>
+            </a>
+            <a href="test_renewals.php" class="flex flex-col items-center p-4 bg-purple-50 rounded-lg hover:bg-purple-100 transition">
+                <span class="text-2xl mb-2">&#128269;</span>
+                <span class="text-sm font-medium text-gray-700">Test Renewals</span>
+            </a>
+            <a href="cron.php" onclick="return confirm('Run membership renewal processing now?')" class="flex flex-col items-center p-4 bg-orange-50 rounded-lg hover:bg-orange-100 transition">
+                <span class="text-2xl mb-2">&#9889;</span>
+                <span class="text-sm font-medium text-gray-700">Process Renewals</span>
+            </a>
+        </div>
+    </div>
+    <?php endif; ?>
 </div>
 
 <?php include 'includes/footer.php'; ?>

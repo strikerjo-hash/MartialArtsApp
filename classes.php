@@ -2,45 +2,9 @@
 require_once 'config.php';
 requireLogin();
 
-// --- Migration: ensure class_enrollments.status ENUM includes 'dropped' and fix stale 'inactive' rows ---
-try {
-    $pdo->exec("ALTER TABLE class_enrollments MODIFY COLUMN status ENUM('active','dropped') NOT NULL DEFAULT 'active'");
-} catch (PDOException $e) {}
-try {
-    // Fix any rows that were set to 'inactive' by the old unenroll code (ENUM mismatch)
-    $pdo->exec("UPDATE class_enrollments SET status = 'dropped' WHERE status NOT IN ('active','dropped')");
-} catch (PDOException $e) {}
+// Migrations have been moved to migrate.php
 
 $message = '';
-
-// --- Migration: create rooms table and add room_id to classes ---
-try {
-    $pdo->exec("CREATE TABLE IF NOT EXISTS rooms (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(100) NOT NULL,
-        sort_order INT DEFAULT 0,
-        status ENUM('active','inactive') DEFAULT 'active',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )");
-} catch (PDOException $e) {}
-try {
-    $pdo->exec("ALTER TABLE classes ADD COLUMN room_id INT DEFAULT NULL");
-} catch (PDOException $e) {} // column already exists — ignore
-// Seed a default room if none exist
-try {
-    $roomCount = $pdo->query("SELECT COUNT(*) FROM rooms")->fetchColumn();
-    if ($roomCount == 0) {
-        $pdo->exec("INSERT INTO rooms (name, sort_order) VALUES ('Main Room', 1)");
-    }
-} catch (PDOException $e) {}
-
-// --- Migration: expand skill_level ENUM with new warrior/belt levels ---
-try {
-    $pdo->exec("ALTER TABLE classes MODIFY COLUMN skill_level
-        ENUM('beginner','intermediate','advanced','all',
-             'black_belt','ninja','beginner_warrior','intermediate_warrior','advanced_warrior')
-        DEFAULT 'all'");
-} catch (PDOException $e) {}
 
 // AJAX handler for schedule drag-and-drop updates (must come BEFORE verify_csrf)
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'update_schedule' && $_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -79,7 +43,8 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'update_schedule' && $_SERVER['REQ
         }
 
         $params[] = $classId;
-        $sql = 'UPDATE classes SET ' . implode(', ', $updates) . ' WHERE id = ?';
+        $sql = 'UPDATE classes SET ' . implode(', ', $updates) . ' WHERE id = ?' . school_where();
+        school_param($params);
         $pdo->prepare($sql)->execute($params);
 
         echo json_encode(['success' => true]);
@@ -96,11 +61,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         switch ($_POST['action']) {
             case 'add':
                 $stmt = $pdo->prepare("
-                    INSERT INTO classes (name, style_id, instructor_id, day_of_week, start_time,
+                    INSERT INTO classes (school_id, name, style_id, instructor_id, day_of_week, start_time,
                                        end_time, max_students, skill_level, description, status, room_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
                 $stmt->execute([
+                    current_school_id(),
                     sanitizeInput($_POST['name']),
                     $_POST['style_id'],
                     $_POST['instructor_id'] ?: null,
@@ -125,8 +91,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $enrollment_error = '';
 
                 // Check if student is already actively enrolled in this class
-                $alreadyEnrolled = $pdo->prepare("SELECT id FROM class_enrollments WHERE student_id = ? AND class_id = ? AND status = 'active'");
-                $alreadyEnrolled->execute([$student_id, $class_id]);
+                $alreadyEnrolledParams = [$student_id, $class_id];
+                $alreadyEnrolled = $pdo->prepare("SELECT id FROM class_enrollments WHERE student_id = ? AND class_id = ? AND status = 'active'" . school_where());
+                school_param($alreadyEnrolledParams);
+                $alreadyEnrolled->execute($alreadyEnrolledParams);
                 if ($alreadyEnrolled->fetch()) {
                     $enrollment_error = 'This student is already enrolled in this class.';
                 }
@@ -175,11 +143,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     try {
                         // Use ON DUPLICATE KEY UPDATE to handle re-enrollment of previously dropped students
                         $stmt = $pdo->prepare("
-                            INSERT INTO class_enrollments (student_id, class_id, enrollment_date, status)
-                            VALUES (?, ?, CURDATE(), 'active')
+                            INSERT INTO class_enrollments (school_id, student_id, class_id, enrollment_date, status)
+                            VALUES (?, ?, ?, CURDATE(), 'active')
                             ON DUPLICATE KEY UPDATE status = 'active', enrollment_date = CURDATE()
                         ");
-                        $stmt->execute([$student_id, $class_id]);
+                        $stmt->execute([current_school_id(), $student_id, $class_id]);
                         $override_note = $admin_override ? ' (Admin Override)' : '';
                         $message = showAlert('Student enrolled successfully!' . $override_note, 'success');
                     } catch (PDOException $e) {
@@ -194,12 +162,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
 
             case 'edit':
-                $stmt = $pdo->prepare("
-                    UPDATE classes SET name=?, style_id=?, instructor_id=?, day_of_week=?,
-                        start_time=?, end_time=?, max_students=?, skill_level=?, description=?, status=?, room_id=?
-                    WHERE id = ?
-                ");
-                $stmt->execute([
+                $editParams = [
                     sanitizeInput($_POST['name']),
                     $_POST['style_id'],
                     $_POST['instructor_id'] ?: null,
@@ -212,13 +175,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $_POST['status'],
                     $_POST['room_id'] ?: null,
                     $_POST['class_id']
-                ]);
+                ];
+                $stmt = $pdo->prepare("
+                    UPDATE classes SET name=?, style_id=?, instructor_id=?, day_of_week=?,
+                        start_time=?, end_time=?, max_students=?, skill_level=?, description=?, status=?, room_id=?
+                    WHERE id = ?" . school_where() . "
+                ");
+                school_param($editParams);
+                $stmt->execute($editParams);
                 $message = showAlert('Class updated successfully!', 'success');
                 break;
 
             case 'delete':
-                $stmt = $pdo->prepare("DELETE FROM classes WHERE id = ?");
-                $stmt->execute([$_POST['class_id']]);
+                $deleteParams = [$_POST['class_id']];
+                $stmt = $pdo->prepare("DELETE FROM classes WHERE id = ?" . school_where());
+                school_param($deleteParams);
+                $stmt->execute($deleteParams);
                 $message = showAlert('Class deleted successfully!', 'success');
                 break;
         }
@@ -230,9 +202,17 @@ $day_filter = $_GET['day'] ?? '';
 $room_filter = $_GET['room'] ?? '';
 
 // Fetch active rooms for dropdowns, filters, and tabs
-$rooms = $pdo->query("SELECT * FROM rooms WHERE status='active' ORDER BY sort_order, name")->fetchAll();
+$roomParams = [];
+$roomStmt = $pdo->prepare("SELECT * FROM rooms WHERE status='active'" . school_where() . " ORDER BY sort_order, name");
+school_param($roomParams);
+$roomStmt->execute($roomParams);
+$rooms = $roomStmt->fetchAll();
 // Also fetch all rooms (including inactive) for display on existing classes
-$allRooms = $pdo->query("SELECT * FROM rooms ORDER BY sort_order, name")->fetchAll();
+$allRoomParams = [];
+$allRoomStmt = $pdo->prepare("SELECT * FROM rooms WHERE 1=1" . school_where() . " ORDER BY sort_order, name");
+school_param($allRoomParams);
+$allRoomStmt->execute($allRoomParams);
+$allRooms = $allRoomStmt->fetchAll();
 
 $query = "
     SELECT c.*,
@@ -246,7 +226,7 @@ $query = "
     LEFT JOIN martial_arts_styles mas ON c.style_id = mas.id
     LEFT JOIN rooms r ON c.room_id = r.id
     LEFT JOIN class_enrollments ce ON c.id = ce.class_id AND ce.status = 'active'
-    WHERE 1=1
+    WHERE 1=1 AND c.school_id = :school_id
 ";
 
 if ($day_filter) {
@@ -261,6 +241,7 @@ $query .= " GROUP BY c.id ORDER BY
     c.start_time ASC";
 
 $stmt = $pdo->prepare($query);
+$stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT);
 if ($day_filter) {
     $stmt->bindValue(':day', $day_filter);
 }
@@ -274,20 +255,28 @@ $classes = $stmt->fetchAll();
 $styles = $pdo->query("SELECT * FROM martial_arts_styles ORDER BY name")->fetchAll();
 
 // Get instructors
-$instructors = $pdo->query("SELECT id, full_name FROM users WHERE role IN ('admin', 'instructor') ORDER BY full_name")->fetchAll();
+$instructorParams = [];
+$instructorStmt = $pdo->prepare("SELECT id, full_name FROM users WHERE role IN ('admin', 'super_admin', 'instructor')" . school_where() . " ORDER BY full_name");
+school_param($instructorParams);
+$instructorStmt->execute($instructorParams);
+$instructors = $instructorStmt->fetchAll();
 
 // Get students for enrollment (with their membership info)
-$students = $pdo->query("
+$studentParams = [];
+$studentStmt = $pdo->prepare("
     SELECT s.id, s.first_name, s.last_name,
            m.status as mem_status, mp.classes_per_week,
            (SELECT COUNT(*) FROM class_enrollments ce WHERE ce.student_id = s.id AND ce.status = 'active') as current_enrollments
     FROM students s
     LEFT JOIN memberships m ON m.student_id = s.id AND m.status = 'active' AND m.end_date >= CURDATE()
     LEFT JOIN membership_plans mp ON m.plan_id = mp.id
-    WHERE s.status = 'active'
+    WHERE s.status = 'active'" . school_where('s') . "
     GROUP BY s.id
     ORDER BY s.first_name, s.last_name
-")->fetchAll();
+");
+school_param($studentParams);
+$studentStmt->execute($studentParams);
+$students = $studentStmt->fetchAll();
 
 include 'includes/header.php';
 ?>
@@ -607,6 +596,53 @@ include 'includes/header.php';
                                 $classStart = strtotime($c['start_time']);
                                 return $classStart >= $slotStart && $classStart < $slotEnd;
                             });
+
+                            // Group by room for side-by-side display
+                            $byRoom = [];
+                            foreach ($slotClasses as $sc) {
+                                $rKey = (int)($sc['room_id'] ?? 0);
+                                $byRoom[$rKey][] = $sc;
+                            }
+                            $roomCount = count($byRoom);
+
+                            if ($roomCount > 1): ?>
+                            <div class="flex gap-0.5 h-full">
+                                <?php foreach ($byRoom as $roomId => $roomClasses): ?>
+                                <div class="flex-1 min-w-0">
+                                    <?php foreach ($roomClasses as $kclass): ?>
+                                    <div class="bg-white rounded shadow-sm p-1.5 cursor-move border-l-4 <?php echo $kclass['status'] === 'active' ? 'border-blue-500' : 'border-gray-300'; ?> hover:shadow-md transition-shadow kanban-card text-xs mb-0.5"
+                                         draggable="true"
+                                         data-class-id="<?php echo $kclass['id']; ?>"
+                                         data-room-id="<?php echo $kclass['room_id'] ?? ''; ?>"
+                                         data-start-time="<?php echo $kclass['start_time']; ?>"
+                                         data-end-time="<?php echo $kclass['end_time']; ?>"
+                                         ondragstart="handleDragStart(event, <?php echo $kclass['id']; ?>)">
+                                        <?php if ($kclass['room_name']): ?>
+                                            <span class="inline-block w-full px-1 py-0.5 rounded text-[9px] font-bold bg-indigo-100 text-indigo-700 mb-0.5 truncate text-center">
+                                                <?php echo htmlspecialchars($kclass['room_name']); ?>
+                                            </span>
+                                        <?php endif; ?>
+                                        <div class="font-semibold text-gray-800 truncate" title="<?php echo htmlspecialchars($kclass['name']); ?>">
+                                            <?php echo htmlspecialchars($kclass['name']); ?>
+                                        </div>
+                                        <div class="text-blue-600 font-medium">
+                                            <?php echo date('g:i', strtotime($kclass['start_time'])); ?>-<?php echo date('g:i A', strtotime($kclass['end_time'])); ?>
+                                        </div>
+                                        <?php if ($kclass['instructor_name']): ?>
+                                            <div class="text-gray-400 truncate"><?php echo htmlspecialchars($kclass['instructor_name']); ?></div>
+                                        <?php endif; ?>
+                                        <div class="flex items-center justify-between mt-1 pt-0.5 border-t border-gray-100">
+                                            <span class="text-gray-400"><?php echo $kclass['enrolled_count']; ?>/<?php echo $kclass['max_students']; ?></span>
+                                            <button onclick="editClass(<?php echo htmlspecialchars(json_encode($kclass), ENT_QUOTES); ?>); event.stopPropagation();"
+                                                    class="text-blue-600 hover:text-blue-800 font-medium">Edit</button>
+                                        </div>
+                                    </div>
+                                    <?php endforeach; ?>
+                                </div>
+                                <?php endforeach; ?>
+                            </div>
+                            <?php else:
+                            // Single room (or no room) — normal stacked layout
                             foreach ($slotClasses as $kclass):
                             ?>
                             <div class="bg-white rounded shadow-sm p-1.5 cursor-move border-l-4 <?php echo $kclass['status'] === 'active' ? 'border-blue-500' : 'border-gray-300'; ?> hover:shadow-md transition-shadow kanban-card text-xs mb-0.5"
@@ -636,7 +672,7 @@ include 'includes/header.php';
                                             class="text-blue-600 hover:text-blue-800 font-medium">Edit</button>
                                 </div>
                             </div>
-                            <?php endforeach; ?>
+                            <?php endforeach; endif; ?>
                         </div>
                         <?php endforeach; ?>
                     <?php endforeach; ?>
@@ -974,7 +1010,7 @@ include 'includes/header.php';
             </div>
 
             <!-- Admin Override -->
-            <?php if (getCurrentUser()['role'] === 'admin'): ?>
+            <?php if (in_array(getCurrentUser()['role'], ['admin', 'super_admin'])): ?>
             <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
                 <label class="flex items-center space-x-2 cursor-pointer">
                     <input type="checkbox" name="admin_override" value="1" class="rounded border-gray-300 text-yellow-600">
@@ -1077,14 +1113,16 @@ function checkEnrollmentEligibility(studentId) {
 const rosterData = <?php
     $rosterData = [];
     foreach ($classes as $class) {
+        $rosterParams = [$class['id']];
         $enrolled = $pdo->prepare("
             SELECT ce.id as enrollment_id, s.first_name, s.last_name, s.email, ce.enrollment_date
             FROM class_enrollments ce
             JOIN students s ON ce.student_id = s.id
-            WHERE ce.class_id = ? AND ce.status = 'active'
+            WHERE ce.class_id = ? AND ce.status = 'active'" . school_where('ce') . "
             ORDER BY s.first_name, s.last_name
         ");
-        $enrolled->execute([$class['id']]);
+        school_param($rosterParams);
+        $enrolled->execute($rosterParams);
         $rosterData[$class['id']] = $enrolled->fetchAll();
     }
     echo json_encode($rosterData);

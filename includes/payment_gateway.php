@@ -19,6 +19,7 @@
 
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/security.php';
+require_once __DIR__ . '/tenant.php';
 
 // ---------------------------------------------------------------------------
 // Gateway detection
@@ -28,8 +29,8 @@ function get_active_gateway(): string
 {
     $pdo = get_db();
     try {
-        $stmt = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'active_payment_gateway' LIMIT 1");
-        $stmt->execute();
+        $stmt = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'active_payment_gateway' AND school_id = ? LIMIT 1");
+        $stmt->execute([current_school_id()]);
         $row = $stmt->fetch();
         if ($row && !empty($row['setting_value']) && $row['setting_value'] !== 'none') {
             return $row['setting_value'];
@@ -45,14 +46,14 @@ function is_gateway_ready(): bool
     $pdo = get_db();
     try {
         if ($gw === 'stripe') {
-            $sk = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'stripe_secret_key' LIMIT 1");
-            $sk->execute();
+            $sk = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'stripe_secret_key' AND school_id = ? LIMIT 1");
+            $sk->execute([current_school_id()]);
             $row = $sk->fetch();
             return $row && !empty($row['setting_value']);
         }
         if ($gw === 'square') {
-            $at = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'square_access_token' LIMIT 1");
-            $at->execute();
+            $at = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'square_access_token' AND school_id = ? LIMIT 1");
+            $at->execute([current_school_id()]);
             $row = $at->fetch();
             return $row && !empty($row['setting_value']);
         }
@@ -66,8 +67,8 @@ function is_gateway_ready(): bool
 function get_stripe_secret_key(): string
 {
     $pdo = get_db();
-    $stmt = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'stripe_secret_key' LIMIT 1");
-    $stmt->execute();
+    $stmt = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'stripe_secret_key' AND school_id = ? LIMIT 1");
+    $stmt->execute([current_school_id()]);
     $row = $stmt->fetch();
     return $row['setting_value'] ?? '';
 }
@@ -78,8 +79,8 @@ function get_stripe_secret_key(): string
 function get_square_access_token(): string
 {
     $pdo = get_db();
-    $stmt = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'square_access_token' LIMIT 1");
-    $stmt->execute();
+    $stmt = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'square_access_token' AND school_id = ? LIMIT 1");
+    $stmt->execute([current_school_id()]);
     $row = $stmt->fetch();
     return $row['setting_value'] ?? '';
 }
@@ -102,179 +103,7 @@ function is_square_sandbox(): bool
     return str_contains($token, 'sandbox') || str_starts_with($token, 'EAAAl');
 }
 
-// ---------------------------------------------------------------------------
-// Database migrations — ensure gateway columns exist
-// ---------------------------------------------------------------------------
-
-function ensure_gateway_columns(): void
-{
-    $pdo = get_db();
-
-    // students.stripe_customer_id
-    try {
-        $cols = $pdo->query("SHOW COLUMNS FROM students LIKE 'stripe_customer_id'")->fetch();
-        if (!$cols) {
-            $pdo->exec("ALTER TABLE students ADD COLUMN stripe_customer_id VARCHAR(255) DEFAULT NULL");
-        }
-    } catch (\PDOException $e) {}
-
-    // students.square_customer_id
-    try {
-        $cols = $pdo->query("SHOW COLUMNS FROM students LIKE 'square_customer_id'")->fetch();
-        if (!$cols) {
-            $pdo->exec("ALTER TABLE students ADD COLUMN square_customer_id VARCHAR(255) DEFAULT NULL");
-        }
-    } catch (\PDOException $e) {}
-
-    // payment_methods.gateway_payment_method_id  (Stripe pm_xxx or Square card ID)
-    try {
-        $cols = $pdo->query("SHOW COLUMNS FROM payment_methods LIKE 'gateway_payment_method_id'")->fetch();
-        if (!$cols) {
-            $pdo->exec("ALTER TABLE payment_methods ADD COLUMN gateway_payment_method_id VARCHAR(255) DEFAULT NULL AFTER encrypted_token");
-        }
-    } catch (\PDOException $e) {}
-}
-
-// ---------------------------------------------------------------------------
-// Credit / Balance system migrations
-// ---------------------------------------------------------------------------
-
-function ensure_credit_tables(): void
-{
-    $pdo = get_db();
-
-    // students.account_credit — running balance
-    try {
-        $cols = $pdo->query("SHOW COLUMNS FROM students LIKE 'account_credit'")->fetch();
-        if (!$cols) {
-            $pdo->exec("ALTER TABLE students ADD COLUMN account_credit DECIMAL(10,2) NOT NULL DEFAULT 0.00");
-        }
-    } catch (\PDOException $e) {}
-
-    // credit_ledger — audit trail for all credit changes
-    try {
-        $pdo->exec("CREATE TABLE IF NOT EXISTS credit_ledger (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            student_id INT NOT NULL,
-            amount DECIMAL(10,2) NOT NULL COMMENT 'Positive = credit added, Negative = credit used',
-            balance_after DECIMAL(10,2) NOT NULL,
-            description VARCHAR(255) NOT NULL,
-            reference_type VARCHAR(50) DEFAULT NULL COMMENT 'downgrade, admin_adjustment, payment_offset, refund',
-            reference_id INT DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_student (student_id),
-            INDEX idx_created (created_at)
-        )");
-    } catch (\PDOException $e) {}
-
-    // Fix payments.payment_method ENUM to include 'account_credit'
-    try {
-        $pdo->exec("ALTER TABLE payments MODIFY COLUMN payment_method ENUM('cash','credit_card','debit_card','bank_transfer','account_credit','other') NOT NULL DEFAULT 'other'");
-    } catch (\PDOException $e) {}
-}
-
-// ---------------------------------------------------------------------------
-// Pending plan changes table migration
-// ---------------------------------------------------------------------------
-
-function ensure_pending_changes_table(): void
-{
-    $pdo = get_db();
-
-    try {
-        $pdo->exec("CREATE TABLE IF NOT EXISTS pending_plan_changes (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            student_id INT NOT NULL,
-            new_plan_id INT NOT NULL,
-            old_plan_id INT DEFAULT NULL,
-            old_membership_id INT DEFAULT NULL,
-            requested_by INT NOT NULL COMMENT 'admin user_id',
-            status ENUM('pending','approved','rejected','expired') NOT NULL DEFAULT 'pending',
-            proration_amount DECIMAL(10,2) DEFAULT 0,
-            proration_credit DECIMAL(10,2) DEFAULT 0,
-            proration_type VARCHAR(20) DEFAULT NULL,
-            proration_data TEXT DEFAULT NULL COMMENT 'JSON blob of full proration details',
-            notes TEXT DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            expires_at DATETIME NOT NULL,
-            resolved_at DATETIME DEFAULT NULL,
-            INDEX idx_student_status (student_id, status),
-            INDEX idx_expires (expires_at, status)
-        )");
-    } catch (\PDOException $e) {}
-
-    // students.last_plan_change — lockout tracking
-    try {
-        $cols = $pdo->query("SHOW COLUMNS FROM students LIKE 'last_plan_change'")->fetch();
-        if (!$cols) {
-            $pdo->exec("ALTER TABLE students ADD COLUMN last_plan_change DATE DEFAULT NULL");
-        }
-    } catch (\PDOException $e) {}
-}
-
-function ensure_payment_status_column(): void
-{
-    $pdo = get_db();
-    // Add status column to payments table so revenue queries can filter by completed/failed/refunded
-    try {
-        $pdo->exec("ALTER TABLE payments ADD COLUMN status ENUM('completed','failed','refunded') NOT NULL DEFAULT 'completed' AFTER payment_method");
-    } catch (\PDOException $e) {}
-}
-
-// Run migrations on include
-ensure_gateway_columns();
-ensure_credit_tables();
-ensure_pending_changes_table();
-ensure_fee_tables();
-ensure_payment_status_column();
-
-// ---------------------------------------------------------------------------
-// Fee & discount code migrations
-// ---------------------------------------------------------------------------
-
-function ensure_fee_tables(): void
-{
-    $pdo = get_db();
-
-    // Registration fee per plan
-    try { $pdo->exec("ALTER TABLE membership_plans ADD COLUMN registration_fee DECIMAL(10,2) NOT NULL DEFAULT 0"); } catch (\PDOException $e) {}
-
-    // Discount codes
-    try {
-        $pdo->exec("CREATE TABLE IF NOT EXISTS discount_codes (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            code VARCHAR(50) NOT NULL UNIQUE,
-            description VARCHAR(255) DEFAULT NULL,
-            discount_type ENUM('percentage','flat') NOT NULL DEFAULT 'percentage',
-            discount_value DECIMAL(10,2) NOT NULL,
-            applies_to ENUM('plan_price','registration_fee','both') NOT NULL DEFAULT 'both',
-            plan_id INT DEFAULT NULL,
-            event_id INT DEFAULT NULL,
-            max_uses INT DEFAULT NULL,
-            uses_count INT NOT NULL DEFAULT 0,
-            valid_from DATE DEFAULT NULL,
-            valid_until DATE DEFAULT NULL,
-            is_active TINYINT(1) NOT NULL DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_code (code),
-            INDEX idx_active (is_active, valid_from, valid_until)
-        )");
-    } catch (\PDOException $e) {}
-
-    // Discount code usage audit trail
-    try {
-        $pdo->exec("CREATE TABLE IF NOT EXISTS discount_code_uses (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            discount_code_id INT NOT NULL,
-            student_id INT NOT NULL,
-            applied_amount DECIMAL(10,2) NOT NULL,
-            context VARCHAR(50) NOT NULL,
-            reference_id INT DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_code_student (discount_code_id, student_id)
-        )");
-    } catch (\PDOException $e) {}
-}
+// Migrations have been moved to migrate.php
 
 // ---------------------------------------------------------------------------
 // cURL helper
@@ -345,8 +174,10 @@ function stripe_get_or_create_customer(int $studentId): ?string
     $secretKey = get_stripe_secret_key();
 
     // Check if student already has a Stripe customer ID
-    $stmt = $pdo->prepare("SELECT stripe_customer_id, first_name, last_name, email FROM students WHERE id = ?");
-    $stmt->execute([$studentId]);
+    $params = [$studentId];
+    $stmt = $pdo->prepare("SELECT stripe_customer_id, first_name, last_name, email FROM students WHERE id = ?" . school_where());
+    school_param($params);
+    $stmt->execute($params);
     $student = $stmt->fetch();
 
     if (!$student) return null;
@@ -367,7 +198,10 @@ function stripe_get_or_create_customer(int $studentId): ?string
 
     if ($resp['status'] === 200 && !empty($resp['body']['id'])) {
         $customerId = $resp['body']['id'];
-        $pdo->prepare("UPDATE students SET stripe_customer_id = ? WHERE id = ?")->execute([$customerId, $studentId]);
+        $uParams = [$customerId, $studentId];
+        $upd = $pdo->prepare("UPDATE students SET stripe_customer_id = ? WHERE id = ?" . school_where());
+        school_param($uParams);
+        $upd->execute($uParams);
         return $customerId;
     }
 
@@ -384,8 +218,10 @@ function charge_via_stripe(string $gatewayPmId, float $amount, string $descripti
     $pdo = get_db();
 
     // Get customer ID
-    $stmt = $pdo->prepare("SELECT stripe_customer_id FROM students WHERE id = ?");
-    $stmt->execute([$pm['student_id']]);
+    $params = [$pm['student_id']];
+    $stmt = $pdo->prepare("SELECT stripe_customer_id FROM students WHERE id = ?" . school_where());
+    school_param($params);
+    $stmt->execute($params);
     $student = $stmt->fetch();
     $customerId = $student['stripe_customer_id'] ?? '';
 
@@ -443,8 +279,10 @@ function square_get_or_create_customer(int $studentId): ?string
     $accessToken = get_square_access_token();
     $baseUrl = is_square_sandbox() ? 'https://connect.squareupsandbox.com' : 'https://connect.squareup.com';
 
-    $stmt = $pdo->prepare("SELECT square_customer_id, first_name, last_name, email FROM students WHERE id = ?");
-    $stmt->execute([$studentId]);
+    $params = [$studentId];
+    $stmt = $pdo->prepare("SELECT square_customer_id, first_name, last_name, email FROM students WHERE id = ?" . school_where());
+    school_param($params);
+    $stmt->execute($params);
     $student = $stmt->fetch();
 
     if (!$student) return null;
@@ -467,7 +305,10 @@ function square_get_or_create_customer(int $studentId): ?string
 
     if (($resp['status'] === 200 || $resp['status'] === 201) && !empty($resp['body']['customer']['id'])) {
         $customerId = $resp['body']['customer']['id'];
-        $pdo->prepare("UPDATE students SET square_customer_id = ? WHERE id = ?")->execute([$customerId, $studentId]);
+        $uParams = [$customerId, $studentId];
+        $upd = $pdo->prepare("UPDATE students SET square_customer_id = ? WHERE id = ?" . school_where());
+        school_param($uParams);
+        $upd->execute($uParams);
         return $customerId;
     }
 
@@ -522,16 +363,18 @@ function charge_via_square(string $gatewayCardId, float $amount, string $descrip
     $pdo = get_db();
 
     // Get customer ID
-    $stmt = $pdo->prepare("SELECT square_customer_id FROM students WHERE id = ?");
-    $stmt->execute([$pm['student_id']]);
+    $params = [$pm['student_id']];
+    $stmt = $pdo->prepare("SELECT square_customer_id FROM students WHERE id = ?" . school_where());
+    school_param($params);
+    $stmt->execute($params);
     $student = $stmt->fetch();
     $customerId = $student['square_customer_id'] ?? '';
 
     // Get location ID
     $locationId = '';
     try {
-        $locStmt = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'square_location_id' LIMIT 1");
-        $locStmt->execute();
+        $locStmt = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'square_location_id' AND school_id = ? LIMIT 1");
+        $locStmt->execute([current_school_id()]);
         $locRow = $locStmt->fetch();
         $locationId = $locRow['setting_value'] ?? '';
     } catch (\PDOException $e) {}
@@ -784,7 +627,7 @@ function save_card_to_gateway(
 
     $ins = $pdo->prepare(
         'INSERT INTO payment_methods (student_id, label, card_brand, last_four, exp_month, exp_year, encrypted_token, gateway_payment_method_id, is_default)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
     $ins->execute([
         $studentId,
@@ -914,8 +757,10 @@ function save_parent_card_from_token(int $parentId, string $paymentMethodId, str
     // Try to find an existing Stripe customer for this parent, or create a new one
     $custId = null;
     try {
-        $parentStmt = $pdo->prepare("SELECT first_name, last_name, email FROM parents WHERE id = ? LIMIT 1");
-        $parentStmt->execute([$parentId]);
+        $pParams = [$parentId];
+        $parentStmt = $pdo->prepare("SELECT first_name, last_name, email FROM parents WHERE id = ?" . school_where() . " LIMIT 1");
+        school_param($pParams);
+        $parentStmt->execute($pParams);
         $parentInfo = $parentStmt->fetch();
 
         if ($parentInfo && !empty($parentInfo['email'])) {
@@ -982,15 +827,18 @@ function save_parent_card_from_token(int $parentId, string $paymentMethodId, str
     $encryptedToken = encrypt_payment_data($paymentMethodId);
 
     // Auto-default if first card
-    $countStmt = $pdo->prepare("SELECT COUNT(*) FROM parent_payment_methods WHERE parent_id = ?");
-    $countStmt->execute([$parentId]);
+    $cParams = [$parentId];
+    $countStmt = $pdo->prepare("SELECT COUNT(*) FROM parent_payment_methods WHERE parent_id = ?" . school_where());
+    school_param($cParams);
+    $countStmt->execute($cParams);
     $isDefault = ((int) $countStmt->fetchColumn() === 0) ? 1 : 0;
 
     $ins = $pdo->prepare(
-        'INSERT INTO parent_payment_methods (parent_id, label, card_brand, last_four, exp_month, exp_year, encrypted_token, gateway_payment_method_id, is_default)
+        'INSERT INTO parent_payment_methods (school_id, parent_id, label, card_brand, last_four, exp_month, exp_year, encrypted_token, gateway_payment_method_id, is_default)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
     $ins->execute([
+        current_school_id(),
         $parentId,
         $label,
         $cardBrand,
@@ -1015,8 +863,10 @@ function save_parent_card_from_token(int $parentId, string $paymentMethodId, str
 function get_student_credit(int $studentId): float
 {
     $pdo = get_db();
-    $stmt = $pdo->prepare("SELECT account_credit FROM students WHERE id = ?");
-    $stmt->execute([$studentId]);
+    $params = [$studentId];
+    $stmt = $pdo->prepare("SELECT account_credit FROM students WHERE id = ?" . school_where());
+    school_param($params);
+    $stmt->execute($params);
     $row = $stmt->fetch();
     return (float) ($row['account_credit'] ?? 0);
 }
@@ -1034,15 +884,19 @@ function add_student_credit(int $studentId, float $amount, string $description, 
     $pdo->beginTransaction();
     try {
         // Lock the student row
-        $stmt = $pdo->prepare("SELECT account_credit FROM students WHERE id = ? FOR UPDATE");
-        $stmt->execute([$studentId]);
+        $sParams = [$studentId];
+        $stmt = $pdo->prepare("SELECT account_credit FROM students WHERE id = ?" . school_where() . " FOR UPDATE");
+        school_param($sParams);
+        $stmt->execute($sParams);
         $row = $stmt->fetch();
         $currentBalance = (float) ($row['account_credit'] ?? 0);
         $newBalance = round($currentBalance + $amount, 2);
 
         // Update running balance
-        $pdo->prepare("UPDATE students SET account_credit = ? WHERE id = ?")
-            ->execute([$newBalance, $studentId]);
+        $uParams = [$newBalance, $studentId];
+        $updStmt = $pdo->prepare("UPDATE students SET account_credit = ? WHERE id = ?" . school_where());
+        school_param($uParams);
+        $updStmt->execute($uParams);
 
         // Insert ledger entry
         $pdo->prepare(
@@ -1072,8 +926,10 @@ function use_student_credit(int $studentId, float $amount, string $description, 
     $pdo->beginTransaction();
     try {
         // Lock the student row
-        $stmt = $pdo->prepare("SELECT account_credit FROM students WHERE id = ? FOR UPDATE");
-        $stmt->execute([$studentId]);
+        $sParams = [$studentId];
+        $stmt = $pdo->prepare("SELECT account_credit FROM students WHERE id = ?" . school_where() . " FOR UPDATE");
+        school_param($sParams);
+        $stmt->execute($sParams);
         $row = $stmt->fetch();
         $currentBalance = (float) ($row['account_credit'] ?? 0);
 
@@ -1087,8 +943,10 @@ function use_student_credit(int $studentId, float $amount, string $description, 
         $newBalance = round($currentBalance - $actualUse, 2);
 
         // Update running balance
-        $pdo->prepare("UPDATE students SET account_credit = ? WHERE id = ?")
-            ->execute([$newBalance, $studentId]);
+        $uParams = [$newBalance, $studentId];
+        $updStmt = $pdo->prepare("UPDATE students SET account_credit = ? WHERE id = ?" . school_where());
+        school_param($uParams);
+        $updStmt->execute($uParams);
 
         // Insert ledger entry (negative amount = credit used)
         $pdo->prepare(
@@ -1410,8 +1268,10 @@ function validateDiscountCode(string $code, ?int $planId = null, ?int $eventId =
     $pdo = get_db();
 
     try {
-        $stmt = $pdo->prepare("SELECT * FROM discount_codes WHERE code = ? LIMIT 1");
-        $stmt->execute([$code]);
+        $params = [$code];
+        $stmt = $pdo->prepare("SELECT * FROM discount_codes WHERE code = ?" . school_where() . " LIMIT 1");
+        school_param($params);
+        $stmt->execute($params);
         $discount = $stmt->fetch();
     } catch (\PDOException $e) {
         return ['valid' => false, 'error' => 'Unable to validate code.', 'discount' => null];
@@ -1575,7 +1435,10 @@ function recordDiscountCodeUse(int $discountCodeId, int $studentId, float $appli
         $stmt = $pdo->prepare("INSERT INTO discount_code_uses (discount_code_id, student_id, applied_amount, context, reference_id) VALUES (?, ?, ?, ?, ?)");
         $stmt->execute([$discountCodeId, $studentId, $appliedAmount, $context, $referenceId]);
 
-        $pdo->prepare("UPDATE discount_codes SET uses_count = uses_count + 1 WHERE id = ?")->execute([$discountCodeId]);
+        $udParams = [$discountCodeId];
+        $udStmt = $pdo->prepare("UPDATE discount_codes SET uses_count = uses_count + 1 WHERE id = ?" . school_where());
+        school_param($udParams);
+        $udStmt->execute($udParams);
     } catch (\PDOException $e) {
         error_log("[FEE] Failed to record discount use: " . $e->getMessage());
     }

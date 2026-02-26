@@ -30,10 +30,12 @@ try {
          FROM student_belts sb
          JOIN belts b ON b.id = sb.belt_id
          JOIN martial_arts_styles mas ON mas.id = sb.style_id
-         WHERE sb.student_id = :sid
+         WHERE sb.student_id = ?" . school_where('sb') . "
          ORDER BY mas.name, b.rank_order"
     );
-    $bStmt->execute([':sid' => $studentId]);
+    $params = [$studentId];
+    school_param($params);
+    $bStmt->execute($params);
     $studentBelts = $bStmt->fetchAll();
 } catch (\PDOException $e) {}
 
@@ -61,9 +63,9 @@ try {
         $params     = [];
         $i = 0;
         foreach ($highestPerStyle as $styleId => $maxRank) {
-            $conditions[] = "(b.style_id = :s{$i} AND b.rank_order <= :r{$i})";
-            $params[":s{$i}"] = $styleId;
-            $params[":r{$i}"] = $maxRank;
+            $conditions[] = "(b.style_id = ? AND b.rank_order <= ?)";
+            $params[] = $styleId;
+            $params[] = $maxRank;
             $i++;
         }
         $where = implode(' OR ', $conditions);
@@ -73,7 +75,7 @@ try {
                     b.color, b.rank_order, mas.name as style_name
              FROM belts b
              JOIN martial_arts_styles mas ON mas.id = b.style_id
-             WHERE {$where}
+             WHERE ({$where})
              ORDER BY mas.name, b.rank_order"
         );
         $abStmt->execute($params);
@@ -99,18 +101,10 @@ if (isset($_GET['belt']) && $_GET['belt'] === 'all') {
     }
 }
 
-// If no valid selection, default to the highest belt the student holds
-if ($selectedBeltId === null && !empty($studentBelts)) {
-    // Pick the highest rank_order belt
-    $highest = null;
-    foreach ($studentBelts as $sb) {
-        if ($highest === null || (int) $sb['rank_order'] > (int) $highest['rank_order']) {
-            $highest = $sb;
-        }
-    }
-    if ($highest) {
-        $selectedBeltId = (int) $highest['belt_id'];
-    }
+// If no valid selection, default to showing ALL content at or below the
+// student's highest belt so they can review everything they've learned.
+if ($selectedBeltId === null && !empty($accessibleBelts)) {
+    $selectedBeltId = 'all';
 }
 
 // ---------------------------------------------------------------
@@ -140,7 +134,8 @@ try {
                  WHERE br.belt_id IN ($placeholders)
                  ORDER BY mas.name, b.rank_order, br.sort_order ASC, br.created_at DESC"
             );
-            $rStmt->execute($beltIds);
+            $params = $beltIds;
+            $rStmt->execute($params);
             foreach ($rStmt->fetchAll() as $res) {
                 $key = $res['style_name'] . ' — ' . $res['belt_name'];
                 $resourcesByBelt[$key][] = $res;
@@ -156,7 +151,8 @@ try {
         $allBeltIds = array_column($accessibleBelts, 'belt_id');
         $ph = implode(',', array_fill(0, count($allBeltIds), '?'));
         $cStmt = $pdo->prepare("SELECT COUNT(*) FROM belt_resources WHERE belt_id IN ($ph)");
-        $cStmt->execute($allBeltIds);
+        $params = $allBeltIds;
+        $cStmt->execute($params);
         $totalAccessibleResources = (int) $cStmt->fetchColumn();
     }
 } catch (\PDOException $e) {}

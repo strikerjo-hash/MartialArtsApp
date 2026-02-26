@@ -18,34 +18,8 @@ require_once __DIR__ . '/includes/payment_gateway.php';
 
 auth_start_session();
 
-// ─── Idempotent schema migrations ───────────────────────────────────
+// Migrations have been moved to migrate.php
 $pdo = get_db();
-
-try { $pdo->exec("ALTER TABLE students ADD COLUMN username VARCHAR(50) DEFAULT NULL"); } catch (\PDOException $e) {}
-try { $pdo->exec("ALTER TABLE students ADD UNIQUE INDEX idx_students_username (username)"); } catch (\PDOException $e) {}
-try { $pdo->exec("ALTER TABLE students ADD COLUMN password_hash VARCHAR(255) DEFAULT NULL"); } catch (\PDOException $e) {}
-try { $pdo->exec("ALTER TABLE students ADD COLUMN belt_rank VARCHAR(50) DEFAULT 'White'"); } catch (\PDOException $e) {}
-try { $pdo->exec("ALTER TABLE students ADD COLUMN waiver_accepted_at DATETIME DEFAULT NULL"); } catch (\PDOException $e) {}
-try { $pdo->exec("ALTER TABLE students ADD COLUMN waiver_version VARCHAR(50) DEFAULT NULL"); } catch (\PDOException $e) {}
-
-try {
-    $pdo->exec("CREATE TABLE IF NOT EXISTS login_attempts (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        username VARCHAR(50) NOT NULL,
-        ip_address VARCHAR(45) NOT NULL,
-        attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_attempts_user (username, attempted_at),
-        INDEX idx_attempts_ip (ip_address, attempted_at)
-    )");
-} catch (\PDOException $e) {}
-
-try {
-    $pdo->exec("CREATE TABLE IF NOT EXISTS studio_config (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        config_key VARCHAR(100) NOT NULL UNIQUE,
-        config_value TEXT NOT NULL
-    )");
-} catch (\PDOException $e) {}
 
 // Detect available columns
 $cols = $pdo->query("SHOW COLUMNS FROM students")->fetchAll();
@@ -54,6 +28,29 @@ $hasPasswordHash = in_array('password_hash', $colNames, true);
 $hasPassword     = in_array('password', $colNames, true);
 $passwordCol     = $hasPasswordHash ? 'password_hash' : ($hasPassword ? 'password' : 'password_hash');
 $hasUsername      = in_array('username', $colNames, true);
+
+// ─── Resolve school from URL slug (multi-tenancy) ───────────────────
+$registration_school_id = current_school_id(); // fallback to session/default
+$schoolRow = null;
+if (!empty($_GET['school'])) {
+    $schoolStmt = $pdo->prepare("SELECT id FROM schools WHERE slug = ? AND status = 'active' LIMIT 1");
+    $schoolStmt->execute([trim($_GET['school'])]);
+    $schoolRow = $schoolStmt->fetch();
+    if ($schoolRow) {
+        $registration_school_id = (int) $schoolRow['id'];
+    } else {
+        // Invalid slug — redirect back to school selector
+        header('Location: register.php');
+        exit;
+    }
+}
+
+// ─── Multi-school selector logic ────────────────────────────────────
+$all_schools = get_all_schools();
+$active_schools = array_filter($all_schools, fn($s) => $s['status'] === 'active');
+$active_schools = array_values($active_schools); // re-index
+$show_school_selector = (count($active_schools) > 1 && empty($_GET['school']));
+$schoolParam = !empty($_GET['school']) ? '&school=' . urlencode($_GET['school']) : '';
 
 // ─── Redirect if already logged in ──────────────────────────────────
 // Allow students through to Step 2 if mid-registration, and Step 3 (success) always
@@ -74,7 +71,9 @@ $errors          = [];
 $message         = '';
 $waiver_content  = getSetting('waiver_content', '');
 $waiver_version  = getSetting('waiver_version', '1.0');
-$plans           = $pdo->query("SELECT * FROM membership_plans WHERE status = 'active' ORDER BY price ASC")->fetchAll();
+$plansStmt = $pdo->prepare("SELECT * FROM membership_plans WHERE status = 'active' AND (is_grandfathered = 0 OR is_grandfathered IS NULL) AND school_id = ? ORDER BY price ASC");
+$plansStmt->execute([$registration_school_id]);
+$plans = $plansStmt->fetchAll();
 
 // Stripe publishable key for Step 2
 $stripePk   = '';
@@ -135,16 +134,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $step == 1) {
 
     // ── Duplicate checks ──
     if (empty($errors) && $hasUsername) {
-        $stmt = $pdo->prepare('SELECT id FROM students WHERE username = :u LIMIT 1');
-        $stmt->execute([':u' => $form['username']]);
+        $stmt = $pdo->prepare('SELECT id FROM students WHERE username = :u AND school_id = :sid LIMIT 1');
+        $stmt->execute([':u' => $form['username'], ':sid' => $registration_school_id]);
         if ($stmt->fetch()) {
             $errors[] = 'That username is already taken.';
         }
     }
 
     if (empty($errors) && $form['email'] !== '') {
-        $stmt = $pdo->prepare('SELECT id FROM students WHERE email = :e LIMIT 1');
-        $stmt->execute([':e' => $form['email']]);
+        $stmt = $pdo->prepare('SELECT id FROM students WHERE email = :e AND school_id = :sid LIMIT 1');
+        $stmt->execute([':e' => $form['email'], ':sid' => $registration_school_id]);
         if ($stmt->fetch()) {
             $errors[] = 'An account with that email already exists.';
         }
@@ -154,9 +153,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $step == 1) {
     if (empty($errors)) {
         $hash = password_hash($password, PASSWORD_DEFAULT);
 
-        $insertCols   = ['first_name', 'last_name', 'email', 'phone', 'join_date'];
-        $insertVals   = [':fn', ':ln', ':em', ':ph', ':jd'];
+        $insertCols   = ['school_id', 'first_name', 'last_name', 'email', 'phone', 'join_date'];
+        $insertVals   = [':sid', ':fn', ':ln', ':em', ':ph', ':jd'];
         $insertParams = [
+            ':sid' => $registration_school_id,
             ':fn' => $form['first_name'],
             ':ln' => $form['last_name'],
             ':em' => $form['email'] ?: null,
@@ -211,7 +211,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $step == 1) {
         if (!empty($form['plan_id'])) {
             $_SESSION['registration_student_id'] = (int) $newId;
             $_SESSION['registration_plan_id']    = (int) $form['plan_id'];
-            header('Location: register.php?step=2');
+            header('Location: register.php?step=2' . $schoolParam);
             exit;
         }
 
@@ -238,8 +238,8 @@ if ($step == 2) {
     $regStudentId = (int) $_SESSION['registration_student_id'];
     $regPlanId    = (int) $_SESSION['registration_plan_id'];
 
-    $stmt = $pdo->prepare("SELECT * FROM membership_plans WHERE id = ?");
-    $stmt->execute([$regPlanId]);
+    $stmt = $pdo->prepare("SELECT * FROM membership_plans WHERE id = ? AND school_id = ?");
+    $stmt->execute([$regPlanId, $registration_school_id]);
     $selected_plan = $stmt->fetch();
 
     if (!$selected_plan) {
@@ -315,12 +315,13 @@ if ($step == 2) {
             $isMonthly   = ($billingFreq === 'monthly' && $selected_plan['duration_months'] > 1);
 
             $mStmt = $pdo->prepare("
-                INSERT INTO memberships (student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, auto_renew, billing_day, monthly_charges_made)
-                VALUES (?, ?, ?, ?, 'active', 'paid', ?, ?, ?, ?)
+                INSERT INTO memberships (school_id, student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, auto_renew, billing_day, monthly_charges_made)
+                VALUES (?, ?, ?, ?, ?, 'active', 'paid', ?, ?, ?, ?)
             ");
             $billingDay      = $isMonthly ? min((int) date('j'), 28) : null;
             $chargesMade     = $isMonthly ? 1 : 0;
             $mStmt->execute([
+                $registration_school_id,
                 $regStudentId,
                 $regPlanId,
                 $start_date,
@@ -345,10 +346,11 @@ if ($step == 2) {
                     $notes .= ' | Reg fee: $' . number_format($regFee, 2);
                 }
                 $pStmt = $pdo->prepare("
-                    INSERT INTO payments (student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
-                    VALUES (?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, ?)
+                    INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
+                    VALUES (?, ?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, ?)
                 ");
                 $pStmt->execute([
+                    $registration_school_id,
                     $regStudentId,
                     $membershipId,
                     $chargeAmount,
@@ -371,7 +373,7 @@ if ($step == 2) {
             // Clean up session
             unset($_SESSION['registration_student_id'], $_SESSION['registration_plan_id']);
 
-            header('Location: register.php?step=3');
+            header('Location: register.php?step=3' . $schoolParam);
             exit;
         }
     }
@@ -439,7 +441,24 @@ if ($step == 2) {
                 <?php endforeach; ?>
             </div>
             <?php else: ?>
-                <p class="login-tagline">Create Your Account</p>
+                <?php if ($show_school_selector): ?>
+                    <p class="login-tagline">Select Your School</p>
+                <?php else: ?>
+                    <p class="login-tagline">Create Your Account</p>
+                    <?php if (count($active_schools) > 1 && !empty($_GET['school'])):
+                        $selectedSchool = array_filter($active_schools, fn($s) => $s['slug'] === $_GET['school']);
+                        $selectedSchool = reset($selectedSchool);
+                        if ($selectedSchool): ?>
+                        <div style="text-align:center;margin-bottom:1.25rem;">
+                            <div style="display:inline-block;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.15);padding:8px 20px;border-radius:8px;">
+                                <span style="font-size:1.1rem;font-weight:600;color:var(--primary-color, #64b5f6);letter-spacing:.02em;">
+                                    <?= htmlspecialchars($selectedSchool['name']) ?>
+                                </span>
+                                <a href="register.php" style="margin-left:10px;font-size:.75rem;opacity:.6;color:inherit;text-decoration:underline;">change</a>
+                            </div>
+                        </div>
+                    <?php endif; endif; ?>
+                <?php endif; ?>
             <?php endif; ?>
 
             <?php // ── Errors / messages ── ?>
@@ -455,11 +474,35 @@ if ($step == 2) {
             <?php endif; ?>
 
 <?php // =============================================================
+      //  SCHOOL SELECTOR — shown when multiple schools and none selected
+      // =============================================================
+if ($show_school_selector): ?>
+
+            <div class="plan-grid" style="margin:1.25rem 0;">
+                <?php foreach ($active_schools as $school): ?>
+                <a href="register.php?school=<?= urlencode($school['slug']) ?>"
+                   class="plan-card school-card" style="text-decoration:none;color:inherit;">
+                    <div class="plan-card-inner" style="text-align:center;padding:1.5rem 1rem;">
+                        <div class="plan-card-name"><?= htmlspecialchars($school['name']) ?></div>
+                    </div>
+                </a>
+                <?php endforeach; ?>
+            </div>
+
+            <?php if (empty($active_schools)): ?>
+                <p style="text-align:center;opacity:.6;margin:2rem 0;">No schools are currently accepting registrations.</p>
+            <?php endif; ?>
+
+            <div class="login-footer">
+                <a href="login.php" class="admin-link">&larr; Already have an account? Sign In</a>
+            </div>
+
+<?php // =============================================================
       //  STEP 1 — Registration Form
       // =============================================================
-if ($step == 1): ?>
+elseif ($step == 1): ?>
 
-            <form method="POST" action="register.php?step=1" class="login-form" autocomplete="on">
+            <form method="POST" action="register.php?step=1<?= $schoolParam ?>" class="login-form" autocomplete="on">
                 <?= csrf_field() ?>
 
                 <!-- Name -->
@@ -660,7 +703,7 @@ elseif ($step == 2 && $selected_plan): ?>
 
             <?php if ($activeGw !== 'none' && !empty($activeGw) && $chargeAmount > 0): ?>
                 <!-- Payment form -->
-                <form method="POST" action="register.php?step=2" id="payment-form" class="login-form">
+                <form method="POST" action="register.php?step=2<?= $schoolParam ?>" id="payment-form" class="login-form">
                     <?= csrf_field() ?>
                     <input type="hidden" name="process_payment" value="1">
                     <input type="hidden" name="stripe_pm_id" id="stripe_pm_id" value="">
@@ -681,7 +724,7 @@ elseif ($step == 2 && $selected_plan): ?>
                 </form>
 
                 <!-- Skip payment option -->
-                <form method="POST" action="register.php?step=2" style="margin-top:.5rem;">
+                <form method="POST" action="register.php?step=2<?= $schoolParam ?>" style="margin-top:.5rem;">
                     <?= csrf_field() ?>
                     <input type="hidden" name="skip_payment" value="1">
                     <button type="submit" class="skip-link" style="background:none;border:none;cursor:pointer;color:var(--accent-color);font-family:inherit;">
@@ -820,7 +863,7 @@ elseif ($step == 2 && $selected_plan): ?>
                     </ul>
                 </div>
 
-                <form method="POST" action="register.php?step=2" class="login-form">
+                <form method="POST" action="register.php?step=2<?= $schoolParam ?>" class="login-form">
                     <?= csrf_field() ?>
                     <input type="hidden" name="skip_payment" value="1">
                     <button type="submit" class="btn btn-primary btn-block">

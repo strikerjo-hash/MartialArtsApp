@@ -14,25 +14,8 @@ require_once __DIR__ . '/includes/db.php';
 
 auth_start_session();
 
-// ─── Idempotent migrations for login dependencies ──────────────────
+// Migrations have been moved to migrate.php
 $pdo = get_db();
-try {
-    $pdo->exec("CREATE TABLE IF NOT EXISTS login_attempts (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        username VARCHAR(50) NOT NULL,
-        ip_address VARCHAR(45) NOT NULL,
-        attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_attempts_user (username, attempted_at),
-        INDEX idx_attempts_ip (ip_address, attempted_at)
-    )");
-} catch (\PDOException $e) {}
-try {
-    $pdo->exec("CREATE TABLE IF NOT EXISTS studio_config (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        config_key VARCHAR(100) NOT NULL UNIQUE,
-        config_value TEXT NOT NULL
-    )");
-} catch (\PDOException $e) {}
 
 // If already logged in, redirect to the right place.
 if (current_user_type() === 'admin') {

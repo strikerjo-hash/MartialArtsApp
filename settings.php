@@ -4,12 +4,7 @@ requireLogin();
 
 $message = '';
 
-// Create settings table if it doesn't exist (functions are in config.php)
-$pdo->exec("CREATE TABLE IF NOT EXISTS settings (
-    setting_key VARCHAR(100) PRIMARY KEY,
-    setting_value TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-)");
+// Migrations have been moved to migrate.php
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['change_password'])) {
@@ -270,8 +265,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['add_room'])) {
         $roomName = sanitizeInput($_POST['room_name'] ?? '');
         if ($roomName) {
-            $maxOrder = $pdo->query("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM rooms")->fetchColumn();
-            $pdo->prepare("INSERT INTO rooms (name, sort_order) VALUES (?, ?)")->execute([$roomName, $maxOrder]);
+            $params = [];
+            $stmt = $pdo->prepare("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM rooms WHERE 1=1" . school_where());
+            school_param($params);
+            $stmt->execute($params);
+            $maxOrder = $stmt->fetchColumn();
+            $pdo->prepare("INSERT INTO rooms (school_id, name, sort_order) VALUES (?, ?, ?)")->execute([current_school_id(), $roomName, $maxOrder]);
             $message = showAlert('Room "' . htmlspecialchars($roomName) . '" added successfully!', 'success');
         } else {
             $message = showAlert('Room name is required.', 'error');
@@ -282,7 +281,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $roomId = (int)($_POST['room_id'] ?? 0);
         $roomName = sanitizeInput($_POST['room_name'] ?? '');
         if ($roomId && $roomName) {
-            $pdo->prepare("UPDATE rooms SET name = ? WHERE id = ?")->execute([$roomName, $roomId]);
+            $params = [$roomName, $roomId];
+            $stmt = $pdo->prepare("UPDATE rooms SET name = ? WHERE id = ?" . school_where());
+            school_param($params);
+            $stmt->execute($params);
             $message = showAlert('Room updated successfully!', 'success');
         }
     }
@@ -290,12 +292,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['toggle_room_status'])) {
         $roomId = (int)($_POST['room_id'] ?? 0);
         if ($roomId) {
-            $current = $pdo->prepare("SELECT status FROM rooms WHERE id = ?");
-            $current->execute([$roomId]);
+            $params = [$roomId];
+            $current = $pdo->prepare("SELECT status FROM rooms WHERE id = ?" . school_where());
+            school_param($params);
+            $current->execute($params);
             $row = $current->fetch();
             if ($row) {
                 $newStatus = $row['status'] === 'active' ? 'inactive' : 'active';
-                $pdo->prepare("UPDATE rooms SET status = ? WHERE id = ?")->execute([$newStatus, $roomId]);
+                $params = [$newStatus, $roomId];
+                $stmt = $pdo->prepare("UPDATE rooms SET status = ? WHERE id = ?" . school_where());
+                school_param($params);
+                $stmt->execute($params);
                 $message = showAlert('Room ' . ($newStatus === 'active' ? 'activated' : 'deactivated') . ' successfully!', 'success');
             }
         }
@@ -305,20 +312,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $roomId = (int)($_POST['room_id'] ?? 0);
         $direction = $_POST['direction'] ?? '';
         if ($roomId && in_array($direction, ['up', 'down'])) {
-            $currentRoom = $pdo->prepare("SELECT id, sort_order FROM rooms WHERE id = ?");
-            $currentRoom->execute([$roomId]);
+            $params = [$roomId];
+            $currentRoom = $pdo->prepare("SELECT id, sort_order FROM rooms WHERE id = ?" . school_where());
+            school_param($params);
+            $currentRoom->execute($params);
             $cr = $currentRoom->fetch();
             if ($cr) {
+                $params = [$cr['sort_order']];
                 if ($direction === 'up') {
-                    $neighbor = $pdo->prepare("SELECT id, sort_order FROM rooms WHERE sort_order < ? ORDER BY sort_order DESC LIMIT 1");
+                    $neighbor = $pdo->prepare("SELECT id, sort_order FROM rooms WHERE sort_order < ?" . school_where() . " ORDER BY sort_order DESC LIMIT 1");
                 } else {
-                    $neighbor = $pdo->prepare("SELECT id, sort_order FROM rooms WHERE sort_order > ? ORDER BY sort_order ASC LIMIT 1");
+                    $neighbor = $pdo->prepare("SELECT id, sort_order FROM rooms WHERE sort_order > ?" . school_where() . " ORDER BY sort_order ASC LIMIT 1");
                 }
-                $neighbor->execute([$cr['sort_order']]);
+                school_param($params);
+                $neighbor->execute($params);
                 $nr = $neighbor->fetch();
                 if ($nr) {
-                    $pdo->prepare("UPDATE rooms SET sort_order = ? WHERE id = ?")->execute([$nr['sort_order'], $cr['id']]);
-                    $pdo->prepare("UPDATE rooms SET sort_order = ? WHERE id = ?")->execute([$cr['sort_order'], $nr['id']]);
+                    $params1 = [$nr['sort_order'], $cr['id']];
+                    $stmt1 = $pdo->prepare("UPDATE rooms SET sort_order = ? WHERE id = ?" . school_where());
+                    school_param($params1);
+                    $stmt1->execute($params1);
+                    $params2 = [$cr['sort_order'], $nr['id']];
+                    $stmt2 = $pdo->prepare("UPDATE rooms SET sort_order = ? WHERE id = ?" . school_where());
+                    school_param($params2);
+                    $stmt2->execute($params2);
                 }
             }
         }
@@ -360,6 +377,142 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $lockoutState = isset($_POST['test_lockout_all_students']) ? 'ENABLED' : 'DISABLED';
         $message = showAlert('Test settings saved. Global student lockout is now ' . $lockoutState . '.', $lockoutState === 'ENABLED' ? 'warning' : 'success');
     }
+
+    // Log Retention Settings
+    if (isset($_POST['save_log_retention'])) {
+        verify_csrf();
+        $retentionDays = max(7, min(365, (int) ($_POST['log_retention_days'] ?? 90)));
+        saveSetting('log_retention_days', (string) $retentionDays);
+        $message = showAlert('Log retention set to ' . $retentionDays . ' days. Old entries will be cleaned up during the next cron run.', 'success');
+    }
+
+    // Push Notifications (FCM) Settings — Service Account Upload
+    if (isset($_POST['save_fcm_settings'])) {
+        verify_csrf();
+
+        if (!empty($_FILES['fcm_service_account']['name'])) {
+            $file = $_FILES['fcm_service_account'];
+
+            // Validate file extension
+            $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+            if ($ext !== 'json') {
+                $message = showAlert('Service account file must be a .json file.', 'error');
+            } elseif ($file['size'] > 100 * 1024) {
+                $message = showAlert('Service account file is too large. Maximum size is 100KB.', 'error');
+            } elseif ($file['error'] !== UPLOAD_ERR_OK) {
+                $message = showAlert('File upload error (code ' . $file['error'] . '). Please try again.', 'error');
+            } else {
+                // Read and validate JSON structure
+                $jsonContent = file_get_contents($file['tmp_name']);
+                $serviceAccount = json_decode($jsonContent, true);
+
+                if (!$serviceAccount || !is_array($serviceAccount)) {
+                    $message = showAlert('Invalid JSON file. Could not parse contents.', 'error');
+                } elseif (($serviceAccount['type'] ?? '') !== 'service_account') {
+                    $message = showAlert('This does not appear to be a Firebase service account key file. Expected "type": "service_account".', 'error');
+                } elseif (empty($serviceAccount['project_id']) || empty($serviceAccount['private_key']) || empty($serviceAccount['client_email'])) {
+                    $message = showAlert('Service account JSON is missing required fields (project_id, private_key, or client_email).', 'error');
+                } else {
+                    // Save the file
+                    $uploadDir = __DIR__ . '/uploads/fcm/';
+                    if (!is_dir($uploadDir)) {
+                        mkdir($uploadDir, 0750, true);
+                    }
+                    $schoolId = current_school_id();
+                    $filename = 'school_' . $schoolId . '_service_account.json';
+                    $filepath = $uploadDir . $filename;
+
+                    // Remove old file if exists
+                    if (file_exists($filepath)) {
+                        @unlink($filepath);
+                    }
+
+                    if (move_uploaded_file($file['tmp_name'], $filepath)) {
+                        @chmod($filepath, 0640);
+
+                        // Store path and project ID in settings
+                        saveSetting('fcm_service_account_path', 'uploads/fcm/' . $filename);
+                        saveSetting('fcm_project_id', $serviceAccount['project_id']);
+
+                        // Clear old legacy server key if present
+                        saveSetting('fcm_server_key', '');
+
+                        // Clear any cached OAuth token (force fresh auth)
+                        $tokenCache = $uploadDir . 'school_' . $schoolId . '_oauth_token.json';
+                        if (file_exists($tokenCache)) {
+                            @unlink($tokenCache);
+                        }
+
+                        $message = showAlert(
+                            'Firebase service account configured successfully for project: <strong>'
+                            . htmlspecialchars($serviceAccount['project_id']) . '</strong>',
+                            'success'
+                        );
+                    } else {
+                        $message = showAlert('Failed to save service account file. Check directory permissions on uploads/fcm/.', 'error');
+                    }
+                }
+            }
+        } else {
+            $message = showAlert('Please select a service account JSON file to upload.', 'warning');
+        }
+    }
+
+    // Remove FCM service account
+    if (isset($_POST['remove_fcm_service_account'])) {
+        verify_csrf();
+        $schoolId = current_school_id();
+
+        // Delete the service account file
+        $saPath = getSetting('fcm_service_account_path', '');
+        if (!empty($saPath)) {
+            $fullPath = __DIR__ . '/' . $saPath;
+            if (file_exists($fullPath)) {
+                @unlink($fullPath);
+            }
+        }
+
+        // Clear settings
+        saveSetting('fcm_service_account_path', '');
+        saveSetting('fcm_project_id', '');
+        saveSetting('fcm_server_key', '');
+
+        // Clear cached OAuth token
+        $tokenCache = __DIR__ . '/uploads/fcm/school_' . $schoolId . '_oauth_token.json';
+        if (file_exists($tokenCache)) {
+            @unlink($tokenCache);
+        }
+
+        $message = showAlert('Firebase service account removed. Push notifications are disabled.', 'warning');
+    }
+}
+
+// ── Tab persistence after POST ──────────────────────────────────────
+$postTabMap = [
+    'change_password' => 'general',
+    'save_membership_settings' => 'school-schedule',
+    'add_room' => 'school-schedule', 'edit_room' => 'school-schedule',
+    'toggle_room_status' => 'school-schedule', 'reorder_room' => 'school-schedule',
+    'save_hours_of_operation' => 'school-schedule',
+    'save_belt_cycle' => 'belt-testing',
+    'save_certificate_templates' => 'certificates',
+    'remove_color_belt_template' => 'certificates', 'remove_black_belt_template' => 'certificates',
+    'remove_color_font' => 'certificates', 'remove_black_font' => 'certificates',
+    'remove_custom_font' => 'certificates',
+    'save_waiver' => 'registration', 'save_fee_settings' => 'registration',
+    'save_tax_settings' => 'billing', 'save_stripe' => 'billing', 'save_square' => 'billing',
+    'save_smtp' => 'communications', 'test_email' => 'communications',
+    'save_twilio' => 'communications', 'test_sms' => 'communications',
+    'save_test_settings' => 'system',
+    'save_log_retention' => 'system',
+    'save_fcm_settings' => 'system',
+    'remove_fcm_service_account' => 'system',
+];
+$activeTabAfterPost = '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    foreach ($postTabMap as $key => $tab) {
+        if (isset($_POST[$key])) { $activeTabAfterPost = $tab; break; }
+    }
 }
 
 $current_user = getCurrentUser();
@@ -371,10 +524,26 @@ include 'includes/header.php';
     <?php echo $message; ?>
     
     <h1 class="text-3xl font-bold text-gray-800 mb-6">Settings</h1>
-    
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <!-- Profile Settings -->
-        <div class="lg:col-span-2">
+
+    <!-- Settings Tab Navigation -->
+    <div class="border-b border-gray-200 mb-6 overflow-x-auto">
+        <nav class="flex gap-1 -mb-px min-w-max" id="settingsTabs">
+            <button type="button" data-tab="general" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-blue-500 text-blue-600 bg-blue-50">General</button>
+            <button type="button" data-tab="school-schedule" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">School &amp; Schedule</button>
+            <button type="button" data-tab="belt-testing" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">Belt Testing</button>
+            <button type="button" data-tab="certificates" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">Certificates</button>
+            <button type="button" data-tab="registration" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">Registration</button>
+            <button type="button" data-tab="billing" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">Billing</button>
+            <button type="button" data-tab="communications" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">Communications</button>
+            <button type="button" data-tab="system" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">System</button>
+        </nav>
+    </div>
+
+    <!-- Tab Content Panels -->
+    <div id="settingsContent">
+
+    <!-- ═══ GENERAL TAB ═══ -->
+    <div class="settings-panel" data-panel="general">
             <div class="bg-white rounded-lg shadow p-6 mb-6">
                 <h2 class="text-xl font-semibold text-gray-800 mb-4">Profile Information</h2>
                 <div class="space-y-4">
@@ -426,7 +595,11 @@ include 'includes/header.php';
                     </button>
                 </form>
             </div>
-            
+    </div><!-- /general panel -->
+
+    <!-- ═══ SCHOOL & SCHEDULE TAB ═══ -->
+    <div class="settings-panel" data-panel="school-schedule" style="display:none;">
+
             <!-- Membership Settings -->
             <div class="bg-white rounded-lg shadow p-6 mb-6">
                 <h2 class="text-xl font-semibold text-gray-800 mb-4">Membership Settings</h2>
@@ -459,16 +632,12 @@ include 'includes/header.php';
                 <p class="text-sm text-gray-600 mb-4">Manage the rooms or training areas in your studio. Classes can be assigned to a room for scheduling purposes.</p>
 
                 <?php
-                try {
-                    $pdo->exec("CREATE TABLE IF NOT EXISTS rooms (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        name VARCHAR(100) NOT NULL,
-                        sort_order INT DEFAULT 0,
-                        status ENUM('active','inactive') DEFAULT 'active',
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )");
-                } catch (PDOException $e) {}
-                $allRooms = $pdo->query("SELECT r.*, (SELECT COUNT(*) FROM classes c WHERE c.room_id = r.id) as class_count FROM rooms r ORDER BY r.sort_order, r.name")->fetchAll();
+                // Rooms table created by migrate.php
+                $roomParams = [];
+                $roomStmt = $pdo->prepare("SELECT r.*, (SELECT COUNT(*) FROM classes c WHERE c.room_id = r.id) as class_count FROM rooms r WHERE 1=1" . school_where('r') . " ORDER BY r.sort_order, r.name");
+                school_param($roomParams);
+                $roomStmt->execute($roomParams);
+                $allRooms = $roomStmt->fetchAll();
                 ?>
 
                 <?php if (!empty($allRooms)): ?>
@@ -654,6 +823,10 @@ include 'includes/header.php';
                 }
                 </script>
             </div>
+    </div><!-- /school-schedule panel -->
+
+    <!-- ═══ BELT TESTING TAB ═══ -->
+    <div class="settings-panel" data-panel="belt-testing" style="display:none;">
 
             <!-- Belt Testing Cycle & Notifications -->
             <div class="bg-white rounded-lg shadow p-6 mb-6 border-t-4 border-teal-500">
@@ -699,6 +872,10 @@ include 'includes/header.php';
                     </button>
                 </form>
             </div>
+    </div><!-- /belt-testing panel -->
+
+    <!-- ═══ CERTIFICATES TAB ═══ -->
+    <div class="settings-panel" data-panel="certificates" style="display:none;">
 
             <!-- Certificate Templates (Dual Config: Color Belt & Black Belt) -->
             <?php
@@ -1091,7 +1268,7 @@ include 'includes/header.php';
                 var rt;
                 window.addEventListener('resize', function() { clearTimeout(rt); rt=setTimeout(function() { Object.keys(fields).forEach(function(f) { if(elems[f]) updateStyle(elems[f],fields[f]); }); },100); });
 
-                function init() { build(); }
+                function init() { if(container.offsetWidth > 0) build(); }
                 img.addEventListener('load', init);
                 if (img.complete) init();
 
@@ -1099,6 +1276,10 @@ include 'includes/header.php';
             })();
             <?php endforeach; ?>
             </script>
+    </div><!-- /certificates panel -->
+
+    <!-- ═══ REGISTRATION TAB ═══ -->
+    <div class="settings-panel" data-panel="registration" style="display:none;">
 
             <!-- Registration Waiver -->
             <div class="bg-white rounded-lg shadow p-6 mb-6">
@@ -1161,6 +1342,10 @@ include 'includes/header.php';
                     </button>
                 </form>
             </div>
+    </div><!-- /registration panel -->
+
+    <!-- ═══ BILLING TAB ═══ -->
+    <div class="settings-panel" data-panel="billing" style="display:none;">
 
             <!-- Tax Statement Settings -->
             <div class="bg-white rounded-lg shadow p-6 mb-6 border-t-4 border-green-500">
@@ -1286,6 +1471,10 @@ include 'includes/header.php';
                     </div>
                 </form>
             </div>
+    </div><!-- /billing panel -->
+
+    <!-- ═══ COMMUNICATIONS TAB ═══ -->
+    <div class="settings-panel" data-panel="communications" style="display:none;">
 
             <!-- Email (SMTP) Configuration -->
             <div class="bg-white rounded-lg shadow p-6 mb-6">
@@ -1414,9 +1603,11 @@ include 'includes/header.php';
                     </div>
                 </form>
             </div>
-        </div>
+    </div><!-- /communications panel -->
 
-        <!-- System Information -->
+    <!-- ═══ SYSTEM TAB ═══ -->
+    <div class="settings-panel" data-panel="system" style="display:none;">
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div>
             <div class="bg-white rounded-lg shadow p-6 mb-6">
                 <h2 class="text-xl font-semibold text-gray-800 mb-4">Testing &amp; Debug</h2>
@@ -1455,6 +1646,38 @@ include 'includes/header.php';
                 </form>
             </div>
 
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h2 class="text-xl font-semibold text-gray-800 mb-4">Log Retention</h2>
+                <form method="POST" class="space-y-4">
+                    <?php echo csrf_field(); ?>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Retention Period (days)</label>
+                        <input type="number" name="log_retention_days" min="7" max="365"
+                               value="<?php echo htmlspecialchars(getSetting('log_retention_days', '90')); ?>"
+                               class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                        <p class="text-xs text-gray-500 mt-1">Audit log and application log entries older than this will be automatically deleted during cron processing. Min: 7 days, Max: 365 days.</p>
+                    </div>
+                    <?php
+                    $currentRetention = (int) getSetting('log_retention_days', '90');
+                    $cutoffDate = date('Y-m-d', strtotime("-{$currentRetention} days"));
+                    ?>
+                    <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs text-gray-600 space-y-1">
+                        <div class="flex justify-between">
+                            <span>Current retention:</span>
+                            <span class="font-semibold"><?php echo $currentRetention; ?> days</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Entries before this date will be cleaned:</span>
+                            <span class="font-semibold"><?php echo $cutoffDate; ?></span>
+                        </div>
+                    </div>
+                    <button type="submit" name="save_log_retention"
+                            class="w-full bg-gray-700 hover:bg-gray-800 text-white px-4 py-2 rounded-lg text-sm font-medium">
+                        Save Log Retention
+                    </button>
+                </form>
+            </div>
+
             <div class="bg-white rounded-lg shadow p-6">
                 <h2 class="text-xl font-semibold text-gray-800 mb-4">System Information</h2>
                 <div class="space-y-3 text-sm">
@@ -1477,9 +1700,116 @@ include 'includes/header.php';
                 </div>
             </div>
             
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h2 class="text-xl font-semibold text-gray-800 mb-4">Push Notifications (FCM)</h2>
+                <?php
+                $fcmSaPath = getSetting('fcm_service_account_path', '');
+                $fcmProjectId = getSetting('fcm_project_id', '');
+                $fcmLegacyKey = getSetting('fcm_server_key', '');
+                $fcmConfigured = !empty($fcmSaPath) && file_exists(__DIR__ . '/' . $fcmSaPath);
+                $fcmLegacyOnly = !$fcmConfigured && !empty($fcmLegacyKey);
+
+                // Read client_email from the service account file for display
+                $fcmClientEmail = '';
+                if ($fcmConfigured) {
+                    try {
+                        $saContent = json_decode(file_get_contents(__DIR__ . '/' . $fcmSaPath), true);
+                        $fcmClientEmail = $saContent['client_email'] ?? '';
+                    } catch (Throwable $e) {}
+                }
+                ?>
+
+                <!-- Status Badge -->
+                <?php if ($fcmConfigured): ?>
+                    <div class="flex items-start gap-2 p-3 rounded-lg text-sm bg-green-50 border border-green-200 text-green-700 mb-4">
+                        <svg class="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+                        <div>
+                            <strong>Configured (v1 API)</strong>
+                            <div class="mt-1 text-xs space-y-0.5">
+                                <div>Project: <code class="bg-green-100 px-1 rounded"><?php echo htmlspecialchars($fcmProjectId); ?></code></div>
+                                <?php if ($fcmClientEmail): ?>
+                                    <div>Account: <code class="bg-green-100 px-1 rounded"><?php echo htmlspecialchars($fcmClientEmail); ?></code></div>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
+                <?php elseif ($fcmLegacyOnly): ?>
+                    <div class="flex items-start gap-2 p-3 rounded-lg text-sm bg-orange-50 border border-orange-200 text-orange-700 mb-4">
+                        <svg class="w-5 h-5 text-orange-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
+                        <div>
+                            <strong>Legacy API Detected (Deprecated)</strong>
+                            <p class="text-xs mt-1">You have a legacy server key configured, but Google shut down the Legacy FCM API in July 2024. Upload a service account key below to migrate to the v1 API.</p>
+                        </div>
+                    </div>
+                <?php else: ?>
+                    <div class="flex items-center gap-2 p-3 rounded-lg text-sm bg-yellow-50 border border-yellow-200 text-yellow-700 mb-4">
+                        <svg class="w-5 h-5 text-yellow-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
+                        <span><strong>Not configured</strong> &mdash; Push notifications are disabled. Upload a service account key to enable.</span>
+                    </div>
+                <?php endif; ?>
+
+                <!-- Upload Form -->
+                <form method="POST" enctype="multipart/form-data" class="space-y-4">
+                    <?php echo csrf_field(); ?>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">
+                            <?php echo $fcmConfigured ? 'Replace' : 'Upload'; ?> Firebase Service Account Key
+                        </label>
+                        <input type="file" name="fcm_service_account" accept=".json"
+                               class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 text-sm
+                                      file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-sm file:font-medium
+                                      file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+                        <p class="text-xs text-gray-500 mt-1">
+                            Download from <strong>Firebase Console &rarr; Project Settings &rarr; Service accounts &rarr; Generate new private key</strong>.
+                            The JSON file contains your project credentials for sending push notifications via the FCM v1 API.
+                        </p>
+                    </div>
+
+                    <?php
+                    // Device token stats
+                    try {
+                        $tokenStmt = $pdo->query("SELECT COUNT(*) as total, COUNT(DISTINCT user_id) as users FROM device_tokens WHERE is_active = 1" . (function_exists('school_where') ? " AND " . school_where() : ""));
+                        $tokenStats = $tokenStmt->fetch(PDO::FETCH_ASSOC);
+                    } catch (Throwable $e) {
+                        $tokenStats = ['total' => 0, 'users' => 0];
+                    }
+                    ?>
+                    <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs text-gray-600 space-y-1">
+                        <div class="flex justify-between">
+                            <span>Registered devices:</span>
+                            <span class="font-semibold"><?php echo (int) $tokenStats['total']; ?></span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Unique users with app:</span>
+                            <span class="font-semibold"><?php echo (int) $tokenStats['users']; ?></span>
+                        </div>
+                    </div>
+
+                    <div class="flex gap-2">
+                        <button type="submit" name="save_fcm_settings"
+                                class="flex-1 bg-gray-700 hover:bg-gray-800 text-white px-4 py-2 rounded-lg text-sm font-medium">
+                            <?php echo $fcmConfigured ? 'Replace Service Account' : 'Upload Service Account'; ?>
+                        </button>
+                        <?php if ($fcmConfigured): ?>
+                            <button type="submit" name="remove_fcm_service_account"
+                                    class="bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-lg text-sm font-medium"
+                                    onclick="return confirm('Remove the Firebase service account? Push notifications will be disabled.');">
+                                Remove
+                            </button>
+                        <?php endif; ?>
+                    </div>
+                </form>
+            </div>
+
             <div class="bg-white rounded-lg shadow p-6">
                 <h2 class="text-xl font-semibold text-gray-800 mb-4">Quick Actions</h2>
                 <div class="space-y-2">
+                    <a href="test_regression.php" class="block w-full text-center bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg">
+                        &#9989; Run Regression Tests
+                    </a>
+                    <a href="test_renewals.php" class="block w-full text-center bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg">
+                        &#128269; Test Renewals
+                    </a>
                     <a href="index.php" class="block w-full text-center bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg">
                         Dashboard
                     </a>
@@ -1494,8 +1824,66 @@ include 'includes/header.php';
                     </a>
                 </div>
             </div>
-        </div>
-    </div>
-</div>
+    </div><!-- /grid inside system -->
+    </div><!-- /system panel -->
+
+    </div><!-- /settingsContent -->
+</div><!-- /container -->
+
+<script>
+(function() {
+    var tabs = document.querySelectorAll('.settings-tab');
+    var panels = document.querySelectorAll('.settings-panel');
+
+    function switchTab(tabName) {
+        tabs.forEach(function(t) {
+            if (t.dataset.tab === tabName) {
+                t.classList.remove('border-transparent', 'text-gray-500');
+                t.classList.add('border-blue-500', 'text-blue-600', 'bg-blue-50');
+            } else {
+                t.classList.remove('border-blue-500', 'text-blue-600', 'bg-blue-50');
+                t.classList.add('border-transparent', 'text-gray-500');
+            }
+        });
+        panels.forEach(function(p) {
+            p.style.display = (p.dataset.panel === tabName) ? '' : 'none';
+        });
+        window.location.hash = tabName;
+        try { localStorage.setItem('settings_active_tab', tabName); } catch(e) {}
+
+        // Refresh certificate preview when switching to that tab
+        if (tabName === 'certificates' && typeof certEngines !== 'undefined') {
+            setTimeout(function() {
+                Object.keys(certEngines).forEach(function(k) {
+                    if (certEngines[k] && certEngines[k].refresh) certEngines[k].refresh();
+                });
+            }, 100);
+        }
+    }
+
+    tabs.forEach(function(t) {
+        t.addEventListener('click', function() { switchTab(this.dataset.tab); });
+    });
+
+    // Determine initial tab: server-set (after POST) > URL hash > localStorage > default
+    var validTabs = ['general','school-schedule','belt-testing','certificates','registration','billing','communications','system'];
+    var initialTab = 'general';
+    <?php if (!empty($activeTabAfterPost)): ?>
+    initialTab = '<?= $activeTabAfterPost ?>';
+    <?php else: ?>
+    var hash = window.location.hash.replace('#','');
+    if (hash && validTabs.indexOf(hash) !== -1) {
+        initialTab = hash;
+    } else {
+        try {
+            var stored = localStorage.getItem('settings_active_tab');
+            if (stored && validTabs.indexOf(stored) !== -1) initialTab = stored;
+        } catch(e) {}
+    }
+    <?php endif; ?>
+
+    switchTab(initialTab);
+})();
+</script>
 
 <?php include 'includes/footer.php'; ?>

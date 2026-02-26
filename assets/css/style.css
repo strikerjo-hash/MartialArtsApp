@@ -676,6 +676,15 @@ img {
     opacity: .45;
 }
 
+/* School selector cards */
+.school-card .plan-card-inner {
+    transition: border-color .15s, background .15s;
+}
+.school-card .plan-card-inner:hover {
+    border-color: var(--primary-color);
+    background: rgba(255,255,255,.05);
+}
+
 /* Payment Summary (Step 2) */
 .payment-summary-card {
     background: rgba(0,0,0,.2);
@@ -918,5 +927,25 @@ img {
     }
     .register-container {
         max-width: 100%;
+    }
+}
+
+/* ======================================================
+   Mobile Touch Targets (44x44px minimum per Apple HIG)
+   ====================================================== */
+@media (max-width: 768px) {
+    button,
+    [role="button"],
+    a.btn,
+    .sidebar-custom a {
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+    }
+
+    .sidebar-custom nav a {
+        margin-bottom: 0.25rem;
+        padding-top: 0.75rem;
+        padding-bottom: 0.75rem;
     }
 }

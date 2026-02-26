@@ -26,28 +26,36 @@ $children = get_parent_children($parentId);
 $message = '';
 
 // Get child's current membership
+$params = [$childId];
+school_param($params);
 $current_membership = $pdo->prepare("
     SELECT m.*, mp.name as plan_name, mp.price as plan_price, mp.duration_months,
            mp.billing_frequency, mp.classes_per_week, mp.description as plan_description
     FROM memberships m
     JOIN membership_plans mp ON m.plan_id = mp.id
-    WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()
+    WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()" . school_where('m') . "
     ORDER BY m.end_date DESC
     LIMIT 1
 ");
-$current_membership->execute([$childId]);
+$current_membership->execute($params);
 $current_membership = $current_membership->fetch() ?: null;
 
 // Get available plans
-$available_plans = $pdo->query("SELECT * FROM membership_plans WHERE status = 'active' ORDER BY price ASC")->fetchAll();
+$apParams = [];
+school_param($apParams);
+$apStmt = $pdo->prepare("SELECT * FROM membership_plans WHERE status = 'active' AND (is_grandfathered = 0 OR is_grandfathered IS NULL)" . school_where() . " ORDER BY price ASC");
+$apStmt->execute($apParams);
+$available_plans = $apStmt->fetchAll();
 
 // --- Plan change lockout check ---
 $is_locked_out = false;
 $lockout_until = null;
 $has_pending_change = false;
 
-$lockoutStmt = $pdo->prepare("SELECT last_plan_change FROM students WHERE id = ?");
-$lockoutStmt->execute([$childId]);
+$lockoutParams = [$childId];
+school_param($lockoutParams);
+$lockoutStmt = $pdo->prepare("SELECT last_plan_change FROM students WHERE id = ?" . school_where());
+$lockoutStmt->execute($lockoutParams);
 $lockoutRow = $lockoutStmt->fetch();
 if (!empty($lockoutRow['last_plan_change'])) {
     $lastChange = new DateTime($lockoutRow['last_plan_change']);
@@ -59,8 +67,10 @@ if (!empty($lockoutRow['last_plan_change'])) {
 
 // Check for pending plan changes
 try {
-    $pendingStmt = $pdo->prepare("SELECT COUNT(*) FROM pending_plan_changes WHERE student_id = ? AND status = 'pending' AND expires_at > NOW()");
-    $pendingStmt->execute([$childId]);
+    $pendingParams = [$childId];
+    school_param($pendingParams);
+    $pendingStmt = $pdo->prepare("SELECT COUNT(*) FROM pending_plan_changes WHERE student_id = ? AND status = 'pending' AND expires_at > NOW()" . school_where());
+    $pendingStmt->execute($pendingParams);
     $has_pending_change = ($pendingStmt->fetchColumn() > 0);
 } catch (PDOException $e) {}
 
@@ -75,8 +85,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upgrade'])) {
     } else {
         $new_plan_id = (int)$_POST['new_plan_id'];
 
-        $new_plan = $pdo->prepare("SELECT * FROM membership_plans WHERE id = ?");
-        $new_plan->execute([$new_plan_id]);
+        $npParams = [$new_plan_id];
+        school_param($npParams);
+        $new_plan = $pdo->prepare("SELECT * FROM membership_plans WHERE id = ?" . school_where());
+        $new_plan->execute($npParams);
         $new_plan = $new_plan->fetch();
 
         if ($new_plan) {
@@ -92,8 +104,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upgrade'])) {
             } else {
                 // Downgrade - process immediately
                 if ($current_membership) {
-                    $stmt = $pdo->prepare("UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?");
-                    $stmt->execute([$current_membership['id']]);
+                    $cancelParams = [$current_membership['id']];
+                    school_param($cancelParams);
+                    $stmt = $pdo->prepare("UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?" . school_where());
+                    $stmt->execute($cancelParams);
                 }
 
                 // Create new membership
@@ -112,10 +126,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upgrade'])) {
                 $billing_day = $isMonthlyNewPlan ? min((int)date('j'), 28) : null;
 
                 $stmt = $pdo->prepare("
-                    INSERT INTO memberships (student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, auto_renew, billing_day, monthly_charges_made)
-                    VALUES (?, ?, ?, ?, 'active', 'paid', ?, ?, ?, 0)
+                    INSERT INTO memberships (school_id, student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, auto_renew, billing_day, monthly_charges_made)
+                    VALUES (?, ?, ?, ?, ?, 'active', 'paid', ?, ?, ?, 0)
                 ");
-                $stmt->execute([$childId, $new_plan_id, $start_date, $end_date, 0, $auto_renew, $billing_day]);
+                $stmt->execute([current_school_id(), $childId, $new_plan_id, $start_date, $end_date, 0, $auto_renew, $billing_day]);
 
                 // Add credit to student's account balance
                 if ($proration['credit'] > 0) {
@@ -130,7 +144,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upgrade'])) {
                 }
 
                 // Record plan change date for lockout
-                $pdo->prepare("UPDATE students SET last_plan_change = CURDATE() WHERE id = ?")->execute([$childId]);
+                $lpcParams = [$childId];
+                school_param($lpcParams);
+                $pdo->prepare("UPDATE students SET last_plan_change = CURDATE() WHERE id = ?" . school_where())->execute($lpcParams);
 
                 header('Location: parent_child_membership.php?id=' . $childId . '&success=downgrade');
                 exit;
@@ -144,15 +160,17 @@ $studentCredit = get_student_credit($childId);
 
 // Refresh current membership after possible changes
 if (isset($_GET['success'])) {
+    $refreshParams = [$childId];
+    school_param($refreshParams);
     $current_membership = $pdo->prepare("
         SELECT m.*, mp.name as plan_name, mp.price as plan_price, mp.duration_months,
                mp.billing_frequency, mp.classes_per_week, mp.description as plan_description
         FROM memberships m
         JOIN membership_plans mp ON m.plan_id = mp.id
-        WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()
+        WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()" . school_where('m') . "
         ORDER BY m.end_date DESC LIMIT 1
     ");
-    $current_membership->execute([$childId]);
+    $current_membership->execute($refreshParams);
     $current_membership = $current_membership->fetch() ?: null;
 }
 

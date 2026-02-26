@@ -68,10 +68,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 // Insert message record
                 $stmt = $pdo->prepare("
-                    INSERT INTO messages (subject, body, sender_id, channel_email, channel_sms, channel_inapp, audience_type, audience_filters, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft')
+                    INSERT INTO messages (school_id, subject, body, sender_id, channel_email, channel_sms, channel_inapp, audience_type, audience_filters, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')
                 ");
                 $stmt->execute([
+                    current_school_id(),
                     $subject, $body, $_SESSION['user_id'],
                     $channelEmail, $channelSms, $channelInapp,
                     $audienceType, json_encode($filters),
@@ -95,7 +96,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $delId = (int) ($_POST['message_id'] ?? 0);
                 if ($delId) {
                     $pdo->prepare("DELETE FROM message_recipients WHERE message_id = ?")->execute([$delId]);
-                    $pdo->prepare("DELETE FROM messages WHERE id = ?")->execute([$delId]);
+                    $params = [$delId];
+                    $stmt = $pdo->prepare("DELETE FROM messages WHERE id = ?" . school_where());
+                    school_param($params);
+                    $stmt->execute($params);
                     $message = showAlert('Message deleted.', 'success');
                 }
                 break;
@@ -108,26 +112,46 @@ $pageNum  = max(1, (int) ($_GET['page'] ?? 1));
 $perPage  = 20;
 $offset   = ($pageNum - 1) * $perPage;
 
+$schoolFilter = '';
+if (!is_viewing_all_schools()) {
+    $schoolFilter = ' WHERE m.school_id = :school_id';
+}
 $histStmt = $pdo->prepare("
     SELECT m.*, u.full_name as sender_name
     FROM messages m
     LEFT JOIN users u ON m.sender_id = u.id
+    $schoolFilter
     ORDER BY m.created_at DESC
     LIMIT :lim OFFSET :off
 ");
+if (!is_viewing_all_schools()) {
+    $histStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT);
+}
 $histStmt->bindValue(':lim', $perPage, PDO::PARAM_INT);
 $histStmt->bindValue(':off', $offset, PDO::PARAM_INT);
 $histStmt->execute();
 $messagesList = $histStmt->fetchAll();
 
-$totalMessages = (int) $pdo->query("SELECT COUNT(*) FROM messages")->fetchColumn();
+$params = [];
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM messages WHERE 1=1" . school_where());
+school_param($params);
+$stmt->execute($params);
+$totalMessages = (int) $stmt->fetchColumn();
 $totalPages    = max(1, (int) ceil($totalMessages / $perPage));
 
 // Data for audience builder
-$plans      = $pdo->query("SELECT id, name FROM membership_plans WHERE status = 'active' ORDER BY name")->fetchAll();
+$params = [];
+$stmt = $pdo->prepare("SELECT id, name FROM membership_plans WHERE status = 'active'" . school_where() . " ORDER BY name");
+school_param($params);
+$stmt->execute($params);
+$plans = $stmt->fetchAll();
 $eventsList = [];
 try {
-    $eventsList = $pdo->query("SELECT id, name, event_date FROM events ORDER BY event_date DESC LIMIT 50")->fetchAll();
+    $params = [];
+    $stmt = $pdo->prepare("SELECT id, name, event_date FROM events WHERE 1=1" . school_where() . " ORDER BY event_date DESC LIMIT 50");
+    school_param($params);
+    $stmt->execute($params);
+    $eventsList = $stmt->fetchAll();
 } catch (\PDOException $e) {}
 
 $emailConfigured = is_email_configured();

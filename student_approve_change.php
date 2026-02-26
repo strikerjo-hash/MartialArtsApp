@@ -38,8 +38,8 @@ $proration = array_merge([
 ], $proration);
 
 // Fetch the pending change (verify it's still valid)
-$pcStmt = $pdo->prepare("
-    SELECT pc.*, mp_new.name as new_plan_name, mp_new.price as new_plan_price,
+$params = [$changeId, $student_id];
+$sql = "SELECT pc.*, mp_new.name as new_plan_name, mp_new.price as new_plan_price,
            mp_new.duration_months as new_duration, mp_new.billing_frequency as new_billing_frequency,
            mp_old.name as old_plan_name,
            u.full_name as requested_by_name
@@ -47,9 +47,10 @@ $pcStmt = $pdo->prepare("
     JOIN membership_plans mp_new ON pc.new_plan_id = mp_new.id
     LEFT JOIN membership_plans mp_old ON pc.old_plan_id = mp_old.id
     LEFT JOIN users u ON pc.requested_by = u.id
-    WHERE pc.id = ? AND pc.student_id = ? AND pc.status = 'pending' AND pc.expires_at > NOW()
-");
-$pcStmt->execute([$changeId, $student_id]);
+    WHERE pc.id = ? AND pc.student_id = ? AND pc.status = 'pending' AND pc.expires_at > NOW()" . school_where('pc');
+school_param($params);
+$pcStmt = $pdo->prepare($sql);
+$pcStmt->execute($params);
 $pc = $pcStmt->fetch();
 
 if (!$pc) {
@@ -60,14 +61,15 @@ if (!$pc) {
 }
 
 // Get current membership
-$current_membership = $pdo->prepare("
-    SELECT m.*, mp.name as plan_name, mp.price as plan_price, mp.duration_months, mp.billing_frequency
+$params = [$student_id];
+$sql = "SELECT m.*, mp.name as plan_name, mp.price as plan_price, mp.duration_months, mp.billing_frequency
     FROM memberships m
     JOIN membership_plans mp ON m.plan_id = mp.id
-    WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()
-    ORDER BY m.end_date DESC LIMIT 1
-");
-$current_membership->execute([$student_id]);
+    WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()" . school_where('m') . "
+    ORDER BY m.end_date DESC LIMIT 1";
+school_param($params);
+$current_membership = $pdo->prepare($sql);
+$current_membership->execute($params);
 $current_membership = $current_membership->fetch() ?: null;
 
 // Recalculate proration live for the most up-to-date numbers
@@ -99,6 +101,7 @@ $message = '';
 
 // Handle payment confirmation
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_payment'])) {
+    verify_csrf();
     $gateway = get_active_gateway();
 
     // Recalculate fees
@@ -113,7 +116,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_payment'])) {
     if ($proration['amount'] <= 0) {
         // Edge case: proration recalculated to zero or downgrade — process as downgrade
         if ($current_membership) {
-            $pdo->prepare("UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?")->execute([$current_membership['id']]);
+            $params = [$current_membership['id']];
+            $sql = "UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?" . school_where();
+            school_param($params);
+            $pdo->prepare($sql)->execute($params);
         }
 
         $start_date = date('Y-m-d');
@@ -122,16 +128,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_payment'])) {
         $billing_day = $isMonthly ? min((int) date('j'), 28) : null;
 
         $pdo->prepare("
-            INSERT INTO memberships (student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, billing_day, monthly_charges_made)
-            VALUES (?, ?, ?, ?, 'active', 'paid', 0, ?, 0)
-        ")->execute([$student_id, $pc['new_plan_id'], $start_date, $end_date, $billing_day]);
+            INSERT INTO memberships (school_id, student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, billing_day, monthly_charges_made)
+            VALUES (?, ?, ?, ?, ?, 'active', 'paid', 0, ?, 0)
+        ")->execute([current_school_id(), $student_id, $pc['new_plan_id'], $start_date, $end_date, $billing_day]);
 
         if ($proration['credit'] > 0) {
             add_student_credit($student_id, $proration['credit'], 'Plan change credit: ' . ($current_membership['plan_name'] ?? 'None') . ' to ' . $pc['new_plan_name'], 'downgrade');
         }
 
-        $pdo->prepare("UPDATE pending_plan_changes SET status = 'approved', resolved_at = NOW() WHERE id = ?")->execute([$changeId]);
-        $pdo->prepare("UPDATE students SET last_plan_change = CURDATE() WHERE id = ?")->execute([$student_id]);
+        $params = [$changeId]; $sql = "UPDATE pending_plan_changes SET status = 'approved', resolved_at = NOW() WHERE id = ?" . school_where(); school_param($params);
+        $pdo->prepare($sql)->execute($params);
+        $params = [$student_id]; $sql = "UPDATE students SET last_plan_change = CURDATE() WHERE id = ?" . school_where(); school_param($params);
+        $pdo->prepare($sql)->execute($params);
 
         unset($_SESSION['approve_change_id']);
         unset($_SESSION['approve_proration']);
@@ -161,7 +169,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_payment'])) {
 
             // Cancel current membership
             if ($current_membership) {
-                $pdo->prepare("UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?")->execute([$current_membership['id']]);
+                $params = [$current_membership['id']];
+                $sql = "UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?" . school_where();
+                school_param($params);
+                $pdo->prepare($sql)->execute($params);
             }
 
             // Create new membership
@@ -172,9 +183,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_payment'])) {
             $monthly_charges = $isMonthly ? 1 : 0;
 
             $pdo->prepare("
-                INSERT INTO memberships (student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, billing_day, monthly_charges_made)
-                VALUES (?, ?, ?, ?, 'active', 'paid', ?, ?, ?)
-            ")->execute([$student_id, $pc['new_plan_id'], $start_date, $end_date, $totalWithFees, $billing_day, $monthly_charges]);
+                INSERT INTO memberships (school_id, student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, billing_day, monthly_charges_made)
+                VALUES (?, ?, ?, ?, ?, 'active', 'paid', ?, ?, ?)
+            ")->execute([current_school_id(), $student_id, $pc['new_plan_id'], $start_date, $end_date, $totalWithFees, $billing_day, $monthly_charges]);
             $newMembershipId = $pdo->lastInsertId();
 
             // Build payment notes
@@ -186,27 +197,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_payment'])) {
             // Record card payment
             if ($amountCharged > 0) {
                 $pdo->prepare("
-                    INSERT INTO payments (student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
-                    VALUES (?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, ?)
-                ")->execute([$student_id, $newMembershipId, $amountCharged, generateReceiptNumber(), $payNotes]);
+                    INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
+                    VALUES (?, ?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, ?)
+                ")->execute([current_school_id(), $student_id, $newMembershipId, $amountCharged, generateReceiptNumber(), $payNotes]);
             }
 
             // Record credit payment
             if ($creditUsed > 0) {
                 $pdo->prepare("
-                    INSERT INTO payments (student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
-                    VALUES (?, 'membership', ?, ?, 'account_credit', CURDATE(), ?, ?)
+                    INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
+                    VALUES (?, ?, 'membership', ?, ?, 'account_credit', CURDATE(), ?, ?)
                 ")->execute([
-                    $student_id, $newMembershipId, $creditUsed, generateReceiptNumber(),
+                    current_school_id(), $student_id, $newMembershipId, $creditUsed, generateReceiptNumber(),
                     'Account credit applied to plan change: ' . ($current_membership['plan_name'] ?? 'None') . ' to ' . $pc['new_plan_name']
                 ]);
             }
 
             // Mark pending change as approved
-            $pdo->prepare("UPDATE pending_plan_changes SET status = 'approved', resolved_at = NOW() WHERE id = ?")->execute([$changeId]);
+            $params = [$changeId]; $sql = "UPDATE pending_plan_changes SET status = 'approved', resolved_at = NOW() WHERE id = ?" . school_where(); school_param($params);
+            $pdo->prepare($sql)->execute($params);
 
             // Record plan change date for lockout
-            $pdo->prepare("UPDATE students SET last_plan_change = CURDATE() WHERE id = ?")->execute([$student_id]);
+            $params = [$student_id]; $sql = "UPDATE students SET last_plan_change = CURDATE() WHERE id = ?" . school_where(); school_param($params);
+            $pdo->prepare($sql)->execute($params);
 
             // Clear session
             unset($_SESSION['approve_change_id']);
@@ -320,6 +333,7 @@ include 'includes/student_header.php';
                 </div>
 
                 <form method="POST" id="payment-form">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="confirm_payment" value="1">
                     <button type="submit"
                             class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-4 px-6 rounded-lg text-lg mb-4">
@@ -375,6 +389,7 @@ include 'includes/student_header.php';
                 <?php endif; ?>
 
                 <form method="POST" id="payment-form">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="confirm_payment" value="1">
 
                     <button type="submit"

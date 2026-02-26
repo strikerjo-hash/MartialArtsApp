@@ -2,16 +2,16 @@
 require_once 'config.php';
 requireLogin();
 
-// Only admins can manage permissions
-if (getCurrentUser()['role'] !== 'admin') {
-    header('Location: index.php');
-    exit;
+// Only admins and super admins can manage permissions
+if (!in_array(getCurrentUser()['role'], ['admin', 'super_admin'])) {
+    accessDenied('Permission management requires Admin or Super Admin privileges.');
 }
 
 $message = '';
 
 // Handle permission updates
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_permissions'])) {
+    verify_csrf();
     $role = $_POST['role'];
     $page = $_POST['page'];
     
@@ -189,6 +189,7 @@ include 'includes/header.php';
 </div>
 
 <form id="permission-form" method="POST" style="display: none;">
+    <?= csrf_field() ?>
     <input type="hidden" name="update_permissions" value="1">
     <input type="hidden" name="role" id="form_role">
     <input type="hidden" name="page" id="form_page">

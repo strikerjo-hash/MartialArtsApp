@@ -5,10 +5,9 @@ require_once __DIR__ . '/includes/parent_auth.php';
 require_once __DIR__ . '/includes/payment_gateway.php';
 requireLogin();
 
-// Admin-only access
-if (getCurrentUser()['role'] !== 'admin') {
-    header('Location: index.php');
-    exit;
+// Admin / Super Admin access
+if (!in_array(getCurrentUser()['role'], ['admin', 'super_admin'])) {
+    accessDenied('Import/Export requires Admin or Super Admin privileges.');
 }
 
 $pdo = get_db();
@@ -75,10 +74,12 @@ function generateUniqueUsername(PDO $pdo, string $firstName, string $lastName): 
 
     $username = $base;
     $counter  = 1;
-    $stmt = $pdo->prepare('SELECT COUNT(*) FROM students WHERE username = ?');
+    $stmt = $pdo->prepare('SELECT COUNT(*) FROM students WHERE username = ?' . school_where());
 
     while (true) {
-        $stmt->execute([$username]);
+        $params = [$username];
+        school_param($params);
+        $stmt->execute($params);
         if ((int) $stmt->fetchColumn() === 0) break;
         $username = $base . $counter;
         $counter++;
@@ -167,14 +168,16 @@ function findDuplicateStudents(PDO $pdo, array $rows): array
     $stmt = $pdo->prepare(
         'SELECT id, first_name, last_name, join_date, email, phone
          FROM students
-         WHERE LOWER(TRIM(first_name)) = LOWER(?) AND LOWER(TRIM(last_name)) = LOWER(?)'
+         WHERE LOWER(TRIM(first_name)) = LOWER(?) AND LOWER(TRIM(last_name)) = LOWER(?)' . school_where()
     );
 
     foreach ($rows as $i => $row) {
-        $stmt->execute([
+        $params = [
             trim($row['Participant First Name'] ?? ''),
             trim($row['Participant Last Name'] ?? ''),
-        ]);
+        ];
+        school_param($params);
+        $stmt->execute($params);
         $match = $stmt->fetch();
         if ($match) {
             $duplicates[$i] = [
@@ -220,10 +223,13 @@ function executeImport(PDO $pdo, array $rows, array $options): array
         // Pre-load existing parent records for matching
         if ($createParents) {
             try {
-                $existingParents = $pdo->query(
-                    "SELECT id, LOWER(CONCAT(TRIM(first_name), '|', TRIM(last_name))) as name_key
-                     FROM students WHERE is_parent = 1"
-                )->fetchAll();
+                $parentSql = "SELECT id, LOWER(CONCAT(TRIM(first_name), '|', TRIM(last_name))) as name_key
+                     FROM students WHERE is_parent = 1" . school_where();
+                $parentParams = [];
+                school_param($parentParams);
+                $parentStmt = $pdo->prepare($parentSql);
+                $parentStmt->execute($parentParams);
+                $existingParents = $parentStmt->fetchAll();
                 foreach ($existingParents as $ep) {
                     $parentCache[$ep['name_key']] = (int) $ep['id'];
                 }
@@ -240,7 +246,7 @@ function executeImport(PDO $pdo, array $rows, array $options): array
         // Duplicate check against DB (name-only, no join_date)
         $dupStmt = $pdo->prepare(
             'SELECT id, notes FROM students
-             WHERE LOWER(TRIM(first_name)) = LOWER(?) AND LOWER(TRIM(last_name)) = LOWER(?)'
+             WHERE LOWER(TRIM(first_name)) = LOWER(?) AND LOWER(TRIM(last_name)) = LOWER(?)' . school_where()
         );
 
         foreach ($dedupedRows as $i => $row) {
@@ -265,7 +271,9 @@ function executeImport(PDO $pdo, array $rows, array $options): array
             }
 
             // Check for duplicate in DB (name-only)
-            $dupStmt->execute([$firstName, $lastName]);
+            $dupParams = [$firstName, $lastName];
+            school_param($dupParams);
+            $dupStmt->execute($dupParams);
             $existing = $dupStmt->fetch();
             $studentId = null;
 
@@ -287,8 +295,11 @@ function executeImport(PDO $pdo, array $rows, array $options): array
                     if ($pastDue > 0 && !$isDryRun) {
                         $existingNotes = $existing['notes'] ?? '';
                         if (stripos($existingNotes, 'MyStudio') === false) {
-                            $pdo->prepare("UPDATE students SET notes = CONCAT(COALESCE(notes, ''), ?) WHERE id = ?")
-                                ->execute(["\n[MyStudio Import] Past due: $" . number_format($pastDue, 2), $studentId]);
+                            $updateParams = ["
+[MyStudio Import] Past due: $" . number_format($pastDue, 2), $studentId];
+                            school_param($updateParams);
+                            $pdo->prepare("UPDATE students SET notes = CONCAT(COALESCE(notes, ''), ?) WHERE id = ?" . school_where())
+                                ->execute($updateParams);
                         }
                     }
 
@@ -313,9 +324,10 @@ function executeImport(PDO $pdo, array $rows, array $options): array
                     $importEmail = trim($row['Email'] ?? $row['email'] ?? $row['Participant Email'] ?? '');
 
                     $pdo->prepare("
-                        INSERT INTO students (first_name, last_name, username, email, password_hash, join_date, belt_rank, status, notes, is_parent, must_change_password, registration_incomplete)
-                        VALUES (?, ?, ?, ?, ?, ?, 'White', 'active', ?, 0, 1, 1)
+                        INSERT INTO students (school_id, first_name, last_name, username, email, password_hash, join_date, belt_rank, status, notes, is_parent, must_change_password, registration_incomplete)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'White', 'active', ?, 0, 1, 1)
                     ")->execute([
+                        current_school_id(),
                         sanitizeInput($firstName),
                         sanitizeInput($lastName),
                         $username,
@@ -361,9 +373,10 @@ function executeImport(PDO $pdo, array $rows, array $options): array
                             $parentUsername = generateUniqueUsername($pdo, $custFirst, $custLast);
                             $parentPasswordHash = password_hash('Procomp123', PASSWORD_DEFAULT);
                             $pdo->prepare("
-                                INSERT INTO students (first_name, last_name, username, password_hash, join_date, belt_rank, status, is_parent, notes, must_change_password, registration_incomplete)
-                                VALUES (?, ?, ?, ?, ?, 'White', 'active', 1, '[MyStudio Import] Parent/Guardian account', 1, 1)
+                                INSERT INTO students (school_id, first_name, last_name, username, password_hash, join_date, belt_rank, status, is_parent, notes, must_change_password, registration_incomplete)
+                                VALUES (?, ?, ?, ?, ?, ?, 'White', 'active', 1, '[MyStudio Import] Parent/Guardian account', 1, 1)
                             ")->execute([
+                                current_school_id(),
                                 sanitizeInput($custFirst),
                                 sanitizeInput($custLast),
                                 $parentUsername,

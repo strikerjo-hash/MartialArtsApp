@@ -22,9 +22,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $studentId = (int)($_POST['student_id'] ?? 0);
         if ($studentId) {
             // Remove all child links first
-            $pdo->prepare("DELETE FROM parent_students WHERE parent_id = ?")->execute([$studentId]);
+            $params = [$studentId];
+            school_param($params);
+            $pdo->prepare("DELETE FROM parent_students WHERE parent_id = ?" . school_where())->execute($params);
             // Revoke parent flag
-            $pdo->prepare("UPDATE students SET is_parent = 0 WHERE id = ?")->execute([$studentId]);
+            $params = [$studentId];
+            school_param($params);
+            $pdo->prepare("UPDATE students SET is_parent = 0 WHERE id = ?" . school_where())->execute($params);
             $message = showAlert('Parent capabilities revoked and all child links removed.', 'success');
         }
     }
@@ -69,6 +73,10 @@ $query = "
     WHERE s.is_parent = 1
 ";
 
+if (!is_viewing_all_schools()) {
+    $query .= " AND s.school_id = :school_id";
+}
+
 if ($search) {
     $query .= " AND (s.first_name LIKE :search1 OR s.last_name LIKE :search2 OR s.email LIKE :search3 OR s.username LIKE :search4)";
 }
@@ -87,6 +95,9 @@ if ($children_filter === 'linked') {
 $query .= " ORDER BY s.first_name, s.last_name";
 
 $stmt = $pdo->prepare($query);
+if (!is_viewing_all_schools()) {
+    $stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT);
+}
 if ($search) {
     $searchVal = "%$search%";
     $stmt->bindValue(':search1', $searchVal);
@@ -243,12 +254,17 @@ include 'includes/header.php';
 <!-- Promote Student Modal -->
 <?php
 // Fetch active students that are NOT already parents
-$allStudents = $pdo->query("
+$modalParams = [];
+school_param($modalParams);
+$modalQuery = "
     SELECT id, first_name, last_name, email, username
     FROM students
-    WHERE status = 'active' AND is_parent = 0
+    WHERE status = 'active' AND is_parent = 0" . school_where() . "
     ORDER BY first_name, last_name
-")->fetchAll();
+";
+$modalStmt = $pdo->prepare($modalQuery);
+$modalStmt->execute($modalParams);
+$allStudents = $modalStmt->fetchAll();
 ?>
 <div id="promoteModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
     <div class="relative top-20 mx-auto p-5 border w-full max-w-lg shadow-lg rounded-md bg-white">

@@ -61,8 +61,10 @@ if ($search !== '') {
     $params[] = "%{$search}%";
 }
 
+$query .= school_where('p');
 $query .= " ORDER BY p.payment_date DESC, p.created_at DESC";
 
+school_param($params);
 $stmt = $pdo->prepare($query);
 $stmt->execute($params);
 $payments = $stmt->fetchAll();
@@ -85,8 +87,10 @@ foreach ($payments as $p) {
 
 // Available years
 $yearPlaceholders = implode(',', array_fill(0, count($childIds), '?'));
-$yearStmt = $pdo->prepare("SELECT DISTINCT YEAR(payment_date) as yr FROM payments WHERE student_id IN ({$yearPlaceholders}) ORDER BY yr DESC");
-$yearStmt->execute($childIds);
+$yearParams = $childIds;
+school_param($yearParams);
+$yearStmt = $pdo->prepare("SELECT DISTINCT YEAR(payment_date) as yr FROM payments WHERE student_id IN ({$yearPlaceholders})" . school_where() . " ORDER BY yr DESC");
+$yearStmt->execute($yearParams);
 $availableYears = $yearStmt->fetchAll(PDO::FETCH_COLUMN);
 if (empty($availableYears)) {
     $availableYears = [date('Y')];
@@ -126,7 +130,9 @@ try {
           )
         ORDER BY p.payment_date DESC
     ";
+    $taxQuery .= school_where('p');
 
+    school_param($taxParams);
     $taxStmt = $pdo->prepare($taxQuery);
     $taxStmt->execute($taxParams);
     $taxEligiblePayments = $taxStmt->fetchAll();

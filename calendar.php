@@ -33,16 +33,18 @@ if ($nextMonth > 12) { $nextMonth = 1; $nextYear++; }
 // ---- Fetch EVENTS for this month ----
 $events = [];
 try {
+    $params = [
+        sprintf('%04d-%02d-01', $year, $month),
+        sprintf('%04d-%02d-%02d', $year, $month, $daysInMonth),
+    ];
     $stmt = $pdo->prepare("
         SELECT id, name, event_type, event_date, start_time, end_time, location, status, requires_registration
         FROM events
-        WHERE event_date BETWEEN ? AND ?
+        WHERE event_date BETWEEN ? AND ?" . school_where() . "
         ORDER BY start_time ASC, name ASC
     ");
-    $stmt->execute([
-        sprintf('%04d-%02d-01', $year, $month),
-        sprintf('%04d-%02d-%02d', $year, $month, $daysInMonth),
-    ]);
+    school_param($params);
+    $stmt->execute($params);
     foreach ($stmt->fetchAll() as $ev) {
         $day = (int) date('j', strtotime($ev['event_date']));
         $events[$day][] = $ev;
@@ -52,14 +54,18 @@ try {
 // ---- Fetch CLASSES (recurring weekly schedule) ----
 $classes = [];
 try {
-    $classes = $pdo->query("
+    $params = [];
+    $stmt = $pdo->prepare("
         SELECT c.id, c.name, c.day_of_week, c.start_time, c.end_time,
                mas.name as style_name
         FROM classes c
         LEFT JOIN martial_arts_styles mas ON c.style_id = mas.id
-        WHERE c.status = 'active'
+        WHERE c.status = 'active'" . school_where('c') . "
         ORDER BY c.start_time ASC, c.name ASC
-    ")->fetchAll();
+    ");
+    school_param($params);
+    $stmt->execute($params);
+    $classes = $stmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // Map classes by day_of_week name

@@ -17,70 +17,7 @@
 
 require_once __DIR__ . '/messaging.php';
 
-// ---------------------------------------------------------------------------
-// Database Migrations
-// ---------------------------------------------------------------------------
-
-function ensure_belt_cycle_tables(): void
-{
-    $pdo = get_db();
-
-    // 1. makeup_classes table — tracks make-up sessions that offset absences
-    try {
-        $pdo->exec("CREATE TABLE IF NOT EXISTS makeup_classes (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            student_id INT NOT NULL,
-            original_absence_id INT DEFAULT NULL COMMENT 'attendance.id of the missed class',
-            class_id INT DEFAULT NULL COMMENT 'class where makeup was done',
-            makeup_date DATE NOT NULL,
-            logged_by INT NOT NULL COMMENT 'users.id of admin who logged it',
-            notes TEXT DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_mc_student (student_id),
-            INDEX idx_mc_absence (original_absence_id),
-            INDEX idx_mc_date (makeup_date)
-        )");
-    } catch (\PDOException $e) {}
-
-    // 2. absence_warnings table — tracks when warning emails were sent per cycle
-    try {
-        $pdo->exec("CREATE TABLE IF NOT EXISTS absence_warnings (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            student_id INT NOT NULL,
-            cycle_start DATE NOT NULL,
-            cycle_end DATE NOT NULL,
-            absence_count INT NOT NULL,
-            email_sent TINYINT(1) NOT NULL DEFAULT 0,
-            sent_at DATETIME DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE KEY unique_student_cycle (student_id, cycle_start),
-            INDEX idx_aw_student (student_id)
-        )");
-    } catch (\PDOException $e) {}
-
-    // 3. Default settings (idempotent INSERT IGNORE)
-    $defaultEnd = (new \DateTime())->modify('+4 months')->format('Y-m-d');
-    try {
-        $pdo->exec("INSERT IGNORE INTO settings (setting_key, setting_value) VALUES
-            ('belt_testing_cycle_start_date', '" . date('Y-m-d') . "'),
-            ('belt_testing_cycle_end_date', '" . $defaultEnd . "'),
-            ('absence_warning_threshold', '3'),
-            ('payment_failure_email_enabled', '1')
-        ");
-    } catch (\PDOException $e) {}
-
-    // 4. Role permissions for makeup_classes.php
-    try {
-        $pdo->exec("INSERT IGNORE INTO role_permissions (role, page, can_view, can_create, can_edit, can_delete) VALUES
-            ('admin', 'makeup_classes.php', 1, 1, 1, 1),
-            ('instructor', 'makeup_classes.php', 1, 1, 0, 0),
-            ('staff', 'makeup_classes.php', 1, 1, 0, 0)
-        ");
-    } catch (\PDOException $e) {}
-}
-
-// Run migrations on include
-ensure_belt_cycle_tables();
+// Migrations have been moved to migrate.php
 
 // ---------------------------------------------------------------------------
 // Core Functions
@@ -110,12 +47,14 @@ function get_current_cycle(): array
 function count_absences_in_cycle(int $studentId, string $cycleStart, string $cycleEnd): int
 {
     $pdo = get_db();
+    $params = [$studentId, $cycleStart, $cycleEnd];
     $stmt = $pdo->prepare(
         "SELECT COUNT(*) FROM attendance
          WHERE student_id = ? AND status = 'absent'
-         AND attendance_date BETWEEN ? AND ?"
+         AND attendance_date BETWEEN ? AND ?" . school_where()
     );
-    $stmt->execute([$studentId, $cycleStart, $cycleEnd]);
+    school_param($params);
+    $stmt->execute($params);
     return (int) $stmt->fetchColumn();
 }
 
@@ -125,11 +64,13 @@ function count_absences_in_cycle(int $studentId, string $cycleStart, string $cyc
 function count_makeups_in_cycle(int $studentId, string $cycleStart, string $cycleEnd): int
 {
     $pdo = get_db();
+    $params = [$studentId, $cycleStart, $cycleEnd];
     $stmt = $pdo->prepare(
         "SELECT COUNT(*) FROM makeup_classes
-         WHERE student_id = ? AND makeup_date BETWEEN ? AND ?"
+         WHERE student_id = ? AND makeup_date BETWEEN ? AND ?" . school_where()
     );
-    $stmt->execute([$studentId, $cycleStart, $cycleEnd]);
+    school_param($params);
+    $stmt->execute($params);
     return (int) $stmt->fetchColumn();
 }
 
@@ -160,11 +101,13 @@ function get_student_absence_summary(int $studentId): array
     // Check if a warning was already sent this cycle
     $warningSent = false;
     try {
+        $wParams = [$studentId, $cycle['start']];
         $stmt = $pdo->prepare(
             "SELECT email_sent FROM absence_warnings
-             WHERE student_id = ? AND cycle_start = ?"
+             WHERE student_id = ? AND cycle_start = ?" . school_where()
         );
-        $stmt->execute([$studentId, $cycle['start']]);
+        school_param($wParams);
+        $stmt->execute($wParams);
         $row = $stmt->fetch();
         $warningSent = $row && (int) $row['email_sent'] === 1;
     } catch (\PDOException $e) {}
@@ -197,12 +140,16 @@ function check_and_send_absence_warnings(): array
 
     // Get all active students enrolled in at least one active class
     try {
-        $students = $pdo->query("
+        $sParams = [];
+        $sSql = "
             SELECT DISTINCT s.id, s.first_name, s.last_name, s.email
             FROM students s
             JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active'
-            WHERE s.status = 'active'
-        ")->fetchAll();
+            WHERE s.status = 'active'" . school_where('s');
+        school_param($sParams);
+        $sStmt = $pdo->prepare($sSql);
+        $sStmt->execute($sParams);
+        $students = $sStmt->fetchAll();
     } catch (\PDOException $e) {
         return $results;
     }
@@ -216,10 +163,12 @@ function check_and_send_absence_warnings(): array
         }
 
         // Check if warning already sent for this student in this cycle
+        $exParams = [$s['id'], $cycle['start']];
         $existing = $pdo->prepare(
-            "SELECT id FROM absence_warnings WHERE student_id = ? AND cycle_start = ?"
+            "SELECT id FROM absence_warnings WHERE student_id = ? AND cycle_start = ?" . school_where()
         );
-        $existing->execute([$s['id'], $cycle['start']]);
+        school_param($exParams);
+        $existing->execute($exParams);
         if ($existing->fetch()) {
             continue; // Already warned this cycle
         }
@@ -252,12 +201,12 @@ function check_and_send_absence_warnings(): array
             }
         }
 
-        // Insert warning record
+        // Insert warning record (with school_id)
         try {
             $pdo->prepare(
-                "INSERT INTO absence_warnings (student_id, cycle_start, cycle_end, absence_count, email_sent, sent_at)
-                 VALUES (?, ?, ?, ?, ?, ?)"
-            )->execute([$s['id'], $cycle['start'], $cycle['end'], $netAbsences, $emailSent, $sentAt]);
+                "INSERT INTO absence_warnings (school_id, student_id, cycle_start, cycle_end, absence_count, email_sent, sent_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)"
+            )->execute([current_school_id(), $s['id'], $cycle['start'], $cycle['end'], $netAbsences, $emailSent, $sentAt]);
         } catch (\PDOException $e) {}
 
         $results['warned']++;

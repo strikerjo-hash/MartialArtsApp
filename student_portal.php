@@ -23,8 +23,13 @@ require_student_payment_clear();
 $studentId = $_SESSION['student_id'];
 
 // Fetch student profile
-$stmt = $pdo->prepare('SELECT * FROM students WHERE id = :id LIMIT 1');
-$stmt->execute([':id' => $studentId]);
+$stmtSql = 'SELECT * FROM students WHERE id = :id';
+if (!is_viewing_all_schools()) { $stmtSql .= ' AND school_id = :school_id'; }
+$stmtSql .= ' LIMIT 1';
+$stmt = $pdo->prepare($stmtSql);
+$stmt->bindValue(':id', $studentId, PDO::PARAM_INT);
+if (!is_viewing_all_schools()) { $stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+$stmt->execute();
 $student = $stmt->fetch();
 
 if (!$student) {
@@ -36,32 +41,37 @@ $portal_message = '';
 
 // Handle pending plan change actions (approve/decline)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    verify_csrf();
     if (isset($_POST['approve_plan_change'])) {
         $changeId = (int) ($_POST['change_id'] ?? 0);
 
         // Fetch the pending change
+        $pcParams = [$changeId, $studentId];
         $pcStmt = $pdo->prepare("
             SELECT pc.*, mp_new.*, mp_new.name as new_plan_name, mp_new.price as new_plan_price,
                    mp_new.duration_months as new_duration, mp_new.billing_frequency as new_billing_frequency
             FROM pending_plan_changes pc
             JOIN membership_plans mp_new ON pc.new_plan_id = mp_new.id
-            WHERE pc.id = ? AND pc.student_id = ? AND pc.status = 'pending' AND pc.expires_at > NOW()
+            WHERE pc.id = ? AND pc.student_id = ? AND pc.status = 'pending' AND pc.expires_at > NOW()" . school_where('pc') . "
         ");
-        $pcStmt->execute([$changeId, $studentId]);
+        school_param($pcParams);
+        $pcStmt->execute($pcParams);
         $pc = $pcStmt->fetch();
 
         if (!$pc) {
             $portal_message = showAlert('This plan change is no longer available.', 'error');
         } else {
             // Get current active membership
+            $curMemParams = [$studentId];
             $curMem = $pdo->prepare("
                 SELECT m.*, mp.name as plan_name, mp.price as plan_price, mp.duration_months, mp.billing_frequency
                 FROM memberships m
                 JOIN membership_plans mp ON m.plan_id = mp.id
-                WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()
+                WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()" . school_where('m') . "
                 ORDER BY m.end_date DESC LIMIT 1
             ");
-            $curMem->execute([$studentId]);
+            school_param($curMemParams);
+            $curMem->execute($curMemParams);
             $curMemRow = $curMem->fetch() ?: null;
 
             // Recalculate proration live (not stale stored data)
@@ -81,7 +91,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 // Downgrade or free — process immediately (no payment needed)
                 if ($curMemRow) {
-                    $pdo->prepare("UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?")->execute([$curMemRow['id']]);
+                    $updMemParams = [$curMemRow['id']];
+                    $updMemSql = "UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?" . school_where();
+                    school_param($updMemParams);
+                    $pdo->prepare($updMemSql)->execute($updMemParams);
                 }
 
                 $start_date = date('Y-m-d');
@@ -90,9 +103,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $billing_day = $isMonthly ? min((int) date('j'), 28) : null;
 
                 $pdo->prepare("
-                    INSERT INTO memberships (student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, billing_day, monthly_charges_made)
-                    VALUES (?, ?, ?, ?, 'active', 'paid', 0, ?, 0)
-                ")->execute([$studentId, $pc['new_plan_id'], $start_date, $end_date, $billing_day]);
+                    INSERT INTO memberships (school_id, student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, billing_day, monthly_charges_made)
+                    VALUES (?, ?, ?, ?, ?, 'active', 'paid', 0, ?, 0)
+                ")->execute([current_school_id(), $studentId, $pc['new_plan_id'], $start_date, $end_date, $billing_day]);
                 $newMembershipId = $pdo->lastInsertId();
 
                 // Add downgrade credit
@@ -107,10 +120,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 // Mark pending change as approved
-                $pdo->prepare("UPDATE pending_plan_changes SET status = 'approved', resolved_at = NOW() WHERE id = ?")->execute([$changeId]);
+                $updPcParams = [$changeId];
+                $updPcSql = "UPDATE pending_plan_changes SET status = 'approved', resolved_at = NOW() WHERE id = ?" . school_where();
+                school_param($updPcParams);
+                $pdo->prepare($updPcSql)->execute($updPcParams);
 
                 // Record plan change date for lockout
-                $pdo->prepare("UPDATE students SET last_plan_change = CURDATE() WHERE id = ?")->execute([$studentId]);
+                $updStParams = [$studentId];
+                $updStSql = "UPDATE students SET last_plan_change = CURDATE() WHERE id = ?" . school_where();
+                school_param($updStParams);
+                $pdo->prepare($updStSql)->execute($updStParams);
 
                 $creditMsg = ($proration['credit'] > 0) ? ' A credit of ' . formatMoney($proration['credit']) . ' has been applied to your account.' : '';
                 $portal_message = showAlert('Plan change approved! Your membership has been updated.' . $creditMsg, 'success');
@@ -120,8 +139,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (isset($_POST['decline_plan_change'])) {
         $changeId = (int) ($_POST['change_id'] ?? 0);
-        $pdo->prepare("UPDATE pending_plan_changes SET status = 'rejected', resolved_at = NOW() WHERE id = ? AND student_id = ? AND status = 'pending'")
-            ->execute([$changeId, $studentId]);
+        $decParams = [$changeId, $studentId];
+        $decSql = "UPDATE pending_plan_changes SET status = 'rejected', resolved_at = NOW() WHERE id = ? AND student_id = ? AND status = 'pending'" . school_where();
+        school_param($decParams);
+        $pdo->prepare($decSql)->execute($decParams);
         $portal_message = showAlert('Plan change declined.', 'info');
     }
 }
@@ -129,6 +150,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // Fetch pending plan changes for this student
 $studentPendingChanges = [];
 try {
+    $spcParams = [$studentId];
     $spcStmt = $pdo->prepare("
         SELECT pc.*, mp_new.name as new_plan_name, mp_new.price as new_plan_price,
                mp_new.duration_months as new_duration, mp_new.billing_frequency as new_billing_frequency,
@@ -137,48 +159,55 @@ try {
         JOIN membership_plans mp_new ON pc.new_plan_id = mp_new.id
         LEFT JOIN membership_plans mp_old ON pc.old_plan_id = mp_old.id
         LEFT JOIN users u ON pc.requested_by = u.id
-        WHERE pc.student_id = ? AND pc.status = 'pending' AND pc.expires_at > NOW()
+        WHERE pc.student_id = ? AND pc.status = 'pending' AND pc.expires_at > NOW()" . school_where('pc') . "
         ORDER BY pc.created_at DESC
     ");
-    $spcStmt->execute([$studentId]);
+    school_param($spcParams);
+    $spcStmt->execute($spcParams);
     $studentPendingChanges = $spcStmt->fetchAll();
 } catch (PDOException $e) {}
 
 // Fetch enrolled classes
 $classes = [];
 try {
-    $classesStmt = $pdo->prepare(
-        "SELECT c.* FROM classes c
+    $classesSql = "SELECT c.* FROM classes c
          JOIN class_enrollments ce ON ce.class_id = c.id
-         WHERE ce.student_id = :sid AND ce.status = 'active' AND c.status = 'active'
-         ORDER BY FIELD(c.day_of_week, 'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'), c.start_time"
-    );
-    $classesStmt->execute([':sid' => $studentId]);
+         WHERE ce.student_id = :sid AND ce.status = 'active' AND c.status = 'active'";
+    if (!is_viewing_all_schools()) { $classesSql .= ' AND c.school_id = :school_id'; }
+    $classesSql .= " ORDER BY FIELD(c.day_of_week, 'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'), c.start_time";
+    $classesStmt = $pdo->prepare($classesSql);
+    $classesStmt->bindValue(':sid', $studentId, PDO::PARAM_INT);
+    if (!is_viewing_all_schools()) { $classesStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+    $classesStmt->execute();
     $classes = $classesStmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // Fetch recent attendance (last 30 records)
 $attendance = [];
 try {
-    $attendStmt = $pdo->prepare(
-        'SELECT a.attendance_date, a.status, c.name as class_name
+    $attendSql = 'SELECT a.attendance_date, a.status, c.name as class_name
          FROM attendance a
          JOIN classes c ON c.id = a.class_id
-         WHERE a.student_id = :sid
-         ORDER BY a.attendance_date DESC
-         LIMIT 30'
-    );
-    $attendStmt->execute([':sid' => $studentId]);
+         WHERE a.student_id = :sid';
+    if (!is_viewing_all_schools()) { $attendSql .= ' AND a.school_id = :school_id'; }
+    $attendSql .= ' ORDER BY a.attendance_date DESC LIMIT 30';
+    $attendStmt = $pdo->prepare($attendSql);
+    $attendStmt->bindValue(':sid', $studentId, PDO::PARAM_INT);
+    if (!is_viewing_all_schools()) { $attendStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+    $attendStmt->execute();
     $attendance = $attendStmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // Attendance stats
 $stats = ['present' => 0, 'absent' => 0, 'late' => 0];
 try {
-    $statsStmt = $pdo->prepare(
-        'SELECT status, COUNT(*) AS cnt FROM attendance WHERE student_id = :sid GROUP BY status'
-    );
-    $statsStmt->execute([':sid' => $studentId]);
+    $statsSql = 'SELECT status, COUNT(*) AS cnt FROM attendance WHERE student_id = :sid';
+    if (!is_viewing_all_schools()) { $statsSql .= ' AND school_id = :school_id'; }
+    $statsSql .= ' GROUP BY status';
+    $statsStmt = $pdo->prepare($statsSql);
+    $statsStmt->bindValue(':sid', $studentId, PDO::PARAM_INT);
+    if (!is_viewing_all_schools()) { $statsStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+    $statsStmt->execute();
     foreach ($statsStmt->fetchAll() as $r) {
         $stats[$r['status']] = (int)$r['cnt'];
     }
@@ -189,8 +218,7 @@ $attendanceRate = $totalClasses > 0 ? round(($stats['present'] / $totalClasses) 
 // Per-class attendance breakdown
 $perClassAttendance = [];
 try {
-    $pcaStmt = $pdo->prepare("
-        SELECT c.id, c.name, c.day_of_week,
+    $pcaSql = "SELECT c.id, c.name, c.day_of_week,
                COUNT(a.id) as total_records,
                SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END) as present_count,
                SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) as absent_count,
@@ -198,24 +226,27 @@ try {
                ROUND(SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(a.id), 0), 1) as rate
         FROM attendance a
         JOIN classes c ON c.id = a.class_id
-        WHERE a.student_id = :sid
-        GROUP BY c.id, c.name, c.day_of_week
-        ORDER BY total_records DESC
-    ");
-    $pcaStmt->execute([':sid' => $studentId]);
+        WHERE a.student_id = :sid";
+    if (!is_viewing_all_schools()) { $pcaSql .= ' AND a.school_id = :school_id'; }
+    $pcaSql .= ' GROUP BY c.id, c.name, c.day_of_week ORDER BY total_records DESC';
+    $pcaStmt = $pdo->prepare($pcaSql);
+    $pcaStmt->bindValue(':sid', $studentId, PDO::PARAM_INT);
+    if (!is_viewing_all_schools()) { $pcaStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+    $pcaStmt->execute();
     $perClassAttendance = $pcaStmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // Attendance streak (consecutive present/late records, counting backwards)
 $currentStreak = 0;
 try {
-    $streakStmt = $pdo->prepare("
-        SELECT a.status FROM attendance a
-        WHERE a.student_id = :sid AND a.status IN ('present','absent','late')
-        ORDER BY a.attendance_date DESC, a.id DESC
-        LIMIT 100
-    ");
-    $streakStmt->execute([':sid' => $studentId]);
+    $streakSql = "SELECT a.status FROM attendance a
+        WHERE a.student_id = :sid AND a.status IN ('present','absent','late')";
+    if (!is_viewing_all_schools()) { $streakSql .= ' AND a.school_id = :school_id'; }
+    $streakSql .= ' ORDER BY a.attendance_date DESC, a.id DESC LIMIT 100';
+    $streakStmt = $pdo->prepare($streakSql);
+    $streakStmt->bindValue(':sid', $studentId, PDO::PARAM_INT);
+    if (!is_viewing_all_schools()) { $streakStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+    $streakStmt->execute();
     foreach ($streakStmt->fetchAll() as $sr) {
         if ($sr['status'] === 'present' || $sr['status'] === 'late') {
             $currentStreak++;
@@ -235,46 +266,52 @@ try {
 // Upcoming events: registered events + calendar-only events visible to all students
 $upcomingEvents = [];
 try {
-    $evStmt = $pdo->prepare(
-        "SELECT e.id, e.name, e.event_date, e.start_time, e.event_type, e.location,
+    $evSql = "SELECT e.id, e.name, e.event_date, e.start_time, e.event_type, e.location,
                 e.requires_registration, er.payment_status
          FROM events e
          LEFT JOIN event_registrations er ON er.event_id = e.id AND er.student_id = :sid1
          WHERE e.event_date >= CURDATE() AND e.status = 'upcoming'
-           AND (er.student_id IS NOT NULL OR e.requires_registration = 0)
-         ORDER BY e.event_date ASC LIMIT 5"
-    );
-    $evStmt->execute([':sid1' => $studentId]);
+           AND (er.student_id IS NOT NULL OR e.requires_registration = 0)";
+    if (!is_viewing_all_schools()) { $evSql .= ' AND e.school_id = :school_id'; }
+    $evSql .= ' ORDER BY e.event_date ASC LIMIT 5';
+    $evStmt = $pdo->prepare($evSql);
+    $evStmt->bindValue(':sid1', $studentId, PDO::PARAM_INT);
+    if (!is_viewing_all_schools()) { $evStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+    $evStmt->execute();
     $upcomingEvents = $evStmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // Current membership info
 $membership = null;
 try {
-    $memStmt = $pdo->prepare(
-        "SELECT m.*, mp.name as plan_name, mp.price as plan_price, mp.duration_months, mp.billing_frequency
+    $memSql = "SELECT m.*, mp.name as plan_name, mp.price as plan_price, mp.duration_months, mp.billing_frequency
          FROM memberships m
          JOIN membership_plans mp ON mp.id = m.plan_id
-         WHERE m.student_id = :sid AND m.status = 'active' AND m.end_date >= CURDATE()
-         ORDER BY m.end_date DESC LIMIT 1"
-    );
-    $memStmt->execute([':sid' => $studentId]);
+         WHERE m.student_id = :sid AND m.status = 'active' AND m.end_date >= CURDATE()";
+    if (!is_viewing_all_schools()) { $memSql .= ' AND m.school_id = :school_id'; }
+    $memSql .= ' ORDER BY m.end_date DESC LIMIT 1';
+    $memStmt = $pdo->prepare($memSql);
+    $memStmt->bindValue(':sid', $studentId, PDO::PARAM_INT);
+    if (!is_viewing_all_schools()) { $memStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+    $memStmt->execute();
     $membership = $memStmt->fetch();
 } catch (\PDOException $e) {}
 
 // Belt history — ordered by rank_order DESC so the highest achieved belt is first
 $beltHistory = [];
 try {
-    $beltStmt = $pdo->prepare(
-        "SELECT b.name as belt_name, b.color, b.rank_order, mas.name as style_name,
+    $beltSql = "SELECT b.name as belt_name, b.color, b.rank_order, mas.name as style_name,
                 sb.awarded_date, sb.black_belt_number
          FROM student_belts sb
          JOIN belts b ON b.id = sb.belt_id
          JOIN martial_arts_styles mas ON mas.id = sb.style_id
-         WHERE sb.student_id = :sid
-         ORDER BY b.rank_order DESC, sb.awarded_date DESC LIMIT 10"
-    );
-    $beltStmt->execute([':sid' => $studentId]);
+         WHERE sb.student_id = :sid";
+    if (!is_viewing_all_schools()) { $beltSql .= ' AND sb.school_id = :school_id'; }
+    $beltSql .= ' ORDER BY b.rank_order DESC, sb.awarded_date DESC LIMIT 10';
+    $beltStmt = $pdo->prepare($beltSql);
+    $beltStmt->bindValue(':sid', $studentId, PDO::PARAM_INT);
+    if (!is_viewing_all_schools()) { $beltStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+    $beltStmt->execute();
     $beltHistory = $beltStmt->fetchAll();
 } catch (\PDOException $e) {}
 
@@ -340,14 +377,16 @@ if (!function_exists('beltBackground')) {
 $trainingResources = [];
 try {
     // Determine highest rank per style for this student
-    $hpStmt = $pdo->prepare(
-        "SELECT sb.style_id, MAX(b.rank_order) as max_rank
+    $hpSql = "SELECT sb.style_id, MAX(b.rank_order) as max_rank
          FROM student_belts sb
          JOIN belts b ON b.id = sb.belt_id
-         WHERE sb.student_id = :sid
-         GROUP BY sb.style_id"
-    );
-    $hpStmt->execute([':sid' => $studentId]);
+         WHERE sb.student_id = :sid";
+    if (!is_viewing_all_schools()) { $hpSql .= ' AND sb.school_id = :school_id'; }
+    $hpSql .= ' GROUP BY sb.style_id';
+    $hpStmt = $pdo->prepare($hpSql);
+    $hpStmt->bindValue(':sid', $studentId, PDO::PARAM_INT);
+    if (!is_viewing_all_schools()) { $hpStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+    $hpStmt->execute();
     $hpRows = $hpStmt->fetchAll();
 
     if (!empty($hpRows)) {
@@ -362,15 +401,17 @@ try {
         }
         $trWhere = implode(' OR ', $trConditions);
 
-        $trStmt = $pdo->prepare(
-            "SELECT br.*, b.name as belt_name, b.color as belt_color, mas.name as style_name
+        $trSql = "SELECT br.*, b.name as belt_name, b.color as belt_color, mas.name as style_name
              FROM belt_resources br
              JOIN belts b ON b.id = br.belt_id
              JOIN martial_arts_styles mas ON mas.id = br.style_id
-             WHERE {$trWhere}
-             ORDER BY b.rank_order DESC, br.sort_order ASC, br.created_at DESC
-             LIMIT 20"
-        );
+             WHERE ({$trWhere})";
+        if (!is_viewing_all_schools()) {
+            $trSql .= ' AND br.school_id = :school_id';
+            $trParams[':school_id'] = current_school_id();
+        }
+        $trSql .= ' ORDER BY b.rank_order DESC, br.sort_order ASC, br.created_at DESC LIMIT 20';
+        $trStmt = $pdo->prepare($trSql);
         $trStmt->execute($trParams);
         $trainingResources = $trStmt->fetchAll();
     }
@@ -382,10 +423,13 @@ $studentCredit = get_student_credit($studentId);
 // Get recent credit ledger entries
 $creditHistory = [];
 try {
-    $clStmt = $pdo->prepare(
-        "SELECT * FROM credit_ledger WHERE student_id = :sid ORDER BY created_at DESC LIMIT 5"
-    );
-    $clStmt->execute([':sid' => $studentId]);
+    $clSql = "SELECT * FROM credit_ledger WHERE student_id = :sid";
+    if (!is_viewing_all_schools()) { $clSql .= ' AND school_id = :school_id'; }
+    $clSql .= ' ORDER BY created_at DESC LIMIT 5';
+    $clStmt = $pdo->prepare($clSql);
+    $clStmt->bindValue(':sid', $studentId, PDO::PARAM_INT);
+    if (!is_viewing_all_schools()) { $clStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+    $clStmt->execute();
     $creditHistory = $clStmt->fetchAll();
 } catch (\PDOException $e) {}
 
@@ -483,6 +527,7 @@ include 'includes/student_header.php';
 
                         <div class="flex gap-3">
                             <form method="POST" class="inline">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="approve_plan_change" value="1">
                                 <input type="hidden" name="change_id" value="<?php echo $spc['id']; ?>">
                                 <?php if ($spc['proration_type'] === 'upgrade'): ?>
@@ -498,6 +543,7 @@ include 'includes/student_header.php';
                                 <?php endif; ?>
                             </form>
                             <form method="POST" class="inline">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="decline_plan_change" value="1">
                                 <input type="hidden" name="change_id" value="<?php echo $spc['id']; ?>">
                                 <button type="submit" onclick="return confirm('Decline this plan change?')"
@@ -600,6 +646,7 @@ include 'includes/student_header.php';
                 </p>
 
                 <form method="POST" action="parent_portal.php" class="space-y-4">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="link_student" value="1">
 
                     <div>

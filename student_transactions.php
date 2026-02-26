@@ -42,6 +42,11 @@ if ($search !== '') {
     $params[':search2'] = "%{$search}%";
 }
 
+if (!is_viewing_all_schools()) {
+    $query .= " AND p.school_id = :school_id";
+    $params[':school_id'] = current_school_id();
+}
+
 $query .= " ORDER BY p.payment_date DESC, p.created_at DESC";
 
 $stmt = $pdo->prepare($query);
@@ -54,8 +59,15 @@ $total_count = count($payments);
 $avg_amount = $total_count > 0 ? $total_amount / $total_count : 0;
 
 // Get available years for the dropdown
-$yearStmt = $pdo->prepare("SELECT DISTINCT YEAR(payment_date) as yr FROM payments WHERE student_id = :sid ORDER BY yr DESC");
-$yearStmt->execute([':sid' => $studentId]);
+$yearSql = "SELECT DISTINCT YEAR(payment_date) as yr FROM payments WHERE student_id = :sid";
+$yearParams = [':sid' => $studentId];
+if (!is_viewing_all_schools()) {
+    $yearSql .= " AND school_id = :school_id";
+    $yearParams[':school_id'] = current_school_id();
+}
+$yearSql .= " ORDER BY yr DESC";
+$yearStmt = $pdo->prepare($yearSql);
+$yearStmt->execute($yearParams);
 $availableYears = $yearStmt->fetchAll(PDO::FETCH_COLUMN);
 if (empty($availableYears)) {
     $availableYears = [date('Y')];
@@ -91,12 +103,17 @@ $taxQuery = "
       )
     ORDER BY p.payment_date DESC
 ";
+$taxParams = [':sid' => $studentId, ':year' => $year, ':sid2' => $studentId, ':sid3' => $studentId];
+if (!is_viewing_all_schools()) {
+    $taxQuery = str_replace('ORDER BY p.payment_date DESC', 'AND p.school_id = :school_id ORDER BY p.payment_date DESC', $taxQuery);
+    $taxParams[':school_id'] = current_school_id();
+}
 
 $taxEligiblePayments = [];
 $taxEligibleTotal = 0;
 try {
     $taxStmt = $pdo->prepare($taxQuery);
-    $taxStmt->execute([':sid' => $studentId, ':year' => $year, ':sid2' => $studentId, ':sid3' => $studentId]);
+    $taxStmt->execute($taxParams);
     $taxEligiblePayments = $taxStmt->fetchAll();
     $taxEligibleTotal = array_sum(array_column($taxEligiblePayments, 'amount'));
 } catch (PDOException $e) {

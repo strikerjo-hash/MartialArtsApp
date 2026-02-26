@@ -1,6 +1,7 @@
 <?php
 require_once 'config.php';
 requireLogin();
+require_once 'includes/report_helpers.php';
 
 // === Date Range Filter ===
 $report_range = $_GET['range'] ?? 'this_month';
@@ -64,73 +65,134 @@ switch ($report_range) {
 $stats = [];
 
 // Student stats
-$stats['total_students'] = $pdo->query("SELECT COUNT(*) as c FROM students")->fetch()['c'];
-$stats['active_students'] = $pdo->query("SELECT COUNT(*) as c FROM students WHERE status = 'active'")->fetch()['c'];
+$params = [];
+$stmt = $pdo->prepare("SELECT COUNT(*) as c FROM students WHERE 1=1" . school_where());
+school_param($params);
+$stmt->execute($params);
+$stats['total_students'] = $stmt->fetch()['c'];
+
+$params = [];
+$stmt = $pdo->prepare("SELECT COUNT(*) as c FROM students WHERE status = 'active'" . school_where());
+school_param($params);
+$stmt->execute($params);
+$stats['active_students'] = $stmt->fetch()['c'];
 
 // Membership stats
-$stats['active_memberships'] = $pdo->query("SELECT COUNT(*) as c FROM memberships WHERE status = 'active' AND end_date >= CURDATE()")->fetch()['c'];
-$stats['expiring_soon'] = $pdo->query("SELECT COUNT(*) as c FROM memberships WHERE status = 'active' AND end_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY)")->fetch()['c'];
+$params = [];
+$stmt = $pdo->prepare("SELECT COUNT(*) as c FROM memberships WHERE status = 'active' AND end_date >= CURDATE()" . school_where());
+school_param($params);
+$stmt->execute($params);
+$stats['active_memberships'] = $stmt->fetch()['c'];
+
+$params = [];
+$stmt = $pdo->prepare("SELECT COUNT(*) as c FROM memberships WHERE status = 'active' AND end_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY)" . school_where());
+school_param($params);
+$stmt->execute($params);
+$stats['expiring_soon'] = $stmt->fetch()['c'];
 
 // Financial stats — filtered by date range
 try {
-    $rev_stmt = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE payment_date BETWEEN ? AND ? AND status = 'completed'");
-    $rev_stmt->execute([$date_from, $date_to]);
+    $params = [$date_from, $date_to];
+    $rev_stmt = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE payment_date BETWEEN ? AND ? AND status = 'completed'" . school_where());
+    school_param($params);
+    $rev_stmt->execute($params);
     $stats['range_revenue'] = (float) $rev_stmt->fetch()['total'];
 } catch (\PDOException $e) {
-    $rev_stmt = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE payment_date BETWEEN ? AND ?");
-    $rev_stmt->execute([$date_from, $date_to]);
+    $params = [$date_from, $date_to];
+    $rev_stmt = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE payment_date BETWEEN ? AND ?" . school_where());
+    school_param($params);
+    $rev_stmt->execute($params);
     $stats['range_revenue'] = (float) $rev_stmt->fetch()['total'];
 }
 
 // Also keep monthly/yearly for projected income section
 try {
-    $stats['monthly_revenue'] = (float) $pdo->query("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE MONTH(payment_date) = MONTH(CURDATE()) AND YEAR(payment_date) = YEAR(CURDATE()) AND status = 'completed'")->fetch()['total'];
+    $params = [];
+    $stmt = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE MONTH(payment_date) = MONTH(CURDATE()) AND YEAR(payment_date) = YEAR(CURDATE()) AND status = 'completed'" . school_where());
+    school_param($params);
+    $stmt->execute($params);
+    $stats['monthly_revenue'] = (float) $stmt->fetch()['total'];
 } catch (\PDOException $e) {
-    $stats['monthly_revenue'] = (float) $pdo->query("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE MONTH(payment_date) = MONTH(CURDATE()) AND YEAR(payment_date) = YEAR(CURDATE())")->fetch()['total'];
+    $params = [];
+    $stmt = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE MONTH(payment_date) = MONTH(CURDATE()) AND YEAR(payment_date) = YEAR(CURDATE())" . school_where());
+    school_param($params);
+    $stmt->execute($params);
+    $stats['monthly_revenue'] = (float) $stmt->fetch()['total'];
 }
 try {
-    $stats['yearly_revenue'] = (float) $pdo->query("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE YEAR(payment_date) = YEAR(CURDATE()) AND status = 'completed'")->fetch()['total'];
+    $params = [];
+    $stmt = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE YEAR(payment_date) = YEAR(CURDATE()) AND status = 'completed'" . school_where());
+    school_param($params);
+    $stmt->execute($params);
+    $stats['yearly_revenue'] = (float) $stmt->fetch()['total'];
 } catch (\PDOException $e) {
-    $stats['yearly_revenue'] = (float) $pdo->query("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE YEAR(payment_date) = YEAR(CURDATE())")->fetch()['total'];
+    $params = [];
+    $stmt = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE YEAR(payment_date) = YEAR(CURDATE())" . school_where());
+    school_param($params);
+    $stmt->execute($params);
+    $stats['yearly_revenue'] = (float) $stmt->fetch()['total'];
 }
 
 // Event stats
-$stats['total_events'] = $pdo->query("SELECT COUNT(*) as c FROM events")->fetch()['c'];
-$stats['upcoming_events'] = $pdo->query("SELECT COUNT(*) as c FROM events WHERE status = 'upcoming' AND event_date >= CURDATE()")->fetch()['c'];
+$params = [];
+$stmt = $pdo->prepare("SELECT COUNT(*) as c FROM events WHERE 1=1" . school_where());
+school_param($params);
+$stmt->execute($params);
+$stats['total_events'] = $stmt->fetch()['c'];
+
+$params = [];
+$stmt = $pdo->prepare("SELECT COUNT(*) as c FROM events WHERE status = 'upcoming' AND event_date >= CURDATE()" . school_where());
+school_param($params);
+$stmt->execute($params);
+$stats['upcoming_events'] = $stmt->fetch()['c'];
 
 // Class stats
-$stats['total_classes'] = $pdo->query("SELECT COUNT(*) as c FROM classes WHERE status = 'active'")->fetch()['c'];
+$params = [];
+$stmt = $pdo->prepare("SELECT COUNT(*) as c FROM classes WHERE status = 'active'" . school_where());
+school_param($params);
+$stmt->execute($params);
+$stats['total_classes'] = $stmt->fetch()['c'];
 
 // Revenue by month — enhanced with count and refund totals (always last 12 months for trend chart)
 try {
-    $monthly_revenue = $pdo->query("
+    $params = [];
+    $stmt = $pdo->prepare("
         SELECT DATE_FORMAT(payment_date, '%Y-%m') as month,
                SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as total,
                SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as refund_total,
                COUNT(*) as txn_count
         FROM payments
         WHERE payment_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
-          AND (status = 'completed' OR status = 'refunded')
+          AND (status = 'completed' OR status = 'refunded')" . school_where() . "
         GROUP BY month
         ORDER BY month ASC
-    ")->fetchAll();
+    ");
+    school_param($params);
+    $stmt->execute($params);
+    $monthly_revenue = $stmt->fetchAll();
 } catch (\PDOException $e) {
-    $monthly_revenue = $pdo->query("
+    $params = [];
+    $stmt = $pdo->prepare("
         SELECT DATE_FORMAT(payment_date, '%Y-%m') as month,
                SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as total,
                SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as refund_total,
                COUNT(*) as txn_count
         FROM payments
-        WHERE payment_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+        WHERE payment_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)" . school_where() . "
         GROUP BY month
         ORDER BY month ASC
-    ")->fetchAll();
+    ");
+    school_param($params);
+    $stmt->execute($params);
+    $monthly_revenue = $stmt->fetchAll();
 }
 
 // Range-filtered payment count
 try {
-    $range_stmt = $pdo->prepare("SELECT COUNT(*) as c FROM payments WHERE payment_date BETWEEN ? AND ? AND status = 'completed'");
-    $range_stmt->execute([$date_from, $date_to]);
+    $params = [$date_from, $date_to];
+    $range_stmt = $pdo->prepare("SELECT COUNT(*) as c FROM payments WHERE payment_date BETWEEN ? AND ? AND status = 'completed'" . school_where());
+    school_param($params);
+    $range_stmt->execute($params);
     $stats['range_payment_count'] = (int) $range_stmt->fetch()['c'];
 } catch (\PDOException $e) {
     $stats['range_payment_count'] = 0;
@@ -140,8 +202,10 @@ try {
 $stats['range_refund_count'] = 0;
 $stats['range_refund_total'] = 0.0;
 try {
-    $ref_stmt = $pdo->prepare("SELECT COUNT(*) as cnt, COALESCE(SUM(ABS(amount)), 0) as total FROM payments WHERE payment_date BETWEEN ? AND ? AND (amount < 0 OR status = 'refunded')");
-    $ref_stmt->execute([$date_from, $date_to]);
+    $params = [$date_from, $date_to];
+    $ref_stmt = $pdo->prepare("SELECT COUNT(*) as cnt, COALESCE(SUM(ABS(amount)), 0) as total FROM payments WHERE payment_date BETWEEN ? AND ? AND (amount < 0 OR status = 'refunded')" . school_where());
+    school_param($params);
+    $ref_stmt->execute($params);
     $refRow = $ref_stmt->fetch();
     $stats['range_refund_count'] = (int) $refRow['cnt'];
     $stats['range_refund_total'] = (float) $refRow['total'];
@@ -150,43 +214,52 @@ try {
 // Revenue by Category (date-range filtered)
 $revenue_by_category = [];
 try {
+    $params = [$date_from, $date_to];
     $rbc_stmt = $pdo->prepare("
         SELECT payment_type, SUM(amount) as total, COUNT(*) as cnt
         FROM payments
-        WHERE payment_date BETWEEN ? AND ? AND amount > 0
+        WHERE payment_date BETWEEN ? AND ? AND amount > 0" . school_where() . "
         GROUP BY payment_type
         ORDER BY total DESC
     ");
-    $rbc_stmt->execute([$date_from, $date_to]);
+    school_param($params);
+    $rbc_stmt->execute($params);
     $revenue_by_category = $rbc_stmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // Revenue by Payment Method (date-range filtered)
 $revenue_by_method = [];
 try {
+    $params = [$date_from, $date_to];
     $rbm_stmt = $pdo->prepare("
         SELECT payment_method, SUM(amount) as total, COUNT(*) as cnt
         FROM payments
-        WHERE payment_date BETWEEN ? AND ? AND amount > 0
+        WHERE payment_date BETWEEN ? AND ? AND amount > 0" . school_where() . "
         GROUP BY payment_method
         ORDER BY total DESC
     ");
-    $rbm_stmt->execute([$date_from, $date_to]);
+    school_param($params);
+    $rbm_stmt->execute($params);
     $revenue_by_method = $rbm_stmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // Year-over-Year Revenue (all years)
 $yearly_comparison = [];
 try {
-    $yearly_comparison = $pdo->query("
+    $params = [];
+    $stmt = $pdo->prepare("
         SELECT YEAR(payment_date) as yr,
                SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as revenue,
                SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as refunds,
                COUNT(*) as txn_count
         FROM payments
+        WHERE 1=1" . school_where() . "
         GROUP BY yr
         ORDER BY yr ASC
-    ")->fetchAll();
+    ");
+    school_param($params);
+    $stmt->execute($params);
+    $yearly_comparison = $stmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // Calculate totals for category/method percentage calculations
@@ -194,32 +267,38 @@ $total_category_revenue = array_sum(array_column($revenue_by_category, 'total'))
 $total_method_revenue = array_sum(array_column($revenue_by_method, 'total'));
 
 // Top students by attendance (uses date range)
+$params = [$date_from, $date_to];
 $top_stmt = $pdo->prepare("
     SELECT s.first_name, s.last_name, COUNT(a.id) as attendance_count
     FROM students s
     JOIN attendance a ON s.id = a.student_id
-    WHERE a.status = 'present' AND a.attendance_date BETWEEN ? AND ?
+    WHERE a.status = 'present' AND a.attendance_date BETWEEN ? AND ?" . school_where('s') . "
     GROUP BY s.id
     ORDER BY attendance_count DESC
     LIMIT 10
 ");
-$top_stmt->execute([$date_from, $date_to]);
+school_param($params);
+$top_stmt->execute($params);
 $top_attendance = $top_stmt->fetchAll();
 
 // === COMPLIANCE REPORTS ===
 
 // Students enrolled in classes but with NO active membership
-$no_membership_students = $pdo->query("
+$params = [];
+$stmt = $pdo->prepare("
     SELECT s.id, s.first_name, s.last_name, s.email,
            COUNT(ce.id) as enrolled_classes
     FROM students s
     JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active'
     LEFT JOIN memberships m ON m.student_id = s.id AND m.status = 'active' AND m.end_date >= CURDATE()
     WHERE s.status = 'active'
-      AND m.id IS NULL
+      AND m.id IS NULL" . school_where('s') . "
     GROUP BY s.id
     ORDER BY enrolled_classes DESC
-")->fetchAll();
+");
+school_param($params);
+$stmt->execute($params);
+$no_membership_students = $stmt->fetchAll();
 
 // Students enrolled in MORE classes than their plan allows
 $over_limit_students = $pdo->query("
@@ -543,6 +622,393 @@ try {
     ")->fetchAll();
 } catch (\PDOException $e) {}
 
+// =============================================
+// NEW REPORT TAB QUERIES (Phases 4-8)
+// =============================================
+
+// === PHASE 4: School Comparison (super admin only) ===
+$school_revenue = [];
+$school_students = [];
+$school_attendance = [];
+$school_plan_mix = [];
+if (is_super_admin()) {
+    try {
+        $school_revenue = $pdo->prepare("
+            SELECT sc.name as school_name, COALESCE(SUM(p.amount), 0) as total_revenue, COUNT(p.id) as payment_count
+            FROM schools sc
+            LEFT JOIN payments p ON p.school_id = sc.id AND p.payment_date BETWEEN ? AND ? AND p.amount > 0
+            WHERE sc.status = 'active'
+            GROUP BY sc.id ORDER BY total_revenue DESC
+        ");
+        $school_revenue->execute([$date_from, $date_to]);
+        $school_revenue = $school_revenue->fetchAll();
+    } catch (\PDOException $e) { $school_revenue = []; }
+
+    try {
+        $school_students = $pdo->query("
+            SELECT sc.name as school_name,
+                   COUNT(DISTINCT s.id) as total_students,
+                   COUNT(DISTINCT CASE WHEN s.status = 'active' THEN s.id END) as active_students,
+                   COUNT(DISTINCT CASE WHEN m.status = 'active' AND m.end_date >= CURDATE() THEN m.id END) as active_memberships
+            FROM schools sc
+            LEFT JOIN students s ON s.school_id = sc.id AND s.is_parent = 0
+            LEFT JOIN memberships m ON m.student_id = s.id
+            WHERE sc.status = 'active'
+            GROUP BY sc.id ORDER BY sc.name
+        ")->fetchAll();
+    } catch (\PDOException $e) { $school_students = []; }
+
+    try {
+        $sa_stmt = $pdo->prepare("
+            SELECT sc.name as school_name,
+                   COUNT(CASE WHEN a.status = 'present' THEN 1 END) as present_count,
+                   COUNT(a.id) as total_records,
+                   ROUND(COUNT(CASE WHEN a.status = 'present' THEN 1 END) * 100.0 / NULLIF(COUNT(a.id), 0), 1) as attendance_rate
+            FROM schools sc
+            LEFT JOIN attendance a ON a.school_id = sc.id AND a.attendance_date BETWEEN ? AND ?
+            WHERE sc.status = 'active'
+            GROUP BY sc.id ORDER BY sc.name
+        ");
+        $sa_stmt->execute([$date_from, $date_to]);
+        $school_attendance = $sa_stmt->fetchAll();
+    } catch (\PDOException $e) { $school_attendance = []; }
+
+    try {
+        $school_plan_mix = $pdo->query("
+            SELECT sc.name as school_name, mp.name as plan_name, COUNT(m.id) as member_count
+            FROM schools sc
+            JOIN memberships m ON m.school_id = sc.id AND m.status = 'active' AND m.end_date >= CURDATE()
+            JOIN membership_plans mp ON m.plan_id = mp.id
+            WHERE sc.status = 'active'
+            GROUP BY sc.id, mp.id ORDER BY sc.name, member_count DESC
+        ")->fetchAll();
+    } catch (\PDOException $e) { $school_plan_mix = []; }
+}
+
+// === PHASE 5: Instructor Performance ===
+$instructor_summary = [];
+$instructor_promotions = [];
+$instructor_capacity = [];
+try {
+    $is_stmt = $pdo->prepare("
+        SELECT u.id, u.full_name,
+               COUNT(DISTINCT c.id) as class_count,
+               COUNT(DISTINCT ce.student_id) as student_count,
+               (SELECT COUNT(DISTINCT a2.attendance_date) FROM attendance a2
+                JOIN classes c2 ON a2.class_id = c2.id
+                WHERE c2.instructor_id = u.id AND a2.attendance_date BETWEEN ? AND ?) as total_sessions,
+               (SELECT ROUND(
+                   COUNT(CASE WHEN a3.status = 'present' THEN 1 END) * 100.0 / NULLIF(COUNT(a3.id), 0), 1
+               ) FROM attendance a3
+                JOIN classes c3 ON a3.class_id = c3.id
+                WHERE c3.instructor_id = u.id AND a3.attendance_date BETWEEN ? AND ?) as attendance_rate
+        FROM users u
+        JOIN classes c ON c.instructor_id = u.id AND c.status = 'active'
+        LEFT JOIN class_enrollments ce ON ce.class_id = c.id AND ce.status = 'active'
+        WHERE u.role = 'instructor'" . school_where('u') . "
+        GROUP BY u.id ORDER BY student_count DESC
+    ");
+    $params = [$date_from, $date_to, $date_from, $date_to];
+    school_param($params);
+    $is_stmt->execute($params);
+    $instructor_summary = $is_stmt->fetchAll();
+} catch (\PDOException $e) {}
+
+try {
+    $ip_stmt = $pdo->prepare("
+        SELECT u.full_name, COUNT(sb.id) as promotion_count
+        FROM users u
+        JOIN student_belts sb ON sb.instructor_id = u.id
+        WHERE sb.awarded_date BETWEEN ? AND ?" . school_where('u') . "
+        GROUP BY u.id ORDER BY promotion_count DESC
+    ");
+    $params = [$date_from, $date_to];
+    school_param($params);
+    $ip_stmt->execute($params);
+    $instructor_promotions = $ip_stmt->fetchAll();
+} catch (\PDOException $e) {}
+
+try {
+    $params = [];
+    $ic_stmt = $pdo->prepare("
+        SELECT u.full_name,
+               SUM(c.max_students) as total_max,
+               SUM(IFNULL(enr.cnt, 0)) as total_enrolled,
+               ROUND(SUM(IFNULL(enr.cnt, 0)) * 100.0 / NULLIF(SUM(c.max_students), 0), 1) as utilization_pct
+        FROM users u
+        JOIN classes c ON c.instructor_id = u.id AND c.status = 'active' AND c.max_students > 0
+        LEFT JOIN (SELECT class_id, COUNT(*) as cnt FROM class_enrollments WHERE status = 'active' GROUP BY class_id) enr ON enr.class_id = c.id
+        WHERE u.role = 'instructor'" . school_where('u') . "
+        GROUP BY u.id ORDER BY utilization_pct DESC
+    ");
+    school_param($params);
+    $ic_stmt->execute($params);
+    $instructor_capacity = $ic_stmt->fetchAll();
+} catch (\PDOException $e) {}
+
+// === PHASE 6: Membership Lifecycle ===
+$new_memberships_trend = [];
+$membership_renewal_rate = 0;
+$membership_cancel_rate = 0;
+$plan_popularity = [];
+$avg_membership_duration = 0;
+$payment_collection_rate = 0;
+$mrr = 0;
+
+try {
+    $params = [];
+    $nmt = $pdo->prepare("
+        SELECT DATE_FORMAT(m.start_date, '%Y-%m') as month, COUNT(*) as count
+        FROM memberships m
+        WHERE m.start_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)" . school_where('m') . "
+        GROUP BY month ORDER BY month ASC
+    ");
+    school_param($params);
+    $nmt->execute($params);
+    $new_memberships_trend = $nmt->fetchAll();
+} catch (\PDOException $e) {}
+
+try {
+    $params = [];
+    $renewal_stmt = $pdo->prepare("
+        SELECT
+            COUNT(CASE WHEN m2.id IS NOT NULL THEN 1 END) as renewed,
+            COUNT(*) as total_expired
+        FROM memberships m1
+        LEFT JOIN memberships m2 ON m2.student_id = m1.student_id
+            AND m2.id != m1.id
+            AND m2.start_date BETWEEN m1.end_date AND DATE_ADD(m1.end_date, INTERVAL 30 DAY)
+        WHERE m1.status IN ('expired','cancelled')
+          AND m1.end_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)" . school_where('m1') . "
+    ");
+    school_param($params);
+    $renewal_stmt->execute($params);
+    $rr = $renewal_stmt->fetch();
+    $membership_renewal_rate = $rr['total_expired'] > 0 ? round(($rr['renewed'] / $rr['total_expired']) * 100, 1) : 0;
+} catch (\PDOException $e) {}
+
+try {
+    $params = [];
+    $cancel_stmt = $pdo->prepare("
+        SELECT
+            COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled,
+            COUNT(*) as total
+        FROM memberships
+        WHERE end_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)" . school_where() . "
+    ");
+    school_param($params);
+    $cancel_stmt->execute($params);
+    $cr = $cancel_stmt->fetch();
+    $membership_cancel_rate = $cr['total'] > 0 ? round(($cr['cancelled'] / $cr['total']) * 100, 1) : 0;
+} catch (\PDOException $e) {}
+
+try {
+    $params = [];
+    $pp_stmt = $pdo->prepare("
+        SELECT mp.name as plan_name, COUNT(m.id) as active_count,
+               ROUND(SUM(mp.price / GREATEST(mp.duration_months, 1)), 2) as monthly_revenue_estimate
+        FROM memberships m
+        JOIN membership_plans mp ON m.plan_id = mp.id
+        WHERE m.status = 'active' AND m.end_date >= CURDATE()" . school_where('m') . "
+        GROUP BY mp.id ORDER BY active_count DESC
+    ");
+    school_param($params);
+    $pp_stmt->execute($params);
+    $plan_popularity = $pp_stmt->fetchAll();
+} catch (\PDOException $e) {}
+
+try {
+    $params = [];
+    $dur_stmt = $pdo->prepare("
+        SELECT ROUND(AVG(DATEDIFF(end_date, start_date)) / 30.44, 1) as avg_months
+        FROM memberships WHERE start_date IS NOT NULL AND end_date IS NOT NULL
+          AND end_date > start_date" . school_where() . "
+    ");
+    school_param($params);
+    $dur_stmt->execute($params);
+    $avg_membership_duration = (float) ($dur_stmt->fetch()['avg_months'] ?? 0);
+} catch (\PDOException $e) {}
+
+try {
+    $params = [];
+    $pcr_stmt = $pdo->prepare("
+        SELECT
+            COUNT(CASE WHEN payment_status = 'paid' THEN 1 END) as paid,
+            COUNT(*) as total
+        FROM memberships WHERE status = 'active' AND end_date >= CURDATE()" . school_where() . "
+    ");
+    school_param($params);
+    $pcr_stmt->execute($params);
+    $pcr = $pcr_stmt->fetch();
+    $payment_collection_rate = $pcr['total'] > 0 ? round(($pcr['paid'] / $pcr['total']) * 100, 1) : 0;
+} catch (\PDOException $e) {}
+
+try {
+    $params = [];
+    $mrr_stmt = $pdo->prepare("
+        SELECT COALESCE(SUM(ROUND(mp.price / GREATEST(mp.duration_months, 1), 2)), 0) as mrr
+        FROM memberships m
+        JOIN membership_plans mp ON m.plan_id = mp.id
+        WHERE m.status = 'active' AND m.end_date >= CURDATE()" . school_where('m') . "
+    ");
+    school_param($params);
+    $mrr_stmt->execute($params);
+    $mrr = (float) ($mrr_stmt->fetch()['mrr'] ?? 0);
+} catch (\PDOException $e) {}
+
+// === PHASE 7: Belt Progression ===
+$avg_promotion_time = [];
+$promotion_velocity = [];
+$instructor_promotions_detail = [];
+$belt_test_pass_rates = [];
+
+try {
+    $params = [];
+    $apt_stmt = $pdo->prepare("
+        SELECT b2.name as belt_rank,
+               ROUND(AVG(DATEDIFF(sb2.awarded_date, sb1.awarded_date))) as avg_days
+        FROM student_belts sb1
+        JOIN student_belts sb2 ON sb2.student_id = sb1.student_id
+            AND sb2.style_id = sb1.style_id
+            AND sb2.id != sb1.id
+            AND sb2.awarded_date > sb1.awarded_date
+        JOIN belts b1 ON b1.id = sb1.belt_id
+        JOIN belts b2 ON b2.id = sb2.belt_id AND b2.rank_order = b1.rank_order + 1
+            AND b2.style_id = b1.style_id
+        WHERE sb2.awarded_date IS NOT NULL AND sb1.awarded_date IS NOT NULL" . school_where('sb2') . "
+        GROUP BY b2.name, b2.rank_order ORDER BY b2.rank_order ASC
+    ");
+    school_param($params);
+    $apt_stmt->execute($params);
+    $avg_promotion_time = $apt_stmt->fetchAll();
+} catch (\PDOException $e) {}
+
+try {
+    $params = [];
+    $pv_stmt = $pdo->prepare("
+        SELECT YEAR(s.join_date) as cohort_year, COUNT(DISTINCT s.id) as student_count,
+               COUNT(sb.id) as total_promotions,
+               ROUND(COUNT(sb.id) / NULLIF(COUNT(DISTINCT s.id), 0), 2) as promotions_per_student
+        FROM students s
+        LEFT JOIN student_belts sb ON sb.student_id = s.id
+        WHERE s.is_parent = 0 AND s.join_date IS NOT NULL" . school_where('s') . "
+        GROUP BY cohort_year ORDER BY cohort_year DESC
+    ");
+    school_param($params);
+    $pv_stmt->execute($params);
+    $promotion_velocity = $pv_stmt->fetchAll();
+} catch (\PDOException $e) {}
+
+try {
+    $ipd_stmt = $pdo->prepare("
+        SELECT u.full_name, COUNT(sb.id) as promotion_count
+        FROM users u
+        JOIN student_belts sb ON sb.instructor_id = u.id
+        WHERE sb.awarded_date BETWEEN ? AND ?" . school_where('u') . "
+        GROUP BY u.id ORDER BY promotion_count DESC
+    ");
+    $params = [$date_from, $date_to];
+    school_param($params);
+    $ipd_stmt->execute($params);
+    $instructor_promotions_detail = $ipd_stmt->fetchAll();
+} catch (\PDOException $e) {}
+
+try {
+    $btpr_stmt = $pdo->prepare("
+        SELECT e.name as event_name, e.event_date,
+               COUNT(er.id) as total_tested,
+               COUNT(CASE WHEN er.result LIKE '%pass%' OR er.attendance_status = 'attended' THEN 1 END) as total_passed,
+               ROUND(COUNT(CASE WHEN er.result LIKE '%pass%' OR er.attendance_status = 'attended' THEN 1 END) * 100.0 / NULLIF(COUNT(er.id), 0), 1) as pass_rate
+        FROM events e
+        JOIN event_registrations er ON er.event_id = e.id
+        WHERE e.event_type = 'belt_test' AND e.event_date BETWEEN ? AND ?" . school_where('e') . "
+        GROUP BY e.id ORDER BY e.event_date DESC
+    ");
+    $params = [$date_from, $date_to];
+    school_param($params);
+    $btpr_stmt->execute($params);
+    $belt_test_pass_rates = $btpr_stmt->fetchAll();
+} catch (\PDOException $e) {}
+
+// === PHASE 8: Attendance Patterns ===
+$attendance_heatmap = [];
+$student_consistency = [];
+$dropout_risk = [];
+$seasonal_patterns = [];
+
+try {
+    $ah_stmt = $pdo->prepare("
+        SELECT c.day_of_week, HOUR(c.start_time) as hour_slot,
+               COUNT(CASE WHEN a.status = 'present' THEN 1 END) as present_count,
+               COUNT(a.id) as total_records,
+               ROUND(COUNT(CASE WHEN a.status = 'present' THEN 1 END) * 100.0 / NULLIF(COUNT(a.id), 0), 1) as rate
+        FROM attendance a
+        JOIN classes c ON a.class_id = c.id
+        WHERE a.attendance_date BETWEEN ? AND ?" . school_where('a') . "
+        GROUP BY c.day_of_week, hour_slot ORDER BY FIELD(c.day_of_week, 'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'), hour_slot
+    ");
+    $params = [$date_from, $date_to];
+    school_param($params);
+    $ah_stmt->execute($params);
+    $attendance_heatmap = $ah_stmt->fetchAll();
+} catch (\PDOException $e) {}
+
+try {
+    $weeks_in_range = max(1, round((strtotime($date_to) - strtotime($date_from)) / (7 * 86400), 1));
+    $sc_stmt = $pdo->prepare("
+        SELECT s.first_name, s.last_name,
+               COUNT(CASE WHEN a.status = 'present' THEN 1 END) as total_present,
+               ROUND(COUNT(CASE WHEN a.status = 'present' THEN 1 END) / ?, 1) as sessions_per_week
+        FROM students s
+        JOIN attendance a ON a.student_id = s.id AND a.attendance_date BETWEEN ? AND ?
+        WHERE s.status = 'active' AND s.is_parent = 0" . school_where('s') . "
+        GROUP BY s.id ORDER BY sessions_per_week DESC LIMIT 50
+    ");
+    $params = [$weeks_in_range, $date_from, $date_to];
+    school_param($params);
+    $sc_stmt->execute($params);
+    $student_consistency = $sc_stmt->fetchAll();
+} catch (\PDOException $e) {}
+
+try {
+    $params = [];
+    $dr_stmt = $pdo->prepare("
+        SELECT s.id, s.first_name, s.last_name,
+               (SELECT COUNT(*) FROM attendance a1 WHERE a1.student_id = s.id AND a1.status = 'present'
+                AND a1.attendance_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) as last_30d,
+               (SELECT COUNT(*) FROM attendance a2 WHERE a2.student_id = s.id AND a2.status = 'present'
+                AND a2.attendance_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 60 DAY) AND DATE_SUB(CURDATE(), INTERVAL 30 DAY)) as prev_30d
+        FROM students s
+        WHERE s.status = 'active' AND s.is_parent = 0" . school_where('s') . "
+        HAVING prev_30d > 0 AND last_30d < prev_30d
+        ORDER BY (last_30d - prev_30d) ASC
+        LIMIT 30
+    ");
+    school_param($params);
+    $dr_stmt->execute($params);
+    $dropout_risk_raw = $dr_stmt->fetchAll();
+    $dropout_risk = [];
+    foreach ($dropout_risk_raw as $dr) {
+        $dr['change_pct'] = $dr['prev_30d'] > 0 ? round((($dr['last_30d'] - $dr['prev_30d']) / $dr['prev_30d']) * 100, 1) : 0;
+        $dropout_risk[] = $dr;
+    }
+} catch (\PDOException $e) {}
+
+try {
+    $params = [];
+    $sp_stmt = $pdo->prepare("
+        SELECT MONTH(a.attendance_date) as month_num,
+               MONTHNAME(a.attendance_date) as month_name,
+               ROUND(COUNT(CASE WHEN a.status = 'present' THEN 1 END) * 100.0 / NULLIF(COUNT(a.id), 0), 1) as attendance_rate
+        FROM attendance a
+        WHERE a.attendance_date >= DATE_SUB(CURDATE(), INTERVAL 24 MONTH)" . school_where('a') . "
+        GROUP BY month_num, month_name ORDER BY month_num
+    ");
+    school_param($params);
+    $sp_stmt->execute($params);
+    $seasonal_patterns = $sp_stmt->fetchAll();
+} catch (\PDOException $e) {}
+
 // --- Tab Badge Counts ---
 $tab_badges = [
     'revenue' => $stats['range_payment_count'],
@@ -550,7 +1016,14 @@ $tab_badges = [
     'attendance' => $stats['total_classes'],
     'events' => count($event_roi),
     'compliance' => $total_compliance_issues + count($payment_defaults),
+    'instructors' => count($instructor_summary),
+    'membership_lifecycle' => count($plan_popularity),
+    'belt_progression' => count($avg_promotion_time),
+    'attendance_patterns' => count($dropout_risk),
 ];
+if (is_super_admin()) {
+    $tab_badges['schools'] = count($school_revenue);
+}
 
 include 'includes/header.php';
 ?>
@@ -665,6 +1138,25 @@ include 'includes/header.php';
             <button onclick="switchTab('compliance')" data-tab="compliance" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
                 Compliance <?php if ($tab_badges['compliance'] > 0): ?><span class="ml-1 px-2 py-0.5 text-xs rounded-full bg-red-100 text-red-700"><?php echo $tab_badges['compliance']; ?></span><?php endif; ?>
             </button>
+            <span class="self-center px-2 text-gray-300">|</span>
+            <button onclick="switchTab('instructors')" data-tab="instructors" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+                Instructors <?php if ($tab_badges['instructors'] > 0): ?><span class="ml-1 px-2 py-0.5 text-xs rounded-full bg-teal-100 text-teal-700"><?php echo $tab_badges['instructors']; ?></span><?php endif; ?>
+            </button>
+            <button onclick="switchTab('membership-lifecycle')" data-tab="membership-lifecycle" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+                Memberships
+            </button>
+            <button onclick="switchTab('belt-progression')" data-tab="belt-progression" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+                Belt Progression
+            </button>
+            <button onclick="switchTab('attendance-patterns')" data-tab="attendance-patterns" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+                Attendance Patterns <?php if ($tab_badges['attendance_patterns'] > 0): ?><span class="ml-1 px-2 py-0.5 text-xs rounded-full bg-orange-100 text-orange-700"><?php echo $tab_badges['attendance_patterns']; ?> at-risk</span><?php endif; ?>
+            </button>
+            <?php if (is_super_admin()): ?>
+            <span class="self-center px-2 text-gray-300">|</span>
+            <button onclick="switchTab('schools')" data-tab="schools" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+                School Comparison <?php if (!empty($tab_badges['schools'])): ?><span class="ml-1 px-2 py-0.5 text-xs rounded-full bg-yellow-100 text-yellow-700"><?php echo $tab_badges['schools']; ?> schools</span><?php endif; ?>
+            </button>
+            <?php endif; ?>
         </div>
     </div>
 
@@ -672,6 +1164,11 @@ include 'includes/header.php';
     <!-- REVENUE TAB -->
     <!-- ============================================= -->
     <div id="tab-revenue" class="report-panel">
+
+    <!-- Export Buttons -->
+    <div class="flex justify-end mb-4">
+        <?php echo renderExportButtons('revenue', $report_range, $date_from, $date_to); ?>
+    </div>
 
     <!-- Projected vs Actual Income -->
     <div class="bg-white rounded-lg shadow p-6 mb-8">
@@ -917,6 +1414,11 @@ include 'includes/header.php';
     <!-- ============================================= -->
     <div id="tab-students" class="report-panel hidden">
 
+    <!-- Export Buttons -->
+    <div class="flex justify-end mb-4">
+        <?php echo renderExportButtons('students', $report_range, $date_from, $date_to); ?>
+    </div>
+
     <!-- Student Retention -->
     <div class="bg-white rounded-lg shadow p-6 mb-8">
         <h2 class="text-xl font-semibold text-gray-800 mb-2">Student Retention</h2>
@@ -1016,6 +1518,11 @@ include 'includes/header.php';
     <!-- ============================================= -->
     <div id="tab-attendance" class="report-panel hidden">
 
+    <!-- Export Buttons -->
+    <div class="flex justify-end mb-4">
+        <?php echo renderExportButtons('attendance', $report_range, $date_from, $date_to); ?>
+    </div>
+
     <!-- Attendance Trends (Chart.js) -->
     <div class="bg-white rounded-lg shadow p-6 mb-8">
         <h2 class="text-xl font-semibold text-gray-800 mb-1">Attendance Trends (Last 12 Months)</h2>
@@ -1110,6 +1617,11 @@ include 'includes/header.php';
     <!-- ============================================= -->
     <div id="tab-events" class="report-panel hidden">
 
+    <!-- Export Buttons -->
+    <div class="flex justify-end mb-4">
+        <?php echo renderExportButtons('events', $report_range, $date_from, $date_to); ?>
+    </div>
+
     <!-- Event Revenue by Type -->
     <div class="bg-white rounded-lg shadow p-6 mb-8">
         <h2 class="text-xl font-semibold text-gray-800 mb-1">Event Revenue by Type (<?php echo $range_label; ?>)</h2>
@@ -1167,6 +1679,11 @@ include 'includes/header.php';
     <!-- COMPLIANCE TAB -->
     <!-- ============================================= -->
     <div id="tab-compliance" class="report-panel hidden">
+
+    <!-- Export Buttons -->
+    <div class="flex justify-end mb-4">
+        <?php echo renderExportButtons('compliance', $report_range, $date_from, $date_to); ?>
+    </div>
 
     <!-- Enrollment Compliance Report -->
     <?php if ($total_compliance_issues > 0): ?>
@@ -1319,6 +1836,33 @@ include 'includes/header.php';
     </div>
 
     </div><!-- END tab-compliance -->
+
+    <!-- ============================================= -->
+    <!-- INSTRUCTOR PERFORMANCE TAB -->
+    <!-- ============================================= -->
+    <?php include 'reports_html_part8.php'; ?>
+
+    <!-- ============================================= -->
+    <!-- MEMBERSHIP LIFECYCLE TAB -->
+    <!-- ============================================= -->
+    <?php include 'reports_html_part9.php'; ?>
+
+    <!-- ============================================= -->
+    <!-- BELT PROGRESSION TAB -->
+    <!-- ============================================= -->
+    <?php include 'reports_html_part10.php'; ?>
+
+    <!-- ============================================= -->
+    <!-- ATTENDANCE PATTERNS TAB -->
+    <!-- ============================================= -->
+    <?php include 'reports_html_part11.php'; ?>
+
+    <!-- ============================================= -->
+    <!-- SCHOOL COMPARISON TAB (Super Admin Only) -->
+    <!-- ============================================= -->
+    <?php if (is_super_admin()): ?>
+    <?php include 'reports_html_part7.php'; ?>
+    <?php endif; ?>
 
 </div><!-- END container -->
 

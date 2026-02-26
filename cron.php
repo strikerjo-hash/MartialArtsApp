@@ -15,6 +15,8 @@
  *   - If auto_renew is ON and a payment gateway is configured => attempt charge, renew on success
  *   - If auto_renew is ON but no gateway => expire the membership, log as "no_gateway"
  *   - If auto_renew is OFF => expire the membership
+ *
+ * Multi-tenancy: this file processes ALL active schools in a loop.
  */
 
 $is_cli = (php_sapi_name() === 'cli');
@@ -26,10 +28,9 @@ if (!$is_cli) {
     require_once __DIR__ . '/includes/belt_cycle.php';
     requireLogin();
 
-    // Only admins can trigger from browser
-    if (getCurrentUser()['role'] !== 'admin') {
-        header('Location: memberships.php');
-        exit;
+    // Only admins and super admins can trigger from browser
+    if (!in_array(getCurrentUser()['role'], ['admin', 'super_admin'])) {
+        accessDenied('Renewal processing requires Admin or Super Admin privileges.', 'memberships.php');
     }
 }
 
@@ -57,21 +58,48 @@ if ($is_cli) {
     }
 }
 
-// --- Check for payment gateway ---
-$gateway_configured = (get_active_gateway() !== 'none' && is_gateway_ready());
+// Multi-tenancy: process each school separately
+$_schools = $pdo->query("SELECT id FROM schools WHERE status = 'active'")->fetchAll();
+
+// Accumulate results across all schools
+$totalExpiredChanges = 0;
+$totalMonthlyResults = [
+    'billed'         => 0,
+    'failed'         => 0,
+    'completed'      => 0,
+    'total_monthly'  => 0,
+];
+$totalResults = [
+    'renewed'        => 0,
+    'expired'        => 0,
+    'payment_failed' => 0,
+    'no_gateway'     => 0,
+    'total_processed' => 0,
+];
+$totalAbsenceResults = ['checked' => 0, 'warned' => 0, 'emails_sent' => 0, 'emails_failed' => 0];
+
+foreach ($_schools as $_school) {
+    $_SESSION['active_school_id'] = $_school['id'];
+
+    // --- Check for payment gateway (per-school) ---
+    $gateway_configured = (get_active_gateway() !== 'none' && is_gateway_ready());
 
 // =====================================================================
 // STEP 1: Expire stale pending plan changes
 // =====================================================================
 try {
-    $expiredChanges = $pdo->exec("
-        UPDATE pending_plan_changes
-        SET status = 'expired', resolved_at = NOW()
-        WHERE status = 'pending' AND expires_at <= NOW()
-    ");
+    $params = [];
+    $sql = "UPDATE pending_plan_changes
+            SET status = 'expired', resolved_at = NOW()
+            WHERE status = 'pending' AND expires_at <= NOW()" . school_where();
+    school_param($params);
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $expiredChanges = $stmt->rowCount();
 } catch (PDOException $e) {
     $expiredChanges = 0;
 }
+$totalExpiredChanges += $expiredChanges;
 
 // =====================================================================
 // STEP 2: Monthly installment billing
@@ -88,7 +116,8 @@ $today_day = (int) date('j');
 $last_day_of_month = (int) date('t');
 
 try {
-    $monthlyDue = $pdo->query("
+    $params = [];
+    $monthlyDueSql = "
         SELECT m.*, mp.name AS plan_name, mp.duration_months, mp.price,
                mp.billing_frequency, mp.is_afterschool, mp.program_start_date, mp.program_end_date,
                s.first_name, s.last_name, s.email
@@ -102,9 +131,12 @@ try {
           AND (
               m.billing_day = {$today_day}
               OR (m.billing_day > {$last_day_of_month} AND {$today_day} = {$last_day_of_month})
-          )
-        ORDER BY m.id ASC
-    ")->fetchAll();
+          )" . school_where('m') . "
+        ORDER BY m.id ASC";
+    school_param($params);
+    $monthlyDueStmt = $pdo->prepare($monthlyDueSql);
+    $monthlyDueStmt->execute($params);
+    $monthlyDue = $monthlyDueStmt->fetchAll();
 } catch (PDOException $e) {
     $monthlyDue = [];
 }
@@ -112,8 +144,8 @@ try {
 $monthlyResults['total_monthly'] = count($monthlyDue);
 
 $monthlyLogStmt = $pdo->prepare("
-    INSERT INTO renewal_log (membership_id, student_id, action, old_end_date, new_end_date, amount, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO renewal_log (school_id, membership_id, student_id, action, old_end_date, new_end_date, amount, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ");
 
 foreach ($monthlyDue as $mm) {
@@ -158,11 +190,11 @@ foreach ($monthlyDue as $mm) {
             $newChargesMade = $installment_num;
 
             // Update charges count and mark payment as paid (clears lockout)
-            $pdo->prepare("UPDATE memberships SET monthly_charges_made = ?, payment_status = 'paid' WHERE id = ?")
-                ->execute([$newChargesMade, $mm['id']]);
+            $pdo->prepare("UPDATE memberships SET monthly_charges_made = ?, payment_status = 'paid' WHERE id = ?" . school_where())
+                ->execute([$newChargesMade, $mm['id'], current_school_id()]);
             // Clear any lingering lockout override (no longer needed)
-            $pdo->prepare("UPDATE students SET payment_lockout_override = 0 WHERE id = ?")
-                ->execute([$mm['student_id']]);
+            $pdo->prepare("UPDATE students SET payment_lockout_override = 0 WHERE id = ?" . school_where())
+                ->execute([$mm['student_id'], current_school_id()]);
 
             // Record payment(s)
             try {
@@ -179,25 +211,25 @@ foreach ($monthlyDue as $mm) {
                         $txnNote .= ' | Service fee: $' . number_format($serviceFeeAmount, 2);
                     }
                     $pdo->prepare("
-                        INSERT INTO payments (student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
-                        VALUES (?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, ?)
+                        INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
+                        VALUES (?, ?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, ?)
                     ")->execute([
-                        $mm['student_id'], $mm['id'], $amountCharged, $receiptNum, $txnNote
+                        current_school_id(), $mm['student_id'], $mm['id'], $amountCharged, $receiptNum, $txnNote
                     ]);
                 }
                 if ($creditUsed > 0) {
                     $pdo->prepare("
-                        INSERT INTO payments (student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
-                        VALUES (?, 'membership', ?, ?, 'account_credit', CURDATE(), ?, ?)
+                        INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
+                        VALUES (?, ?, 'membership', ?, ?, 'account_credit', CURDATE(), ?, ?)
                     ")->execute([
-                        $mm['student_id'], $mm['id'], $creditUsed, generateReceiptNumber(),
+                        current_school_id(), $mm['student_id'], $mm['id'], $creditUsed, generateReceiptNumber(),
                         'Account credit applied to monthly installment: ' . $mm['plan_name']
                     ]);
                 }
             } catch (PDOException $e) {}
 
             $monthlyLogStmt->execute([
-                $mm['id'], $mm['student_id'], 'renewed',
+                current_school_id(), $mm['id'], $mm['student_id'], 'renewed',
                 $mm['end_date'], $mm['end_date'], $chargeTotal,
                 'Monthly installment ' . $installment_num . '/' . $mm['duration_months'] . ' charged successfully ($' . number_format($monthly_amount, 2) . ' + $' . number_format($serviceFeeAmount, 2) . ' fee).'
                 . ($creditUsed > 0 ? ' Credit used: $' . number_format($creditUsed, 2) : '')
@@ -207,10 +239,10 @@ foreach ($monthlyDue as $mm) {
             // If all installments are now paid and auto_renew is ON, reset for next cycle
             if ($newChargesMade >= $mm['duration_months'] && $mm['auto_renew']) {
                 $new_end = date('Y-m-d', strtotime($mm['end_date'] . ' + ' . $mm['duration_months'] . ' months'));
-                $pdo->prepare("UPDATE memberships SET monthly_charges_made = 0, end_date = ? WHERE id = ?")
-                    ->execute([$new_end, $mm['id']]);
+                $pdo->prepare("UPDATE memberships SET monthly_charges_made = 0, end_date = ? WHERE id = ?" . school_where())
+                    ->execute([$new_end, $mm['id'], current_school_id()]);
                 $monthlyLogStmt->execute([
-                    $mm['id'], $mm['student_id'], 'renewed',
+                    current_school_id(), $mm['id'], $mm['student_id'], 'renewed',
                     $mm['end_date'], $new_end, 0,
                     'All monthly installments complete. Auto-renewed for next cycle.'
                 ]);
@@ -219,17 +251,17 @@ foreach ($monthlyDue as $mm) {
         } else {
             // Monthly installment payment failed — log but don't expire immediately
             $monthlyLogStmt->execute([
-                $mm['id'], $mm['student_id'], 'payment_failed',
+                current_school_id(), $mm['id'], $mm['student_id'], 'payment_failed',
                 $mm['end_date'], null, $monthly_amount,
                 'Monthly installment failed: ' . ($chargeResult['error'] ?? 'Unknown error')
             ]);
             $monthlyResults['failed']++;
 
             // Mark membership as declined and reset any admin override (triggers student lockout)
-            $pdo->prepare("UPDATE memberships SET payment_status = 'declined' WHERE id = ?")
-                ->execute([$mm['id']]);
-            $pdo->prepare("UPDATE students SET payment_lockout_override = 0 WHERE id = ?")
-                ->execute([$mm['student_id']]);
+            $pdo->prepare("UPDATE memberships SET payment_status = 'declined' WHERE id = ?" . school_where())
+                ->execute([$mm['id'], current_school_id()]);
+            $pdo->prepare("UPDATE students SET payment_lockout_override = 0 WHERE id = ?" . school_where())
+                ->execute([$mm['student_id'], current_school_id()]);
 
             // Send payment failure email notification
             if (is_email_configured() && getSetting('payment_failure_email_enabled', '1') === '1' && !empty($mm['email'])) {
@@ -247,7 +279,7 @@ foreach ($monthlyDue as $mm) {
     } else {
         // No gateway — log the missed billing
         $monthlyLogStmt->execute([
-            $mm['id'], $mm['student_id'], 'no_gateway',
+            current_school_id(), $mm['id'], $mm['student_id'], 'no_gateway',
             $mm['end_date'], null, $monthly_amount,
             'No payment gateway configured for monthly installment ' . $installment_num . '/' . $mm['duration_months']
         ]);
@@ -258,7 +290,8 @@ foreach ($monthlyDue as $mm) {
 // =====================================================================
 // STEP 3: Find memberships due for renewal (skip monthly-billed plans)
 // =====================================================================
-$due = $pdo->query("
+$params = [];
+$dueSql = "
     SELECT m.*, mp.name AS plan_name, mp.duration_months, mp.price,
            mp.billing_frequency, s.first_name, s.last_name, s.email
     FROM memberships m
@@ -267,9 +300,12 @@ $due = $pdo->query("
     WHERE m.status = 'active'
       AND m.end_date <= CURDATE()
       AND (mp.billing_frequency = 'upfront' OR mp.billing_frequency IS NULL)
-      AND (mp.is_afterschool = 0 OR mp.is_afterschool IS NULL)
-    ORDER BY m.end_date ASC
-")->fetchAll();
+      AND (mp.is_afterschool = 0 OR mp.is_afterschool IS NULL)" . school_where('m') . "
+    ORDER BY m.end_date ASC";
+school_param($params);
+$dueStmt = $pdo->prepare($dueSql);
+$dueStmt->execute($params);
+$due = $dueStmt->fetchAll();
 
 $results = [
     'renewed'        => 0,
@@ -280,20 +316,20 @@ $results = [
 ];
 
 $logStmt = $pdo->prepare("
-    INSERT INTO renewal_log (membership_id, student_id, action, old_end_date, new_end_date, amount, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO renewal_log (school_id, membership_id, student_id, action, old_end_date, new_end_date, amount, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ");
 
-$updateMembership = $pdo->prepare("UPDATE memberships SET end_date = ?, status = ? WHERE id = ?");
+$updateMembership = $pdo->prepare("UPDATE memberships SET end_date = ?, status = ? WHERE id = ?" . school_where());
 
 foreach ($due as $m) {
     $old_end = $m['end_date'];
 
     if (!$m['auto_renew']) {
         // Auto-renew is OFF — expire
-        $updateMembership->execute([$old_end, 'expired', $m['id']]);
+        $updateMembership->execute([$old_end, 'expired', $m['id'], current_school_id()]);
         $logStmt->execute([
-            $m['id'], $m['student_id'], 'expired',
+            current_school_id(), $m['id'], $m['student_id'], 'expired',
             $old_end, null, null,
             'Auto-renew was disabled. Membership expired.'
         ]);
@@ -329,11 +365,11 @@ foreach ($due as $m) {
 
             // Renew: extend from end_date by duration_months, mark paid (clears lockout)
             $new_end = date('Y-m-d', strtotime($old_end . ' + ' . $m['duration_months'] . ' months'));
-            $updateMembership->execute([$new_end, 'active', $m['id']]);
-            $pdo->prepare("UPDATE memberships SET payment_status = 'paid' WHERE id = ?")
-                ->execute([$m['id']]);
-            $pdo->prepare("UPDATE students SET payment_lockout_override = 0 WHERE id = ?")
-                ->execute([$m['student_id']]);
+            $updateMembership->execute([$new_end, 'active', $m['id'], current_school_id()]);
+            $pdo->prepare("UPDATE memberships SET payment_status = 'paid' WHERE id = ?" . school_where())
+                ->execute([$m['id'], current_school_id()]);
+            $pdo->prepare("UPDATE students SET payment_lockout_override = 0 WHERE id = ?" . school_where())
+                ->execute([$m['student_id'], current_school_id()]);
 
             // Record the card payment (if any)
             try {
@@ -350,20 +386,20 @@ foreach ($due as $m) {
                         $txnNote .= ' | Service fee: $' . number_format($renewalServiceFee, 2);
                     }
                     $pdo->prepare("
-                        INSERT INTO payments (student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
-                        VALUES (?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, ?)
+                        INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
+                        VALUES (?, ?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, ?)
                     ")->execute([
-                        $m['student_id'], $m['id'], $amountCharged, $receiptNum, $txnNote
+                        current_school_id(), $m['student_id'], $m['id'], $amountCharged, $receiptNum, $txnNote
                     ]);
                 }
 
                 // Record credit portion (if any)
                 if ($creditUsed > 0) {
                     $pdo->prepare("
-                        INSERT INTO payments (student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
-                        VALUES (?, 'membership', ?, ?, 'account_credit', CURDATE(), ?, ?)
+                        INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
+                        VALUES (?, ?, 'membership', ?, ?, 'account_credit', CURDATE(), ?, ?)
                     ")->execute([
-                        $m['student_id'], $m['id'], $creditUsed, generateReceiptNumber(),
+                        current_school_id(), $m['student_id'], $m['id'], $creditUsed, generateReceiptNumber(),
                         'Account credit applied to auto-renewal: ' . $m['plan_name']
                     ]);
                 }
@@ -379,20 +415,20 @@ foreach ($due as $m) {
                 $renewNote .= ' Txn: ' . $chargeResult['transaction_id'];
             }
             $logStmt->execute([
-                $m['id'], $m['student_id'], 'renewed',
+                current_school_id(), $m['id'], $m['student_id'], 'renewed',
                 $old_end, $new_end, $renewalChargeTotal,
                 $renewNote
             ]);
             $results['renewed']++;
         } else {
             // Payment failed — expire and trigger lockout
-            $updateMembership->execute([$old_end, 'expired', $m['id']]);
-            $pdo->prepare("UPDATE memberships SET payment_status = 'declined' WHERE id = ?")
-                ->execute([$m['id']]);
-            $pdo->prepare("UPDATE students SET payment_lockout_override = 0 WHERE id = ?")
-                ->execute([$m['student_id']]);
+            $updateMembership->execute([$old_end, 'expired', $m['id'], current_school_id()]);
+            $pdo->prepare("UPDATE memberships SET payment_status = 'declined' WHERE id = ?" . school_where())
+                ->execute([$m['id'], current_school_id()]);
+            $pdo->prepare("UPDATE students SET payment_lockout_override = 0 WHERE id = ?" . school_where())
+                ->execute([$m['student_id'], current_school_id()]);
             $logStmt->execute([
-                $m['id'], $m['student_id'], 'payment_failed',
+                current_school_id(), $m['id'], $m['student_id'], 'payment_failed',
                 $old_end, null, $renewalChargeTotal,
                 'Gateway payment failed: ' . ($chargeResult['error'] ?? 'Unknown error') . '. Membership expired.'
             ]);
@@ -412,9 +448,9 @@ foreach ($due as $m) {
         }
     } else {
         // No gateway configured — expire with specific note
-        $updateMembership->execute([$old_end, 'expired', $m['id']]);
+        $updateMembership->execute([$old_end, 'expired', $m['id'], current_school_id()]);
         $logStmt->execute([
-            $m['id'], $m['student_id'], 'no_gateway',
+            current_school_id(), $m['id'], $m['student_id'], 'no_gateway',
             $old_end, null, $m['price'],
             'No payment gateway configured. Membership expired for manual renewal.'
         ]);
@@ -432,24 +468,80 @@ try {
     // Don't let absence check errors crash the cron
 }
 
-// --- Output results ---
+    // Accumulate per-school results into totals
+    $totalMonthlyResults['billed']        += $monthlyResults['billed'];
+    $totalMonthlyResults['failed']        += $monthlyResults['failed'];
+    $totalMonthlyResults['completed']     += $monthlyResults['completed'];
+    $totalMonthlyResults['total_monthly'] += $monthlyResults['total_monthly'];
+    $totalResults['renewed']        += $results['renewed'];
+    $totalResults['expired']        += $results['expired'];
+    $totalResults['payment_failed'] += $results['payment_failed'];
+    $totalResults['no_gateway']     += $results['no_gateway'];
+    $totalResults['total_processed'] += $results['total_processed'];
+    $totalAbsenceResults['checked']      += $absenceResults['checked'];
+    $totalAbsenceResults['warned']       += $absenceResults['warned'];
+    $totalAbsenceResults['emails_sent']  += $absenceResults['emails_sent'];
+    $totalAbsenceResults['emails_failed'] += $absenceResults['emails_failed'];
+
+} // end foreach school
+unset($_SESSION['active_school_id']);
+
+// =====================================================================
+// STEP 5: Log retention cleanup (runs once, not per-school)
+// =====================================================================
+$logRetentionResults = ['audit_deleted' => 0, 'app_deleted' => 0];
+try {
+    $retentionDays = (int) getSetting('log_retention_days', '90');
+    $retentionDays = max(7, min(365, $retentionDays));
+
+    // Clean old audit_log entries
+    $stmt = $pdo->prepare("DELETE FROM audit_log WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY)");
+    $stmt->execute([$retentionDays]);
+    $logRetentionResults['audit_deleted'] = $stmt->rowCount();
+
+    // Clean old app_log entries
+    $stmt = $pdo->prepare("DELETE FROM app_log WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY)");
+    $stmt->execute([$retentionDays]);
+    $logRetentionResults['app_deleted'] = $stmt->rowCount();
+
+    $totalCleaned = $logRetentionResults['audit_deleted'] + $logRetentionResults['app_deleted'];
+    if ($totalCleaned > 0 && function_exists('app_log')) {
+        app_log('info', "Log retention cleanup: removed {$logRetentionResults['audit_deleted']} audit log and {$logRetentionResults['app_deleted']} app log entries older than {$retentionDays} days", [
+            'category' => 'maintenance',
+            'audit_deleted' => $logRetentionResults['audit_deleted'],
+            'app_deleted'   => $logRetentionResults['app_deleted'],
+            'retention_days' => $retentionDays,
+        ]);
+    }
+} catch (Throwable $e) {
+    // Don't let log cleanup errors crash the cron
+    if (function_exists('app_log')) {
+        app_log('error', 'Log retention cleanup failed: ' . $e->getMessage(), ['category' => 'maintenance']);
+    }
+}
+
+// --- Output results (aggregated across all schools) ---
 $summary = "Renewal processing complete. ";
-if ($expiredChanges > 0) {
-    $summary .= "{$expiredChanges} pending plan change(s) expired. ";
+if ($totalExpiredChanges > 0) {
+    $summary .= "{$totalExpiredChanges} pending plan change(s) expired. ";
 }
-if ($monthlyResults['total_monthly'] > 0) {
-    $summary .= "Monthly billing: {$monthlyResults['billed']} billed, {$monthlyResults['failed']} failed"
-        . ($monthlyResults['completed'] > 0 ? ", {$monthlyResults['completed']} cycles completed" : '') . ". ";
+if ($totalMonthlyResults['total_monthly'] > 0) {
+    $summary .= "Monthly billing: {$totalMonthlyResults['billed']} billed, {$totalMonthlyResults['failed']} failed"
+        . ($totalMonthlyResults['completed'] > 0 ? ", {$totalMonthlyResults['completed']} cycles completed" : '') . ". ";
 }
-$summary .= "{$results['total_processed']} renewal(s) processed: "
-    . "{$results['renewed']} renewed, "
-    . "{$results['expired']} expired, "
-    . "{$results['payment_failed']} payment failed, "
-    . "{$results['no_gateway']} no gateway.";
-if ($absenceResults['checked'] > 0 || $absenceResults['warned'] > 0) {
-    $summary .= " Absence check: {$absenceResults['checked']} students checked, "
-        . "{$absenceResults['warned']} warned, "
-        . "{$absenceResults['emails_sent']} email(s) sent.";
+$summary .= "{$totalResults['total_processed']} renewal(s) processed: "
+    . "{$totalResults['renewed']} renewed, "
+    . "{$totalResults['expired']} expired, "
+    . "{$totalResults['payment_failed']} payment failed, "
+    . "{$totalResults['no_gateway']} no gateway.";
+if ($totalAbsenceResults['checked'] > 0 || $totalAbsenceResults['warned'] > 0) {
+    $summary .= " Absence check: {$totalAbsenceResults['checked']} students checked, "
+        . "{$totalAbsenceResults['warned']} warned, "
+        . "{$totalAbsenceResults['emails_sent']} email(s) sent.";
+}
+$totalLogsCleaned = $logRetentionResults['audit_deleted'] + $logRetentionResults['app_deleted'];
+if ($totalLogsCleaned > 0) {
+    $summary .= " Log cleanup: {$logRetentionResults['audit_deleted']} audit + {$logRetentionResults['app_deleted']} app log entries removed.";
 }
 
 if ($is_cli) {

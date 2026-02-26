@@ -6,13 +6,15 @@ $message = '';
 
 // Handle manual payment entry
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    verify_csrf();
     if ($_POST['action'] === 'add_payment') {
         $stmt = $pdo->prepare("
-            INSERT INTO payments (student_id, payment_type, reference_id, amount, 
+            INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount,
                                 payment_method, payment_date, receipt_number, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
         $stmt->execute([
+            current_school_id(),
             $_POST['student_id'],
             $_POST['payment_type'],
             $_POST['reference_id'] ?: null,
@@ -38,6 +40,10 @@ $query = "
     WHERE p.payment_date BETWEEN :date_from AND :date_to
 ";
 
+if (!is_viewing_all_schools()) {
+    $query .= " AND p.school_id = :school_id";
+}
+
 if ($payment_type) {
     $query .= " AND p.payment_type = :type";
 }
@@ -47,6 +53,9 @@ $query .= " ORDER BY p.payment_date DESC, p.created_at DESC";
 $stmt = $pdo->prepare($query);
 $stmt->bindValue(':date_from', $date_from);
 $stmt->bindValue(':date_to', $date_to);
+if (!is_viewing_all_schools()) {
+    $stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT);
+}
 if ($payment_type) {
     $stmt->bindValue(':type', $payment_type);
 }
@@ -57,7 +66,11 @@ $payments = $stmt->fetchAll();
 $total_amount = array_sum(array_column($payments, 'amount'));
 
 // Get students for dropdown
-$students = $pdo->query("SELECT id, first_name, last_name FROM students WHERE status = 'active' ORDER BY first_name, last_name")->fetchAll();
+$student_params = ['active'];
+school_param($student_params);
+$student_stmt = $pdo->prepare("SELECT id, first_name, last_name FROM students WHERE status = ?" . school_where() . " ORDER BY first_name, last_name");
+$student_stmt->execute($student_params);
+$students = $student_stmt->fetchAll();
 
 include 'includes/header.php';
 ?>
@@ -227,6 +240,7 @@ include 'includes/header.php';
         </div>
         
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="add_payment">
             
             <div>

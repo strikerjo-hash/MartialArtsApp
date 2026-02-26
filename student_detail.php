@@ -6,9 +6,11 @@ requireLogin();
 
 $student_id = $_GET['id'] ?? 0;
 
-// Get student details
-$stmt = $pdo->prepare("SELECT * FROM students WHERE id = ?");
-$stmt->execute([$student_id]);
+// Get student details (scoped to current school)
+$params = [$student_id];
+$stmt = $pdo->prepare("SELECT * FROM students WHERE id = ?" . school_where());
+school_param($params);
+$stmt->execute($params);
 $student = $stmt->fetch();
 
 if (!$student) {
@@ -17,53 +19,61 @@ if (!$student) {
 }
 
 // Get current belt
+$params = [$student_id];
 $current_belt = $pdo->prepare("
     SELECT sb.*, b.name as belt_name, b.color, mas.name as style_name
     FROM student_belts sb
     JOIN belts b ON sb.belt_id = b.id
     JOIN martial_arts_styles mas ON sb.style_id = mas.id
-    WHERE sb.student_id = ?
+    WHERE sb.student_id = ?" . school_where('sb') . "
     ORDER BY sb.awarded_date DESC
     LIMIT 1
 ");
-$current_belt->execute([$student_id]);
+school_param($params);
+$current_belt->execute($params);
 $current_belt = $current_belt->fetch();
 
 // Get belt history
+$params = [$student_id];
 $belt_history = $pdo->prepare("
     SELECT sb.*, b.name as belt_name, b.color, mas.name as style_name, u.full_name as instructor
     FROM student_belts sb
     JOIN belts b ON sb.belt_id = b.id
     JOIN martial_arts_styles mas ON sb.style_id = mas.id
     LEFT JOIN users u ON sb.instructor_id = u.id
-    WHERE sb.student_id = ?
+    WHERE sb.student_id = ?" . school_where('sb') . "
     ORDER BY sb.awarded_date DESC
 ");
-$belt_history->execute([$student_id]);
+school_param($params);
+$belt_history->execute($params);
 $belt_history = $belt_history->fetchAll();
 
 // Get memberships
+$params = [$student_id];
 $memberships = $pdo->prepare("
     SELECT m.*, mp.name as plan_name, mp.price, mp.classes_per_week
     FROM memberships m
     JOIN membership_plans mp ON m.plan_id = mp.id
-    WHERE m.student_id = ?
+    WHERE m.student_id = ?" . school_where('m') . "
     ORDER BY m.created_at DESC
 ");
-$memberships->execute([$student_id]);
+school_param($params);
+$memberships->execute($params);
 $memberships = $memberships->fetchAll();
 
 // Get enrolled classes
+$params = [$student_id];
 $enrolled_classes = $pdo->prepare("
     SELECT ce.*, c.name as class_name, c.day_of_week, c.start_time, c.end_time,
            mas.name as style_name
     FROM class_enrollments ce
     JOIN classes c ON ce.class_id = c.id
     JOIN martial_arts_styles mas ON c.style_id = mas.id
-    WHERE ce.student_id = ? AND ce.status = 'active'
+    WHERE ce.student_id = ? AND ce.status = 'active'" . school_where('ce') . "
     ORDER BY FIELD(c.day_of_week, 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
 ");
-$enrolled_classes->execute([$student_id]);
+school_param($params);
+$enrolled_classes->execute($params);
 $enrolled_classes = $enrolled_classes->fetchAll();
 
 // Get event registrations
@@ -84,29 +94,7 @@ $payments = $pdo->prepare("
 $payments->execute([$student_id]);
 $payments = $payments->fetchAll();
 
-// Ensure payment_methods table exists and has exp columns
-try {
-    $pdo->exec("CREATE TABLE IF NOT EXISTS payment_methods (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        student_id INT NOT NULL,
-        label VARCHAR(100) DEFAULT NULL,
-        card_brand VARCHAR(50) DEFAULT NULL,
-        last_four VARCHAR(4) NOT NULL,
-        exp_month TINYINT DEFAULT NULL,
-        exp_year SMALLINT DEFAULT NULL,
-        encrypted_token TEXT NOT NULL,
-        is_default TINYINT(1) DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )");
-    // Add exp columns if missing (older installs)
-    $cols = $pdo->query("SHOW COLUMNS FROM payment_methods LIKE 'exp_month'")->fetch();
-    if (!$cols) {
-        $pdo->exec("ALTER TABLE payment_methods ADD COLUMN exp_month TINYINT DEFAULT NULL AFTER last_four");
-        $pdo->exec("ALTER TABLE payment_methods ADD COLUMN exp_year SMALLINT DEFAULT NULL AFTER exp_month");
-    }
-} catch (\PDOException $e) {
-    // Ignore — table ops may fail on some setups
-}
+// Migrations have been moved to migrate.php
 
 // Get saved payment methods (masked)
 $paymentMethods = [];
@@ -427,10 +415,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     }
+
+    // Transfer student to another school (super admin only)
+    if (isset($_POST['transfer_student'])) {
+        verify_csrf();
+        if (!is_super_admin()) {
+            $pm_message = showAlert('Only super admins can transfer students.', 'error');
+        } else {
+            require_once __DIR__ . '/includes/transfer.php';
+            $targetSchool = (int)($_POST['target_school_id'] ?? 0);
+            $transferFamily = !empty($_POST['transfer_family']);
+
+            if ($transferFamily && student_is_parent($student_id)) {
+                $result = transfer_parent_family($student_id, $targetSchool);
+            } else {
+                $result = transfer_student($student_id, $targetSchool);
+            }
+
+            if ($result['success']) {
+                switch_school($targetSchool);
+                header('Location: student_detail.php?id=' . $student_id . '&transferred=1');
+                exit;
+            } else {
+                $pm_message = showAlert('Transfer failed: ' . htmlspecialchars($result['error']), 'error');
+            }
+        }
+    }
 }
 
 // Fetch linked parent accounts for this student
 $linkedParents = get_student_parents($student_id);
+
+// Transfer preview data (super admin only)
+$transferPreview = [];
+$transferSchools = [];
+if (is_super_admin()) {
+    require_once __DIR__ . '/includes/transfer.php';
+    $transferPreview = get_transfer_preview($student_id);
+    $allSchools = get_all_schools();
+    $transferSchools = array_filter($allSchools, function($s) use ($student) {
+        return (int)$s['id'] !== (int)$student['school_id'] && $s['status'] === 'active';
+    });
+    $transferSchools = array_values($transferSchools);
+}
 
 // === COMPLIANCE CHECK ===
 $compliance_warnings = [];
@@ -519,6 +546,10 @@ include 'includes/header.php';
         </div>
     <?php endif; ?>
 
+    <?php if (isset($_GET['transferred'])): ?>
+        <?= showAlert('Student transferred successfully! They will need new class enrollments and a membership plan at this school.', 'success') ?>
+    <?php endif; ?>
+
     <!-- Student Header -->
     <div class="bg-white rounded-lg shadow p-6 mb-6">
         <div class="flex items-center justify-between">
@@ -562,10 +593,47 @@ include 'includes/header.php';
                                 &#128176; Credit: <?= formatMoney($studentCredit) ?>
                             </span>
                         <?php endif; ?>
+                        <?php
+                        $detailActivityStatus = $student['activity_status'] ?? 'active';
+                        if ($detailActivityStatus === 'inactive'):
+                            $detailHasPaidMembership = !empty($active_membership);
+                        ?>
+                            <span class="px-3 py-1 text-sm font-semibold rounded-full <?php echo $detailHasPaidMembership ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-600'; ?>">
+                                <?php echo $detailHasPaidMembership ? 'Inactive - Still Paying' : 'Not Attending'; ?>
+                            </span>
+                        <?php endif; ?>
                     </div>
+                    <?php
+                    // Last attendance and inactive since info
+                    $lastAttStmt = $pdo->prepare("SELECT MAX(attendance_date) FROM attendance WHERE student_id = ? AND status IN ('present','late')" . school_where());
+                    $lastAttParams = [$student['id']];
+                    school_param($lastAttParams);
+                    $lastAttStmt->execute($lastAttParams);
+                    $detailLastAttDate = $lastAttStmt->fetchColumn();
+                    $detailInactiveSince = $student['inactive_since'] ?? null;
+                    if ($detailLastAttDate || $detailInactiveSince): ?>
+                    <div class="mt-2 flex items-center space-x-4 text-sm text-gray-500">
+                        <?php if ($detailLastAttDate):
+                            $detailDaysAgo = (int)((strtotime('today') - strtotime($detailLastAttDate)) / 86400);
+                        ?>
+                            <span>Last attended: <strong><?php echo formatDate($detailLastAttDate); ?></strong> (<?php echo $detailDaysAgo; ?> days ago)</span>
+                        <?php else: ?>
+                            <span>Last attended: <strong>Never</strong></span>
+                        <?php endif; ?>
+                        <?php if ($detailInactiveSince): ?>
+                            <span>Inactive since: <strong><?php echo formatDate($detailInactiveSince); ?></strong></span>
+                        <?php endif; ?>
+                    </div>
+                    <?php endif; ?>
                 </div>
             </div>
             <div class="flex items-center gap-3 flex-shrink-0">
+                <?php if (is_super_admin() && !empty($transferSchools)): ?>
+                <button onclick="document.getElementById('transferModal').classList.remove('hidden')"
+                        class="bg-orange-500 hover:bg-orange-600 text-white px-5 py-2 rounded-lg font-medium text-sm">
+                    &#8644; Transfer to School
+                </button>
+                <?php endif; ?>
                 <?php if (!empty($belt_history)): ?>
                 <a href="student_certificate.php?student_id=<?php echo $student_id; ?>"
                    class="bg-amber-600 hover:bg-amber-700 text-white px-5 py-2 rounded-lg font-medium text-sm"
@@ -1450,5 +1518,115 @@ include 'includes/header.php';
 </div>
 
 <!-- Promote modal removed — parent account is now a simple is_parent flag toggle -->
+
+<!-- Transfer to School Modal (Super Admin Only) -->
+<?php if (is_super_admin() && !empty($transferSchools)): ?>
+<div id="transferModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+    <div class="relative top-20 mx-auto p-5 border w-full max-w-lg shadow-lg rounded-md bg-white">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-xl font-bold text-gray-800">&#8644; Transfer Student to Another School</h3>
+            <button onclick="document.getElementById('transferModal').classList.add('hidden')"
+                    class="text-gray-600 hover:text-gray-800 text-xl">&times;</button>
+        </div>
+
+        <form method="POST" onsubmit="return confirm('Are you sure you want to transfer this student? This action will remove class enrollments and expire active memberships.')">
+            <?= csrf_field() ?>
+            <input type="hidden" name="transfer_student" value="1">
+
+            <div class="space-y-4">
+                <!-- Current School -->
+                <div class="bg-gray-50 rounded-lg p-3">
+                    <p class="text-sm text-gray-500">Current School</p>
+                    <p class="font-semibold text-gray-800"><?= htmlspecialchars($transferPreview['current_school'] ?? '') ?></p>
+                </div>
+
+                <!-- Target School -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Transfer To *</label>
+                    <select name="target_school_id" required
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                        <option value="">Select a school...</option>
+                        <?php foreach ($transferSchools as $ts): ?>
+                            <option value="<?= $ts['id'] ?>"><?= htmlspecialchars($ts['name']) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+
+                <!-- Family Transfer (if parent) -->
+                <?php if (!empty($transferPreview['is_parent']) && !empty($transferPreview['children'])): ?>
+                <div class="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <label class="flex items-start space-x-3 cursor-pointer">
+                        <input type="checkbox" name="transfer_family" value="1" checked
+                               class="mt-1 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                        <div>
+                            <span class="font-medium text-blue-800">Transfer entire family</span>
+                            <p class="text-sm text-blue-600 mt-1">
+                                This parent account has <?= count($transferPreview['children']) ?> linked child<?= count($transferPreview['children']) > 1 ? 'ren' : '' ?>:
+                            </p>
+                            <ul class="text-sm text-blue-600 mt-1 ml-4 list-disc">
+                                <?php foreach ($transferPreview['children'] as $child): ?>
+                                    <li><?= htmlspecialchars($child['first_name'] . ' ' . $child['last_name']) ?></li>
+                                <?php endforeach; ?>
+                            </ul>
+                        </div>
+                    </label>
+                </div>
+                <?php endif; ?>
+
+                <!-- Parent Warning (if child has a parent at this school) -->
+                <?php if (!empty($transferPreview['has_parent_at_school']) && empty($transferPreview['is_parent'])): ?>
+                <div class="bg-yellow-50 border border-yellow-300 rounded-lg p-3">
+                    <p class="text-sm font-medium text-yellow-800">&#9888; Parent Account Warning</p>
+                    <p class="text-sm text-yellow-700 mt-1">
+                        This student is linked to a parent account
+                        (<?php
+                            $pNames = array_map(fn($p) => $p['first_name'] . ' ' . $p['last_name'], $transferPreview['parent_names']);
+                            echo htmlspecialchars(implode(', ', $pNames));
+                        ?>)
+                        at the current school. After transfer, the parent will no longer see this student in their portal
+                        unless the parent is also transferred.
+                    </p>
+                </div>
+                <?php endif; ?>
+
+                <!-- Transfer Impact Summary -->
+                <div class="bg-orange-50 border border-orange-200 rounded-lg p-3">
+                    <p class="text-sm font-semibold text-orange-800 mb-2">What will happen:</p>
+                    <ul class="text-sm text-orange-700 space-y-1">
+                        <?php if (($transferPreview['active_enrollments'] ?? 0) > 0): ?>
+                            <li>&#10060; <?= $transferPreview['active_enrollments'] ?> class enrollment<?= $transferPreview['active_enrollments'] > 1 ? 's' : '' ?> will be <strong>removed</strong></li>
+                        <?php endif; ?>
+                        <?php if (!empty($transferPreview['active_membership'])): ?>
+                            <li>&#10060; Active membership (<?= htmlspecialchars($transferPreview['active_membership']['plan_name']) ?>) will be <strong>expired</strong></li>
+                        <?php endif; ?>
+                        <?php if (($transferPreview['future_events'] ?? 0) > 0): ?>
+                            <li>&#10060; <?= $transferPreview['future_events'] ?> future event registration<?= $transferPreview['future_events'] > 1 ? 's' : '' ?> will be <strong>cancelled</strong></li>
+                        <?php endif; ?>
+                        <?php if (($transferPreview['pending_makeups'] ?? 0) > 0): ?>
+                            <li>&#10060; <?= $transferPreview['pending_makeups'] ?> pending makeup class<?= $transferPreview['pending_makeups'] > 1 ? 'es' : '' ?> will be <strong>cancelled</strong></li>
+                        <?php endif; ?>
+                        <?php if (($transferPreview['pending_plan_changes'] ?? 0) > 0): ?>
+                            <li>&#10060; <?= $transferPreview['pending_plan_changes'] ?> pending plan change<?= $transferPreview['pending_plan_changes'] > 1 ? 's' : '' ?> will be <strong>cancelled</strong></li>
+                        <?php endif; ?>
+                        <li>&#10004; Belt history, payment history, attendance records, and training logs will be <strong>preserved</strong></li>
+                        <li>&#9888; Student will need new class enrollments and membership at the destination school</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="flex justify-end space-x-3 pt-5">
+                <button type="button" onclick="document.getElementById('transferModal').classList.add('hidden')"
+                        class="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">
+                    Cancel
+                </button>
+                <button type="submit"
+                        class="px-6 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded-lg font-medium">
+                    Transfer Student
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+<?php endif; ?>
 
 <?php include 'includes/footer.php'; ?>

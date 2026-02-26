@@ -13,9 +13,11 @@ requireLogin();
 $student_id = $_GET['id'] ?? 0;
 $message = '';
 
-// Load the student.
-$stmt = $pdo->prepare('SELECT * FROM students WHERE id = ?');
-$stmt->execute([$student_id]);
+// Load the student (scoped to current school).
+$params = [$student_id];
+$stmt = $pdo->prepare('SELECT * FROM students WHERE id = ?' . school_where());
+school_param($params);
+$stmt->execute($params);
 $student = $stmt->fetch();
 
 if (!$student) {
@@ -31,10 +33,12 @@ $hasUsername    = in_array('username', $colNames, true);
 $hasAddress     = in_array('address', $colNames, true);
 $hasDob         = in_array('date_of_birth', $colNames, true);
 $hasEmergency   = in_array('emergency_contact_name', $colNames, true);
-$hasNotes       = in_array('notes', $colNames, true);
-$hasStatus      = in_array('status', $colNames, true);
-$hasIsActive    = in_array('is_active', $colNames, true);
-$hasBeltRank    = in_array('belt_rank', $colNames, true);
+$hasNotes           = in_array('notes', $colNames, true);
+$hasStatus          = in_array('status', $colNames, true);
+$hasIsActive        = in_array('is_active', $colNames, true);
+$hasBeltRank        = in_array('belt_rank', $colNames, true);
+$hasActivityStatus  = in_array('activity_status', $colNames, true);
+$hasInactiveSince   = in_array('inactive_since', $colNames, true);
 
 // ---------- Handle form submission ----------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -58,8 +62,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($newUsername !== '') {
                 // Check uniqueness if it changed.
                 if ($newUsername !== ($student['username'] ?? '')) {
-                    $chk = $pdo->prepare('SELECT id FROM students WHERE username = ? AND id != ?');
-                    $chk->execute([$newUsername, $student_id]);
+                    $chkParams = [$newUsername, $student_id];
+                    $chk = $pdo->prepare('SELECT id FROM students WHERE username = ? AND id != ?' . school_where());
+                    school_param($chkParams);
+                    $chk->execute($chkParams);
                     if ($chk->fetch()) {
                         $message = showAlert('That username is already taken by another student.', 'error');
                     }
@@ -108,6 +114,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $params[] = sanitizeInput($_POST['belt_rank'] ?? 'White');
         }
 
+        if ($hasActivityStatus) {
+            $newActivityStatus = ($_POST['activity_status'] ?? 'active') === 'inactive' ? 'inactive' : 'active';
+            $oldActivityStatus = $student['activity_status'] ?? 'active';
+            $fields[] = 'activity_status = ?';
+            $params[] = $newActivityStatus;
+
+            if ($hasInactiveSince) {
+                if ($newActivityStatus === 'inactive' && $oldActivityStatus === 'active') {
+                    // Transitioning to inactive — set date
+                    $fields[] = 'inactive_since = ?';
+                    $params[] = date('Y-m-d');
+                } elseif ($newActivityStatus === 'active' && $oldActivityStatus === 'inactive') {
+                    // Transitioning to active — clear date
+                    $fields[] = 'inactive_since = ?';
+                    $params[] = null;
+                }
+            }
+        }
+
         $fields[] = 'join_date = ?';
         $params[] = $_POST['join_date'] ?: $student['join_date'];
 
@@ -126,13 +151,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($message === '') {
             $params[] = $student_id;
-            $sql = 'UPDATE students SET ' . implode(', ', $fields) . ' WHERE id = ?';
+            $sql = 'UPDATE students SET ' . implode(', ', $fields) . ' WHERE id = ?' . school_where();
+            school_param($params);
             $pdo->prepare($sql)->execute($params);
 
             $message = showAlert('Student updated successfully!', 'success');
 
-            // Reload the student row.
-            $stmt->execute([$student_id]);
+            // Reload the student row (scoped to current school).
+            $reloadParams = [$student_id];
+            school_param($reloadParams);
+            $stmt->execute($reloadParams);
             $student = $stmt->fetch();
         }
     }
@@ -277,6 +305,21 @@ include 'includes/header.php';
                     <input type="text" name="belt_rank"
                            value="<?php echo htmlspecialchars($student['belt_rank'] ?? 'White'); ?>"
                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                </div>
+                <?php endif; ?>
+
+                <?php if ($hasActivityStatus): ?>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Activity Status</label>
+                    <select name="activity_status"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                        <option value="active" <?php echo ($student['activity_status'] ?? 'active') === 'active' ? 'selected' : ''; ?>>Active (Attending)</option>
+                        <option value="inactive" <?php echo ($student['activity_status'] ?? 'active') === 'inactive' ? 'selected' : ''; ?>>Inactive (Not Attending)</option>
+                    </select>
+                    <p class="text-xs text-gray-500 mt-1">Tracks whether the student is actively attending classes. Does not affect billing or portal access.</p>
+                    <?php if ($hasInactiveSince && !empty($student['inactive_since'])): ?>
+                        <p class="text-xs text-yellow-600 mt-1">Inactive since: <?php echo htmlspecialchars(formatDate($student['inactive_since'])); ?></p>
+                    <?php endif; ?>
                 </div>
                 <?php endif; ?>
             </div>

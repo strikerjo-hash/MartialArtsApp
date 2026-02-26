@@ -5,13 +5,20 @@ $message = '';
 $step = $_GET['step'] ?? 1;
 
 // Get available membership plans
-$plans = $pdo->query("SELECT * FROM membership_plans WHERE status = 'active' ORDER BY price ASC")->fetchAll();
+$plans_stmt = $pdo->prepare("SELECT * FROM membership_plans WHERE status = 'active' AND (is_grandfathered = 0 OR is_grandfathered IS NULL)" . school_where() . " ORDER BY price ASC");
+$params = [];
+school_param($params);
+$plans_stmt->execute($params);
+$plans = $plans_stmt->fetchAll();
 
 // Handle registration
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register'])) {
+    verify_csrf();
     // Validate email doesn't exist
-    $check = $pdo->prepare("SELECT id FROM students WHERE email = ?");
-    $check->execute([sanitizeInput($_POST['email'])]);
+    $check = $pdo->prepare("SELECT id FROM students WHERE email = ?" . school_where());
+    $params = [sanitizeInput($_POST['email'])];
+    school_param($params);
+    $check->execute($params);
     
     if ($check->fetch()) {
         $message = showAlert('An account with this email already exists!', 'error');
@@ -21,12 +28,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register'])) {
         
         // Insert student
         $stmt = $pdo->prepare("
-            INSERT INTO students (first_name, last_name, email, phone, date_of_birth, 
+            INSERT INTO students (school_id, first_name, last_name, email, phone, date_of_birth, 
                                 address, emergency_contact_name, emergency_contact_phone, 
                                 join_date, status, password)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURDATE(), 'active', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE(), 'active', ?)
         ");
         $stmt->execute([
+            current_school_id(),
             sanitizeInput($_POST['first_name']),
             sanitizeInput($_POST['last_name']),
             sanitizeInput($_POST['email']),
@@ -52,12 +60,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register'])) {
 
 // Handle payment processing
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
+    verify_csrf();
     $student_id = $_SESSION['registration_student_id'];
     $plan_id = $_SESSION['registration_plan_id'];
     
     // Get plan details
-    $plan = $pdo->prepare("SELECT * FROM membership_plans WHERE id = ?");
-    $plan->execute([$plan_id]);
+    $plan = $pdo->prepare("SELECT * FROM membership_plans WHERE id = ?" . school_where());
+    $params = [$plan_id];
+    school_param($params);
+    $plan->execute($params);
     $plan_data = $plan->fetch();
     
     // Get active payment gateway
@@ -68,8 +79,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
         $message = showAlert('Payment processing is not configured. Please contact the studio to complete your registration.', 'error');
         
         // Mark student as inactive until payment is processed manually
-        $stmt = $pdo->prepare("UPDATE students SET status = 'inactive' WHERE id = ?");
-        $stmt->execute([$student_id]);
+        $stmt = $pdo->prepare("UPDATE students SET status = 'inactive' WHERE id = ?" . school_where());
+        $params = [$student_id];
+        school_param($params);
+        $stmt->execute($params);
     } else {
         // Process payment based on active gateway
         $payment_success = false;
@@ -115,19 +128,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
             $end_date = date('Y-m-d', strtotime($start_date . ' + ' . $plan_data['duration_months'] . ' months'));
             
             $stmt = $pdo->prepare("
-                INSERT INTO memberships (student_id, plan_id, start_date, end_date, status, payment_status, amount_paid)
-                VALUES (?, ?, ?, ?, 'active', 'paid', ?)
+                INSERT INTO memberships (school_id, student_id, plan_id, start_date, end_date, status, payment_status, amount_paid)
+                VALUES (?, ?, ?, ?, ?, 'active', 'paid', ?)
             ");
-            $stmt->execute([$student_id, $plan_id, $start_date, $end_date, $plan_data['price']]);
+            $stmt->execute([current_school_id(), $student_id, $plan_id, $start_date, $end_date, $plan_data['price']]);
             $membership_id = $pdo->lastInsertId();
             
             // Record payment
             $stmt = $pdo->prepare("
-                INSERT INTO payments (student_id, payment_type, reference_id, amount, 
+                INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount, 
                                     payment_method, payment_date, receipt_number, notes)
-                VALUES (?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, 'Initial membership payment - Self registration')
+                VALUES (?, ?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, 'Initial membership payment - Self registration')
             ");
             $stmt->execute([
+                current_school_id(),
                 $student_id,
                 $membership_id,
                 $plan_data['price'],
@@ -146,18 +160,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
             $message = showAlert($payment_error ?: 'Payment processing failed. Please try again.', 'error');
             
             // Mark student as inactive and create pending membership
-            $stmt = $pdo->prepare("UPDATE students SET status = 'inactive' WHERE id = ?");
-            $stmt->execute([$student_id]);
+            $stmt = $pdo->prepare("UPDATE students SET status = 'inactive' WHERE id = ?" . school_where());
+            $params = [$student_id];
+            school_param($params);
+            $stmt->execute($params);
             
             // Create pending membership
             $start_date = date('Y-m-d');
             $end_date = date('Y-m-d', strtotime($start_date . ' + ' . $plan_data['duration_months'] . ' months'));
             
             $stmt = $pdo->prepare("
-                INSERT INTO memberships (student_id, plan_id, start_date, end_date, status, payment_status, amount_paid)
-                VALUES (?, ?, ?, ?, 'cancelled', 'pending', 0)
+                INSERT INTO memberships (school_id, student_id, plan_id, start_date, end_date, status, payment_status, amount_paid)
+                VALUES (?, ?, ?, ?, ?, 'cancelled', 'pending', 0)
             ");
-            $stmt->execute([$student_id, $plan_id, $start_date, $end_date]);
+            $stmt->execute([current_school_id(), $student_id, $plan_id, $start_date, $end_date]);
             
             // Redirect to pending page
             header('Location: student_register.php?step=pending');
@@ -169,8 +185,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
 // Get selected plan for step 2
 $selected_plan = null;
 if ($step == 2 && isset($_SESSION['registration_plan_id'])) {
-    $stmt = $pdo->prepare("SELECT * FROM membership_plans WHERE id = ?");
-    $stmt->execute([$_SESSION['registration_plan_id']]);
+    $stmt = $pdo->prepare("SELECT * FROM membership_plans WHERE id = ?" . school_where());
+    $params = [$_SESSION['registration_plan_id']];
+    school_param($params);
+    $stmt->execute($params);
     $selected_plan = $stmt->fetch();
 }
 ?>
@@ -228,6 +246,7 @@ if ($step == 2 && isset($_SESSION['registration_plan_id'])) {
                     <h2 class="text-2xl font-bold text-gray-800 mb-6">Create Your Account</h2>
                     
                     <form method="POST" class="space-y-6">
+                        <?= csrf_field() ?>
                         <input type="hidden" name="register" value="1">
                         
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -371,8 +390,9 @@ if ($step == 2 && isset($_SESSION['registration_plan_id'])) {
                         </div>
                         
                         <form method="POST">
+                            <?= csrf_field() ?>
                             <input type="hidden" name="process_payment" value="1">
-                            <button type="submit" 
+                            <button type="submit"
                                     class="w-full bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200">
                                 Continue (Payment Required at Studio)
                             </button>
@@ -381,6 +401,7 @@ if ($step == 2 && isset($_SESSION['registration_plan_id'])) {
                     <?php elseif ($active_gateway === 'stripe'): ?>
                         <!-- Stripe Payment Form -->
                         <form method="POST" id="payment-form">
+                            <?= csrf_field() ?>
                             <input type="hidden" name="process_payment" value="1">
                             
                             <div class="mb-6">
@@ -408,6 +429,7 @@ if ($step == 2 && isset($_SESSION['registration_plan_id'])) {
                     <?php elseif ($active_gateway === 'square'): ?>
                         <!-- Square Payment Form -->
                         <form method="POST" id="payment-form">
+                            <?= csrf_field() ?>
                             <input type="hidden" name="process_payment" value="1">
                             
                             <div class="mb-6">

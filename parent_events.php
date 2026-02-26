@@ -30,13 +30,16 @@ if ($preselectedChildId && !in_array($preselectedChildId, $childIds)) {
 
 // Handle multi-child registration
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_children'])) {
+    verify_csrf();
     $eventId = (int)($_POST['event_id'] ?? 0);
     $selectedChildren = $_POST['children'] ?? [];
 
     if ($eventId && !empty($selectedChildren)) {
         // Get event info
-        $evStmt = $pdo->prepare("SELECT * FROM events WHERE id = ? AND requires_registration = 1");
-        $evStmt->execute([$eventId]);
+        $params = [$eventId];
+        $evStmt = $pdo->prepare("SELECT * FROM events WHERE id = ? AND requires_registration = 1" . school_where());
+        school_param($params);
+        $evStmt->execute($params);
         $regEvent = $evStmt->fetch();
 
         if ($regEvent) {
@@ -49,16 +52,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_children']))
                 if (!in_array($childId, $childIds)) continue;
 
                 // Check if already registered
-                $check = $pdo->prepare("SELECT id FROM event_registrations WHERE student_id = ? AND event_id = ?");
-                $check->execute([$childId, $eventId]);
+                $checkParams = [$childId, $eventId];
+                $check = $pdo->prepare("SELECT id FROM event_registrations WHERE student_id = ? AND event_id = ?" . school_where());
+                school_param($checkParams);
+                $check->execute($checkParams);
                 if ($check->fetch()) {
                     $alreadyRegistered[] = $childMap[$childId]['first_name'] ?? 'Student';
                     continue;
                 }
 
                 // Check capacity
-                $countStmt = $pdo->prepare("SELECT COUNT(*) as cnt FROM event_registrations WHERE event_id = ?");
-                $countStmt->execute([$eventId]);
+                $countParams = [$eventId];
+                $countStmt = $pdo->prepare("SELECT COUNT(*) as cnt FROM event_registrations WHERE event_id = ?" . school_where());
+                school_param($countParams);
+                $countStmt->execute($countParams);
                 $currentCount = $countStmt->fetch()['cnt'];
 
                 if ($regEvent['max_participants'] > 0 && $currentCount >= $regEvent['max_participants']) {
@@ -68,11 +75,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_children']))
 
                 // Register
                 $insStmt = $pdo->prepare("
-                    INSERT INTO event_registrations (student_id, event_id, parent_id, registration_date, payment_status, attendance_status)
-                    VALUES (?, ?, ?, CURDATE(), ?, 'registered')
+                    INSERT INTO event_registrations (school_id, student_id, event_id, parent_id, registration_date, payment_status, attendance_status)
+                    VALUES (?, ?, ?, ?, CURDATE(), ?, 'registered')
                 ");
                 $paymentStatus = ($regEvent['registration_fee'] > 0) ? 'pending' : 'waived';
-                $insStmt->execute([$childId, $eventId, $parentId, $paymentStatus]);
+                $insStmt->execute([current_school_id(), $childId, $eventId, $parentId, $paymentStatus]);
                 $newRegistrationIds[] = $pdo->lastInsertId();
                 $registeredCount++;
             }
@@ -121,6 +128,9 @@ if ($filter !== 'all') {
     $params[] = $filter;
 }
 
+$query .= school_where('e');
+school_param($params);
+
 $query .= " GROUP BY e.id ORDER BY e.event_date ASC";
 
 $stmt = $pdo->prepare($query);
@@ -131,12 +141,14 @@ $events = $stmt->fetchAll();
 $childRegistrations = [];
 if (!empty($childIds)) {
     $placeholders = implode(',', array_fill(0, count($childIds), '?'));
+    $regParams = $childIds;
     $regStmt = $pdo->prepare("
         SELECT er.event_id, er.student_id, er.payment_status
         FROM event_registrations er
-        WHERE er.student_id IN ({$placeholders})
+        WHERE er.student_id IN ({$placeholders})" . school_where('er') . "
     ");
-    $regStmt->execute($childIds);
+    school_param($regParams);
+    $regStmt->execute($regParams);
     foreach ($regStmt->fetchAll() as $r) {
         $childRegistrations[$r['event_id']][$r['student_id']] = $r['payment_status'];
     }
@@ -146,16 +158,18 @@ if (!empty($childIds)) {
 $myRegistrations = [];
 if (!empty($childIds)) {
     $placeholders = implode(',', array_fill(0, count($childIds), '?'));
+    $myRegParams = $childIds;
     $myRegStmt = $pdo->prepare("
         SELECT er.*, e.name as event_name, e.event_date, e.event_type, e.registration_fee as fee,
                s.first_name, s.last_name
         FROM event_registrations er
         JOIN events e ON er.event_id = e.id
         JOIN students s ON s.id = er.student_id
-        WHERE er.student_id IN ({$placeholders})
-        ORDER BY e.event_date ASC
+        WHERE er.student_id IN ({$placeholders})" . school_where('er') . "
+        ORDER by e.event_date ASC
     ");
-    $myRegStmt->execute($childIds);
+    school_param($myRegParams);
+    $myRegStmt->execute($myRegParams);
     $myRegistrations = $myRegStmt->fetchAll();
 }
 
@@ -262,6 +276,7 @@ include 'includes/parent_header.php';
                             </div>
                         <?php else: ?>
                             <form method="POST">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="register_children" value="1">
                                 <input type="hidden" name="event_id" value="<?= $event['id'] ?>">
 

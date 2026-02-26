@@ -33,10 +33,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             try {
                 $stmt = $pdo->prepare(
-                    "INSERT INTO makeup_classes (student_id, original_absence_id, class_id, makeup_date, logged_by, notes)
-                     VALUES (?, ?, ?, ?, ?, ?)"
+                    "INSERT INTO makeup_classes (school_id, student_id, original_absence_id, class_id, makeup_date, logged_by, notes)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)"
                 );
-                $stmt->execute([$studentId, $absenceId, $classId, $makeupDate, $_SESSION['user_id'], $notes]);
+                $stmt->execute([current_school_id(), $studentId, $absenceId, $classId, $makeupDate, $_SESSION['user_id'], $notes]);
                 $message = showAlert('Make-up class logged successfully!', 'success');
             } catch (\PDOException $e) {
                 $message = showAlert('Error logging make-up class: ' . $e->getMessage(), 'error');
@@ -48,7 +48,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $makeupId = (int) ($_POST['makeup_id'] ?? 0);
         if ($makeupId > 0) {
             try {
-                $pdo->prepare("DELETE FROM makeup_classes WHERE id = ?")->execute([$makeupId]);
+                $params = [$makeupId];
+                $stmt = $pdo->prepare("DELETE FROM makeup_classes WHERE id = ?" . school_where());
+                school_param($params);
+                $stmt->execute($params);
                 $message = showAlert('Make-up class record deleted.', 'success');
             } catch (\PDOException $e) {
                 $message = showAlert('Error deleting record.', 'error');
@@ -60,18 +63,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // --- Fetch Students With Absences in Current Cycle ---
 $studentsWithAbsences = [];
 try {
-    $rawStudents = $pdo->query("
+    $params = [$cycle['start'], $cycle['end']];
+    $stmt = $pdo->prepare("
         SELECT s.id, s.first_name, s.last_name, s.email,
                COUNT(CASE WHEN a.status = 'absent' THEN 1 END) as absences
         FROM students s
         JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active'
         JOIN attendance a ON a.student_id = s.id
-            AND a.attendance_date BETWEEN '{$cycle['start']}' AND '{$cycle['end']}'
-        WHERE s.status = 'active'
+            AND a.attendance_date BETWEEN ? AND ?
+        WHERE s.status = 'active'" . school_where('s') . "
         GROUP BY s.id, s.first_name, s.last_name, s.email
         HAVING absences > 0
         ORDER BY absences DESC
-    ")->fetchAll();
+    ");
+    school_param($params);
+    $stmt->execute($params);
+    $rawStudents = $stmt->fetchAll();
 
     foreach ($rawStudents as $rs) {
         $makeups = count_makeups_in_cycle((int) $rs['id'], $cycle['start'], $cycle['end']);

@@ -6,11 +6,20 @@ requireLogin();
 $message = '';
 
 // Get plans and events for dropdowns
-$plans  = $pdo->query("SELECT id, name FROM membership_plans WHERE status = 'active' ORDER BY name")->fetchAll();
-$events = $pdo->query("SELECT id, name FROM events WHERE event_date >= CURDATE() ORDER BY event_date ASC")->fetchAll();
+$params = [];
+$stmt = $pdo->prepare("SELECT id, name FROM membership_plans WHERE status = 'active'" . school_where() . " ORDER BY name");
+school_param($params);
+$stmt->execute($params);
+$plans = $stmt->fetchAll();
+$params = [];
+$stmt = $pdo->prepare("SELECT id, name FROM events WHERE event_date >= CURDATE()" . school_where() . " ORDER BY event_date ASC");
+school_param($params);
+$stmt->execute($params);
+$events = $stmt->fetchAll();
 
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    verify_csrf();
     switch ($_POST['action']) {
         case 'add_code':
             $code = strtoupper(trim(sanitizeInput($_POST['code'] ?? '')));
@@ -19,16 +28,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 break;
             }
             // Check uniqueness
-            $dup = $pdo->prepare("SELECT id FROM discount_codes WHERE code = ?");
-            $dup->execute([$code]);
+            $params = [$code];
+            $dup = $pdo->prepare("SELECT id FROM discount_codes WHERE code = ?" . school_where());
+            school_param($params);
+            $dup->execute($params);
             if ($dup->fetch()) {
                 $message = showAlert('A discount code with that name already exists.', 'error');
                 break;
             }
             $stmt = $pdo->prepare("INSERT INTO discount_codes
-                (code, description, discount_type, discount_value, applies_to, plan_id, event_id, max_uses, valid_from, valid_until, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                (school_id, code, description, discount_type, discount_value, applies_to, plan_id, event_id, max_uses, valid_from, valid_until, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $stmt->execute([
+                current_school_id(),
                 $code,
                 sanitizeInput($_POST['description'] ?? ''),
                 $_POST['discount_type'] === 'flat' ? 'flat' : 'percentage',
@@ -48,18 +60,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $code = strtoupper(trim(sanitizeInput($_POST['code'] ?? '')));
             $codeId = (int) $_POST['code_id'];
             // Check uniqueness excluding self
-            $dup = $pdo->prepare("SELECT id FROM discount_codes WHERE code = ? AND id != ?");
-            $dup->execute([$code, $codeId]);
+            $params = [$code, $codeId];
+            $dup = $pdo->prepare("SELECT id FROM discount_codes WHERE code = ? AND id != ?" . school_where());
+            school_param($params);
+            $dup->execute($params);
             if ($dup->fetch()) {
                 $message = showAlert('Another discount code with that name already exists.', 'error');
                 break;
             }
-            $stmt = $pdo->prepare("UPDATE discount_codes SET
-                code = ?, description = ?, discount_type = ?, discount_value = ?,
-                applies_to = ?, plan_id = ?, event_id = ?, max_uses = ?,
-                valid_from = ?, valid_until = ?, is_active = ?
-                WHERE id = ?");
-            $stmt->execute([
+            $params = [
                 $code,
                 sanitizeInput($_POST['description'] ?? ''),
                 $_POST['discount_type'] === 'flat' ? 'flat' : 'percentage',
@@ -72,21 +81,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 !empty($_POST['valid_until']) ? $_POST['valid_until'] : null,
                 isset($_POST['is_active']) ? 1 : 0,
                 $codeId,
-            ]);
+            ];
+            $stmt = $pdo->prepare("UPDATE discount_codes SET
+                code = ?, description = ?, discount_type = ?, discount_value = ?,
+                applies_to = ?, plan_id = ?, event_id = ?, max_uses = ?,
+                valid_from = ?, valid_until = ?, is_active = ?
+                WHERE id = ?" . school_where());
+            school_param($params);
+            $stmt->execute($params);
             $message = showAlert('Discount code updated successfully!', 'success');
             break;
 
         case 'delete_code':
             $codeId = (int) $_POST['code_id'];
-            $check = $pdo->prepare("SELECT uses_count FROM discount_codes WHERE id = ?");
-            $check->execute([$codeId]);
+            $params = [$codeId];
+            $check = $pdo->prepare("SELECT uses_count FROM discount_codes WHERE id = ?" . school_where());
+            school_param($params);
+            $check->execute($params);
             $row = $check->fetch();
             if ($row && $row['uses_count'] > 0) {
                 // Deactivate instead of delete
-                $pdo->prepare("UPDATE discount_codes SET is_active = 0 WHERE id = ?")->execute([$codeId]);
+                $params = [$codeId];
+                $stmt = $pdo->prepare("UPDATE discount_codes SET is_active = 0 WHERE id = ?" . school_where());
+                school_param($params);
+                $stmt->execute($params);
                 $message = showAlert('Code has been used and cannot be deleted. It has been deactivated instead.', 'warning');
             } else {
-                $pdo->prepare("DELETE FROM discount_codes WHERE id = ?")->execute([$codeId]);
+                $params = [$codeId];
+                $stmt = $pdo->prepare("DELETE FROM discount_codes WHERE id = ?" . school_where());
+                school_param($params);
+                $stmt->execute($params);
                 $message = showAlert('Discount code deleted.', 'success');
             }
             break;
@@ -94,22 +118,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         case 'toggle_active':
             $codeId = (int) $_POST['code_id'];
             $newVal = (int) $_POST['new_active_value'];
-            $pdo->prepare("UPDATE discount_codes SET is_active = ? WHERE id = ?")->execute([$newVal, $codeId]);
+            $params = [$newVal, $codeId];
+            $stmt = $pdo->prepare("UPDATE discount_codes SET is_active = ? WHERE id = ?" . school_where());
+            school_param($params);
+            $stmt->execute($params);
             $message = showAlert('Discount code ' . ($newVal ? 'activated' : 'deactivated') . '.', 'success');
             break;
     }
 }
 
 // Fetch all discount codes
-$codes = $pdo->query("
-    SELECT dc.*,
+$params = [];
+$sql = "SELECT dc.*,
            mp.name AS plan_name,
            e.name  AS event_name
     FROM discount_codes dc
     LEFT JOIN membership_plans mp ON dc.plan_id = mp.id
     LEFT JOIN events e ON dc.event_id = e.id
-    ORDER BY dc.is_active DESC, dc.created_at DESC
-")->fetchAll();
+    " . school_where_clause('dc') . "
+    ORDER BY dc.is_active DESC, dc.created_at DESC";
+school_param($params);
+$stmt = $pdo->prepare($sql);
+$stmt->execute($params);
+$codes = $stmt->fetchAll();
 
 include 'includes/header.php';
 ?>
@@ -191,6 +222,7 @@ include 'includes/header.php';
                         </td>
                         <td class="px-4 py-4 whitespace-nowrap">
                             <form method="POST" class="inline">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="action" value="toggle_active">
                                 <input type="hidden" name="code_id" value="<?php echo $c['id']; ?>">
                                 <input type="hidden" name="new_active_value" value="<?php echo $c['is_active'] ? 0 : 1; ?>">
@@ -202,6 +234,7 @@ include 'includes/header.php';
                         <td class="px-4 py-4 whitespace-nowrap text-sm">
                             <button onclick='editCode(<?php echo json_encode($c); ?>)' class="text-blue-600 hover:text-blue-900 mr-2">Edit</button>
                             <form method="POST" class="inline" onsubmit="return confirmDelete('Delete this discount code?')">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="action" value="delete_code">
                                 <input type="hidden" name="code_id" value="<?php echo $c['id']; ?>">
                                 <button type="submit" class="text-red-600 hover:text-red-900">Delete</button>
@@ -226,6 +259,7 @@ include 'includes/header.php';
             <button onclick="document.getElementById('addCodeModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button>
         </div>
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="add_code">
             <div class="grid grid-cols-2 gap-4">
                 <div>
@@ -322,6 +356,7 @@ include 'includes/header.php';
             <button onclick="document.getElementById('editCodeModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button>
         </div>
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="edit_code">
             <input type="hidden" name="code_id" id="ec_id">
             <div class="grid grid-cols-2 gap-4">

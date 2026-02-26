@@ -32,8 +32,10 @@ $errors  = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_method'])) {
     verify_csrf();
     $methodId = (int) ($_POST['method_id'] ?? 0);
-    $del = $pdo->prepare('DELETE FROM payment_methods WHERE id = :id AND student_id = :sid');
-    $del->execute([':id' => $methodId, ':sid' => $studentId]);
+    $delSql = 'DELETE FROM payment_methods WHERE id = :id AND student_id = :sid';
+    $delParams = [':id' => $methodId, ':sid' => $studentId];
+    $del = $pdo->prepare($delSql);
+    $del->execute($delParams);
     $success = 'Payment method removed.';
 }
 
@@ -41,10 +43,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_method'])) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_default'])) {
     verify_csrf();
     $methodId = (int) ($_POST['method_id'] ?? 0);
-    $pdo->prepare('UPDATE payment_methods SET is_default = 0 WHERE student_id = :sid')
-        ->execute([':sid' => $studentId]);
-    $pdo->prepare('UPDATE payment_methods SET is_default = 1 WHERE id = :id AND student_id = :sid')
-        ->execute([':id' => $methodId, ':sid' => $studentId]);
+    $resetSql = 'UPDATE payment_methods SET is_default = 0 WHERE student_id = :sid';
+    $resetParams = [':sid' => $studentId];
+    $pdo->prepare($resetSql)->execute($resetParams);
+    $setSql = 'UPDATE payment_methods SET is_default = 1 WHERE id = :id AND student_id = :sid';
+    $setParams = [':id' => $methodId, ':sid' => $studentId];
+    $pdo->prepare($setSql)->execute($setParams);
     $success = 'Default payment method updated.';
 }
 
@@ -71,11 +75,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_method'])) {
 }
 
 // ---------- Load existing methods ----------
-$methods = $pdo->prepare(
-    'SELECT id, label, card_brand, last_four, exp_month, exp_year, is_default, created_at
-     FROM payment_methods WHERE student_id = :sid ORDER BY is_default DESC, created_at DESC'
-);
-$methods->execute([':sid' => $studentId]);
+// payment_methods has no school_id column — scoped by student_id only
+$methodsSql = 'SELECT id, label, card_brand, last_four, exp_month, exp_year, is_default, created_at
+     FROM payment_methods WHERE student_id = :sid';
+$methodsParams = [':sid' => $studentId];
+$methodsSql .= ' ORDER BY is_default DESC, created_at DESC';
+$methods = $pdo->prepare($methodsSql);
+$methods->execute($methodsParams);
 $paymentMethods = $methods->fetchAll();
 
 // Gateway info for frontend

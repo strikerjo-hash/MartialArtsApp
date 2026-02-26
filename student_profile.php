@@ -22,8 +22,13 @@ $studentId = $_SESSION['user_id'];
 $linkedParents = get_student_parents($studentId);
 
 // Load current profile.
-$stmt = $pdo->prepare('SELECT * FROM students WHERE id = :id LIMIT 1');
-$stmt->execute([':id' => $studentId]);
+$stmtSql = 'SELECT * FROM students WHERE id = :id';
+if (!is_viewing_all_schools()) { $stmtSql .= ' AND school_id = :school_id'; }
+$stmtSql .= ' LIMIT 1';
+$stmt = $pdo->prepare($stmtSql);
+$stmt->bindValue(':id', $studentId, PDO::PARAM_INT);
+if (!is_viewing_all_schools()) { $stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+$stmt->execute();
 $student = $stmt->fetch();
 
 $success = '';
@@ -45,23 +50,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_profile'])) {
     }
 
     if (empty($errors)) {
-        $upd = $pdo->prepare(
-            'UPDATE students SET first_name = :fn, last_name = :ln, email = :em, phone = :ph WHERE id = :id'
-        );
-        $upd->execute([
-            ':fn' => $first_name,
-            ':ln' => $last_name,
-            ':em' => $email ?: null,
-            ':ph' => $phone ?: null,
-            ':id' => $studentId,
-        ]);
+        $updSql = 'UPDATE students SET first_name = :fn, last_name = :ln, email = :em, phone = :ph WHERE id = :id';
+        if (!is_viewing_all_schools()) { $updSql .= ' AND school_id = :school_id'; }
+        $upd = $pdo->prepare($updSql);
+        $upd->bindValue(':fn', $first_name);
+        $upd->bindValue(':ln', $last_name);
+        $upd->bindValue(':em', $email ?: null);
+        $upd->bindValue(':ph', $phone ?: null);
+        $upd->bindValue(':id', $studentId, PDO::PARAM_INT);
+        if (!is_viewing_all_schools()) { $upd->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+        $upd->execute();
 
         // Refresh session values.
         $_SESSION['first_name'] = $first_name;
         $_SESSION['last_name']  = $last_name;
 
         // Reload student row.
-        $stmt->execute([':id' => $studentId]);
+        $stmt->bindValue(':id', $studentId, PDO::PARAM_INT);
+        if (!is_viewing_all_schools()) { $stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+        $stmt->execute();
         $student = $stmt->fetch();
 
         $success = 'Profile updated successfully.';
@@ -89,13 +96,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['change_password'])) {
 
     if (empty($errors)) {
         $hash = password_hash($newpw, PASSWORD_DEFAULT);
-        $upd  = $pdo->prepare('UPDATE students SET password_hash = :h WHERE id = :id');
-        $upd->execute([':h' => $hash, ':id' => $studentId]);
+        $updPwSql = 'UPDATE students SET password_hash = :h WHERE id = :id';
+        if (!is_viewing_all_schools()) { $updPwSql .= ' AND school_id = :school_id'; }
+        $upd = $pdo->prepare($updPwSql);
+        $upd->bindValue(':h', $hash);
+        $upd->bindValue(':id', $studentId, PDO::PARAM_INT);
+        if (!is_viewing_all_schools()) { $upd->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+        $upd->execute();
 
         $success = 'Password changed successfully.';
 
         // Reload student row.
-        $stmt->execute([':id' => $studentId]);
+        $stmt->bindValue(':id', $studentId, PDO::PARAM_INT);
+        if (!is_viewing_all_schools()) { $stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+        $stmt->execute();
         $student = $stmt->fetch();
     }
 }

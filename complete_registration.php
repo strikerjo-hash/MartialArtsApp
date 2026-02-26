@@ -31,8 +31,13 @@ if (empty($_SESSION['must_change_password']) && empty($_SESSION['registration_in
 }
 
 // Load current profile
-$stmt = $pdo->prepare('SELECT * FROM students WHERE id = :id LIMIT 1');
-$stmt->execute([':id' => $studentId]);
+$query = 'SELECT * FROM students WHERE id = :id';
+if (!is_viewing_all_schools()) { $query .= ' AND school_id = :school_id'; }
+$query .= ' LIMIT 1';
+$stmt = $pdo->prepare($query);
+$stmt->bindValue(':id', $studentId, PDO::PARAM_INT);
+if (!is_viewing_all_schools()) { $stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+$stmt->execute();
 $student = $stmt->fetch();
 
 if (!$student) {
@@ -82,8 +87,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = $pwErr;
             } elseif ($new_password !== $confirm_password) {
                 $errors[] = 'Passwords do not match.';
-            } elseif ($new_password === 'Procomp123') {
-                $errors[] = 'You cannot reuse the default password. Please choose a new one.';
+            } elseif (strlen($new_password) < 8 || !preg_match('/[A-Z]/', $new_password) || !preg_match('/[0-9]/', $new_password)) {
+                // Password strength is already validated above, but reject weak defaults
+                $errors[] = 'Please choose a stronger password.';
             }
         }
     }
@@ -97,8 +103,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // Check email uniqueness (excluding current student)
     if ($email !== '' && empty($errors)) {
-        $emailCheck = $pdo->prepare('SELECT id FROM students WHERE email = ? AND id != ? LIMIT 1');
-        $emailCheck->execute([$email, $studentId]);
+        $emailCheck = $pdo->prepare('SELECT id FROM students WHERE email = ? AND id != ?' . school_where() . ' LIMIT 1');
+        $params = [$email, $studentId];
+        school_param($params);
+        $emailCheck->execute($params);
         if ($emailCheck->fetch()) {
             $errors[] = 'That email address is already in use by another account.';
         }
@@ -169,7 +177,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $updateFields[] = 'registration_incomplete = 0';
 
         $updateParams[] = $studentId;
-        $sql = "UPDATE students SET " . implode(', ', $updateFields) . " WHERE id = ?";
+        $sql = "UPDATE students SET " . implode(', ', $updateFields) . " WHERE id = ?" . school_where();
+        school_param($updateParams);
         $pdo->prepare($sql)->execute($updateParams);
 
         // Clear session flags

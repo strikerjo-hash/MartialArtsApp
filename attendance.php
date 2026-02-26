@@ -8,40 +8,46 @@ $selected_class = $_GET['class_id'] ?? '';
 
 // Handle attendance submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['attendance'])) {
+    verify_csrf();
+
+    // Prepare statements once outside the loop (avoids N+1)
+    $checkStmt = $pdo->prepare("
+        SELECT id FROM attendance
+        WHERE student_id = ? AND class_id = ? AND attendance_date = ?" . school_where() . "
+    ");
+    $updateStmt = $pdo->prepare("
+        UPDATE attendance
+        SET status = ?, check_in_time = ?
+        WHERE student_id = ? AND class_id = ? AND attendance_date = ?" . school_where() . "
+    ");
+    $insertStmt = $pdo->prepare("
+        INSERT INTO attendance (school_id, student_id, class_id, attendance_date, status, check_in_time)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ");
+
     foreach ($_POST['attendance'] as $student_id => $status) {
+        $student_id = (int) $student_id;
+        $checkInTime = $_POST['check_in_time'][$student_id] ?? null;
+
         // Check if attendance record exists
-        $check = $pdo->prepare("
-            SELECT id FROM attendance 
-            WHERE student_id = ? AND class_id = ? AND attendance_date = ?
-        ");
-        $check->execute([$student_id, $_POST['class_id'], $_POST['date']]);
-        
-        if ($check->fetch()) {
+        $checkParams = [$student_id, $_POST['class_id'], $_POST['date']];
+        school_param($checkParams);
+        $checkStmt->execute($checkParams);
+
+        if ($checkStmt->fetch()) {
             // Update existing
-            $stmt = $pdo->prepare("
-                UPDATE attendance 
-                SET status = ?, check_in_time = ?
-                WHERE student_id = ? AND class_id = ? AND attendance_date = ?
-            ");
-            $stmt->execute([
-                $status,
-                $_POST['check_in_time'][$student_id] ?? null,
-                $student_id,
-                $_POST['class_id'],
-                $_POST['date']
-            ]);
+            $updateParams = [$status, $checkInTime, $student_id, $_POST['class_id'], $_POST['date']];
+            school_param($updateParams);
+            $updateStmt->execute($updateParams);
         } else {
             // Insert new
-            $stmt = $pdo->prepare("
-                INSERT INTO attendance (student_id, class_id, attendance_date, status, check_in_time)
-                VALUES (?, ?, ?, ?, ?)
-            ");
-            $stmt->execute([
+            $insertStmt->execute([
+                current_school_id(),
                 $student_id,
                 $_POST['class_id'],
                 $_POST['date'],
                 $status,
-                $_POST['check_in_time'][$student_id] ?? null
+                $checkInTime
             ]);
         }
     }
@@ -50,20 +56,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['attendance'])) {
 
 // Get classes for the selected date
 $day_of_week = date('l', strtotime($selected_date));
+$params = [$day_of_week];
 $classes_on_day = $pdo->prepare("
     SELECT c.*, mas.name as style_name, u.full_name as instructor_name
     FROM classes c
     LEFT JOIN martial_arts_styles mas ON c.style_id = mas.id
     LEFT JOIN users u ON c.instructor_id = u.id
-    WHERE c.day_of_week = ? AND c.status = 'active'
+    WHERE c.day_of_week = ? AND c.status = 'active'" . school_where('c') . "
     ORDER BY c.start_time
 ");
-$classes_on_day->execute([$day_of_week]);
+school_param($params);
+$classes_on_day->execute($params);
 $classes_on_day = $classes_on_day->fetchAll();
 
 // Get enrolled students for selected class with membership & payment status
 $enrolled_students = [];
 if ($selected_class) {
+    $params = [$selected_date, $selected_class];
     $enrolled_students = $pdo->prepare("
         SELECT s.*,
                COALESCE(a.status, 'absent') as attendance_status,
@@ -87,10 +96,11 @@ if ($selected_class) {
                 ORDER BY m2.end_date DESC LIMIT 1
             )
         LEFT JOIN membership_plans mp ON m.plan_id = mp.id
-        WHERE ce.class_id = ? AND ce.status = 'active'
+        WHERE ce.class_id = ? AND ce.status = 'active'" . school_where('ce') . "
         ORDER BY s.first_name, s.last_name
     ");
-    $enrolled_students->execute([$selected_date, $selected_class]);
+    school_param($params);
+    $enrolled_students->execute($params);
     $enrolled_students = $enrolled_students->fetchAll();
 }
 
@@ -149,6 +159,7 @@ include 'includes/header.php';
             </div>
             
             <form method="POST" class="p-6">
+                <?= csrf_field() ?>
                 <input type="hidden" name="date" value="<?php echo $selected_date; ?>">
                 <input type="hidden" name="class_id" value="<?php echo $selected_class; ?>">
                 

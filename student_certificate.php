@@ -32,8 +32,11 @@ if (isset($_SESSION['user_id']) && !empty($_SESSION['user_id']) && isset($_GET['
 }
 
 // Fetch student profile
-$stmt = $pdo->prepare('SELECT * FROM students WHERE id = :id LIMIT 1');
-$stmt->execute([':id' => $studentId]);
+$params = [$studentId];
+$sql = 'SELECT * FROM students WHERE id = ?' . school_where() . ' LIMIT 1';
+school_param($params);
+$stmt = $pdo->prepare($sql);
+$stmt->execute($params);
 $student = $stmt->fetch();
 
 if (!$student) {
@@ -48,18 +51,19 @@ $siteName = getSiteName();
 // Get all belt achievements ordered by rank (highest first)
 $beltAchievements = [];
 try {
-    $beltStmt = $pdo->prepare(
-        "SELECT b.name as belt_name, b.color, b.rank_order, mas.name as style_name,
+    $params = [$studentId];
+    $sql = "SELECT b.name as belt_name, b.color, b.rank_order, mas.name as style_name,
                 sb.awarded_date, sb.black_belt_number, sb.notes,
                 u.full_name as instructor_name
          FROM student_belts sb
          JOIN belts b ON b.id = sb.belt_id
          JOIN martial_arts_styles mas ON mas.id = sb.style_id
          LEFT JOIN users u ON sb.instructor_id = u.id
-         WHERE sb.student_id = :sid
-         ORDER BY b.rank_order DESC, sb.awarded_date DESC"
-    );
-    $beltStmt->execute([':sid' => $studentId]);
+         WHERE sb.student_id = ?" . school_where('sb') . "
+         ORDER BY b.rank_order DESC, sb.awarded_date DESC";
+    school_param($params);
+    $beltStmt = $pdo->prepare($sql);
+    $beltStmt->execute($params);
     $beltAchievements = $beltStmt->fetchAll();
 } catch (\PDOException $e) {}
 

@@ -13,49 +13,7 @@
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/security.php';
 
-// ─── Idempotent migrations for payment lockout ──────────────────────
-try {
-    $pdo = get_db();
-    // Add 'declined' to memberships.payment_status ENUM
-    $pdo->exec("ALTER TABLE memberships MODIFY COLUMN payment_status ENUM('paid','pending','partial','declined') DEFAULT 'pending'");
-} catch (\PDOException $e) {}
-try {
-    $pdo = get_db();
-    $cols = $pdo->query("SHOW COLUMNS FROM students")->fetchAll();
-    $colNames = array_column($cols, 'Field');
-    if (!in_array('payment_lockout_override', $colNames, true)) {
-        $pdo->exec("ALTER TABLE students ADD COLUMN payment_lockout_override TINYINT(1) DEFAULT 0");
-    }
-    if (!in_array('lockout_override_at', $colNames, true)) {
-        $pdo->exec("ALTER TABLE students ADD COLUMN lockout_override_at DATETIME DEFAULT NULL");
-    }
-    if (!in_array('lockout_override_by', $colNames, true)) {
-        $pdo->exec("ALTER TABLE students ADD COLUMN lockout_override_by INT DEFAULT NULL");
-    }
-} catch (\PDOException $e) {}
-
-// ─── Idempotent migrations for import: forced password change & registration ──
-try {
-    $pdo = get_db();
-    $cols = $pdo->query("SHOW COLUMNS FROM students")->fetchAll();
-    $colNames = array_column($cols, 'Field');
-    if (!in_array('must_change_password', $colNames, true)) {
-        $pdo->exec("ALTER TABLE students ADD COLUMN must_change_password TINYINT(1) NOT NULL DEFAULT 0");
-    }
-    if (!in_array('registration_incomplete', $colNames, true)) {
-        $pdo->exec("ALTER TABLE students ADD COLUMN registration_incomplete TINYINT(1) NOT NULL DEFAULT 0");
-    }
-} catch (\PDOException $e) {}
-
-// ─── Idempotent migration for calendar-only events ───────────────────
-try {
-    $pdo = get_db();
-    $cols = $pdo->query("SHOW COLUMNS FROM events")->fetchAll();
-    $colNames = array_column($cols, 'Field');
-    if (!in_array('requires_registration', $colNames, true)) {
-        $pdo->exec("ALTER TABLE events ADD COLUMN requires_registration TINYINT(1) NOT NULL DEFAULT 1");
-    }
-} catch (\PDOException $e) {}
+// Migrations have been moved to migrate.php — run it once after deployment.
 
 /**
  * Start or resume a session with hardened cookie settings.
@@ -66,6 +24,7 @@ function auth_start_session(): void
         session_set_cookie_params([
             'lifetime' => SESSION_LIFETIME,
             'path'     => '/',
+            'secure'   => isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
             'httponly'  => true,
             'samesite' => 'Strict',
         ]);
@@ -93,23 +52,9 @@ function authenticate_student(string $username, string $password, string $ip = '
 
     $pdo = get_db();
 
-    // Detect which columns exist in the students table.
-    $cols = $pdo->query("SHOW COLUMNS FROM students")->fetchAll();
-    $colNames = array_column($cols, 'Field');
-    $hasUsername = in_array('username', $colNames, true);
-    $hasEmail    = in_array('email', $colNames, true);
-
-    // Build query based on available columns.
-    if ($hasUsername && $hasEmail) {
-        $stmt = $pdo->prepare('SELECT * FROM students WHERE (email = :u1 OR username = :u2) LIMIT 1');
-        $stmt->execute([':u1' => $username, ':u2' => $username]);
-    } elseif ($hasUsername) {
-        $stmt = $pdo->prepare('SELECT * FROM students WHERE username = :u LIMIT 1');
-        $stmt->execute([':u' => $username]);
-    } else {
-        $stmt = $pdo->prepare('SELECT * FROM students WHERE email = :u LIMIT 1');
-        $stmt->execute([':u' => $username]);
-    }
+    // Query by both email and username (schema has both columns after migrations).
+    $stmt = $pdo->prepare('SELECT * FROM students WHERE (email = :u1 OR username = :u2) LIMIT 1');
+    $stmt->execute([':u1' => $username, ':u2' => $username]);
 
     $student = $stmt->fetch();
 
@@ -158,6 +103,7 @@ function login_student(array $student): void
     $_SESSION['first_name'] = $student['first_name'];
     $_SESSION['last_name']  = $student['last_name'];
     $_SESSION['belt_rank']  = $student['belt_rank'] ?? '';
+    $_SESSION['school_id']  = $student['school_id'] ?? 1;
 
     // Set parent capability flag if student has been promoted
     $_SESSION['is_parent']  = !empty($student['is_parent']) && (int)$student['is_parent'] === 1;
@@ -168,6 +114,15 @@ function login_student(array $student): void
 
     // Cache payment lockout status immediately on login
     refresh_payment_lockout_status();
+
+    // Audit log: student login
+    if (function_exists('audit_log')) {
+        audit_log('login', [
+            'description' => 'Student login: ' . trim($student['first_name'] . ' ' . $student['last_name']),
+            'entity_type' => 'student',
+            'entity_id'   => $student['id'],
+        ]);
+    }
 }
 
 /**
@@ -410,6 +365,21 @@ function login_admin(array $admin): void
     $_SESSION['username']  = $admin['username'];
     $_SESSION['full_name'] = $admin['full_name'] ?? ($admin['username'] ?? 'Admin');
     $_SESSION['role']      = $admin['role'] ?? 'admin';
+    $_SESSION['school_id'] = $admin['school_id'] ?? 1;
+
+    // Super admins start switched into their home school
+    if (($admin['role'] ?? 'admin') === 'super_admin') {
+        $_SESSION['active_school_id'] = $admin['school_id'] ?? 1;
+    }
+
+    // Audit log: admin login
+    if (function_exists('audit_log')) {
+        audit_log('login', [
+            'description' => 'Admin login: ' . ($admin['full_name'] ?? $admin['username']) . ' (role: ' . ($admin['role'] ?? 'admin') . ')',
+            'entity_type' => 'user',
+            'entity_id'   => $admin['id'],
+        ]);
+    }
 }
 
 function require_admin(): void
@@ -427,6 +397,16 @@ function require_admin(): void
 function logout(): void
 {
     auth_start_session();
+
+    // Audit log: capture user info BEFORE clearing session
+    if (function_exists('audit_log')) {
+        $userType = $_SESSION['user_type'] ?? 'unknown';
+        $username = $_SESSION['username'] ?? ($_SESSION['first_name'] ?? 'unknown');
+        audit_log('logout', [
+            'description' => ucfirst($userType) . ' logout: ' . $username,
+        ]);
+    }
+
     $_SESSION = [];
     if (ini_get('session.use_cookies')) {
         $p = session_get_cookie_params();

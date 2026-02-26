@@ -40,6 +40,7 @@ if (empty($childIds)) {
 $placeholdersReg = implode(',', array_fill(0, count($registrationIds), '?'));
 $placeholdersCh  = implode(',', array_fill(0, count($childIds), '?'));
 
+$regParams = array_merge($registrationIds, $childIds);
 $regStmt = $pdo->prepare("
     SELECT er.*, e.name AS event_name, e.registration_fee AS fee, e.event_type, e.event_date, e.id AS eid,
            s.first_name, s.last_name
@@ -48,9 +49,10 @@ $regStmt = $pdo->prepare("
     JOIN students s ON s.id = er.student_id
     WHERE er.id IN ({$placeholdersReg})
       AND er.student_id IN ({$placeholdersCh})
-      AND er.payment_status = 'pending'
+      AND er.payment_status = 'pending'" . school_where('er') . "
 ");
-$regStmt->execute(array_merge($registrationIds, $childIds));
+school_param($regParams);
+$regStmt->execute($regParams);
 $registrations = $regStmt->fetchAll();
 
 if (empty($registrations)) {
@@ -129,9 +131,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
             $amountCharged = $chargeResult['amount_charged'] ?? $totalWithFees;
 
             // Mark all registrations as paid
-            $updateStmt = $pdo->prepare("UPDATE event_registrations SET payment_status = 'paid' WHERE id = ?");
+            $updateStmt = $pdo->prepare("UPDATE event_registrations SET payment_status = 'paid' WHERE id = ?" . school_where());
             foreach ($registrations as $reg) {
-                $updateStmt->execute([$reg['id']]);
+                $updateParams = [$reg['id']];
+                school_param($updateParams);
+                $updateStmt->execute($updateParams);
             }
 
             // Build payment notes
@@ -157,10 +161,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
                     if ($chargeResult['transaction_id']) $childNotes .= ' | Txn: ' . $chargeResult['transaction_id'];
 
                     $pdo->prepare("
-                        INSERT INTO payments (student_id, payment_type, reference_id, amount,
+                        INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount,
                                             payment_method, payment_date, receipt_number, notes)
-                        VALUES (?, 'event', ?, ?, 'credit_card', CURDATE(), ?, ?)
+                        VALUES (?, ?, 'event', ?, ?, 'credit_card', CURDATE(), ?, ?)
                     ")->execute([
+                        current_school_id(),
                         $reg['student_id'],
                         $reg['eid'],
                         $perChildAmount,
@@ -173,10 +178,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
             // Record credit portion
             if ($creditUsed > 0) {
                 $pdo->prepare("
-                    INSERT INTO payments (student_id, payment_type, reference_id, amount,
+                    INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount,
                                         payment_method, payment_date, receipt_number, notes)
-                    VALUES (?, 'event', ?, ?, 'account_credit', CURDATE(), ?, ?)
+                    VALUES (?, ?, 'event', ?, ?, 'account_credit', CURDATE(), ?, ?)
                 ")->execute([
+                    current_school_id(),
                     $parentId,
                     $firstEventId,
                     $creditUsed,

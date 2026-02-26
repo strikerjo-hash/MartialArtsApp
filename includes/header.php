@@ -8,6 +8,9 @@ $siteName = getSiteName();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="<?php echo $theme['primary']; ?>">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title><?php echo htmlspecialchars($siteName); ?></title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -63,8 +66,15 @@ $siteName = getSiteName();
 </head>
 <body class="bg-gray-50">
     <div class="flex h-screen overflow-hidden">
+        <!-- Mobile sidebar overlay -->
+        <div id="sidebarOverlay" class="fixed inset-0 bg-black/50 z-40 hidden md:hidden" onclick="closeSidebar()"></div>
+
         <!-- Sidebar -->
-        <aside class="w-64 shadow-lg hidden md:flex sidebar-custom h-full flex-col overflow-hidden">
+        <aside id="mobileSidebar" class="w-64 shadow-lg sidebar-custom h-full flex-col overflow-hidden
+            fixed md:relative inset-y-0 left-0 z-50
+            transform -translate-x-full md:translate-x-0
+            transition-transform duration-300 ease-in-out
+            md:flex" role="navigation" aria-label="Main navigation">
             <!-- Sidebar Header (fixed) -->
             <div class="p-6 border-b border-white/10 flex-shrink-0">
                 <?php if ($logoPath): ?>
@@ -151,9 +161,14 @@ $siteName = getSiteName();
                     <span>Payments</span>
                 </a>
                 <?php
-                // Count pending event payments for the badge
+                // Count pending event payments for the badge (school-scoped)
                 try {
-                    $_pendingPayCount = (int)$pdo->query("SELECT COUNT(*) FROM event_registrations WHERE payment_status = 'pending'")->fetchColumn();
+                    $_ppParams = [];
+                    $_ppSql = "SELECT COUNT(*) FROM event_registrations WHERE payment_status = 'pending'" . school_where();
+                    school_param($_ppParams);
+                    $_ppStmt = $pdo->prepare($_ppSql);
+                    $_ppStmt->execute($_ppParams);
+                    $_pendingPayCount = (int)$_ppStmt->fetchColumn();
                 } catch (\PDOException $e) { $_pendingPayCount = 0; }
                 ?>
                 <a href="pending_payments.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'pending_payments.php' ? 'active-nav' : ''; ?>">
@@ -193,7 +208,14 @@ $siteName = getSiteName();
 
                 <div class="border-t divider my-4"></div>
 
-                <?php if (getCurrentUser()['role'] === 'admin'): ?>
+                <?php if (is_super_admin()): ?>
+                <a href="schools.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'schools.php' ? 'active-nav' : ''; ?>">
+                    <span class="mr-3">🏫</span>
+                    <span>Manage Schools</span>
+                </a>
+                <?php endif; ?>
+
+                <?php if (in_array(getCurrentUser()['role'], ['admin', 'super_admin'])): ?>
                 <a href="users.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'users.php' ? 'active-nav' : ''; ?>">
                     <span class="mr-3">👤</span>
                     <span>User Management</span>
@@ -211,13 +233,16 @@ $siteName = getSiteName();
                 <?php endif; ?>
 
                 <?php
-                // Check for pending registrations (admin and staff only)
-                if (in_array(getCurrentUser()['role'], ['admin', 'staff'])):
-                    $pending_count = $pdo->query("
-                        SELECT COUNT(*) as count FROM students s
+                // Check for pending registrations (admin, super_admin, and staff only)
+                if (in_array(getCurrentUser()['role'], ['admin', 'super_admin', 'staff'])):
+                    $_prParams = [];
+                    $_prSql = "SELECT COUNT(*) as count FROM students s
                         JOIN memberships m ON s.id = m.student_id
-                        WHERE s.status = 'inactive' AND m.status = 'cancelled' AND m.payment_status = 'pending'
-                    ")->fetch()['count'];
+                        WHERE s.status = 'inactive' AND m.status = 'cancelled' AND m.payment_status = 'pending'" . school_where('s');
+                    school_param($_prParams);
+                    $_prStmt = $pdo->prepare($_prSql);
+                    $_prStmt->execute($_prParams);
+                    $pending_count = $_prStmt->fetch()['count'];
                 ?>
                 <a href="pending_registrations.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'pending_registrations.php' ? 'active-nav' : ''; ?>">
                     <span class="mr-3">⏳</span>
@@ -237,10 +262,17 @@ $siteName = getSiteName();
                 </a>
                 <?php endif; ?>
 
-                <?php if (getCurrentUser()['role'] === 'admin'): ?>
+                <?php if (in_array(getCurrentUser()['role'], ['admin', 'super_admin'])): ?>
                 <a href="import_data.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo in_array(basename($_SERVER['PHP_SELF']), ['import_data.php', 'import_payments.php', 'export_data.php']) ? 'active-nav' : ''; ?>">
                     <span class="mr-3">🔄</span>
                     <span>Import / Export</span>
+                </a>
+                <?php endif; ?>
+
+                <?php if (is_super_admin()): ?>
+                <a href="audit_log.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'audit_log.php' ? 'active-nav' : ''; ?>">
+                    <span class="mr-3">📋</span>
+                    <span>Audit Log</span>
                 </a>
                 <?php endif; ?>
             </nav>
@@ -248,6 +280,10 @@ $siteName = getSiteName();
 
             <!-- Sidebar Footer — always visible, pinned to bottom -->
             <div class="flex-shrink-0 border-t border-white/10 p-4">
+                <a href="admin_training.php" class="flex items-center px-4 py-3 mb-2 rounded-lg hover:!bg-blue-500/20 <?php echo basename($_SERVER['PHP_SELF']) == 'admin_training.php' ? 'active-nav' : ''; ?>" style="color: #93C5FD;">
+                    <span class="mr-3">📖</span>
+                    <span>Training Guide</span>
+                </a>
                 <a href="student_portal.php" class="flex items-center px-4 py-3 mb-2 rounded-lg hover:!bg-blue-500/20" target="_blank" style="color: #93C5FD;">
                     <span class="mr-3">🎓</span>
                     <span>Student Portal</span>
@@ -266,7 +302,7 @@ $siteName = getSiteName();
             <header class="bg-white shadow-sm topbar-accent">
                 <div class="flex items-center justify-between px-6 py-4">
                     <div class="flex items-center">
-                        <button class="md:hidden mr-4" onclick="toggleSidebar()">
+                        <button class="md:hidden mr-4" onclick="toggleSidebar()" aria-label="Toggle menu" aria-expanded="false" id="sidebarToggle">
                             <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
                             </svg>
@@ -278,12 +314,57 @@ $siteName = getSiteName();
                         <span class="text-sm text-gray-600">
                             <?php echo date('l, F j, Y'); ?>
                         </span>
+
+                        <?php if (is_super_admin()): ?>
+                        <!-- School Switcher (Super Admin) -->
+                        <div class="relative" id="schoolSwitcher">
+                            <button onclick="document.getElementById('schoolDropdown').classList.toggle('hidden')"
+                                    class="flex items-center px-3 py-1.5 bg-yellow-100 text-yellow-800 rounded-lg text-sm font-medium hover:bg-yellow-200 border border-yellow-300">
+                                <span class="mr-1.5">🏫</span>
+                                <?php
+                                if (is_viewing_all_schools()) {
+                                    echo 'All Schools';
+                                } else {
+                                    $currentSchool = get_current_school();
+                                    echo htmlspecialchars($currentSchool['name']);
+                                }
+                                ?>
+                                <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                                </svg>
+                            </button>
+                            <div id="schoolDropdown" class="hidden absolute right-0 mt-2 w-64 bg-white rounded-lg shadow-lg border z-50">
+                                <a href="?switch_school=0" class="block px-4 py-2 text-sm hover:bg-gray-100 <?php echo is_viewing_all_schools() ? 'bg-blue-50 font-bold text-blue-700' : 'text-gray-700'; ?>">
+                                    🌐 All Schools
+                                </a>
+                                <div class="border-t"></div>
+                                <?php foreach (get_all_schools() as $_school): ?>
+                                    <a href="?switch_school=<?php echo $_school['id']; ?>"
+                                       class="block px-4 py-2 text-sm hover:bg-gray-100 <?php echo (!is_viewing_all_schools() && current_school_id() === (int)$_school['id']) ? 'bg-blue-50 font-bold text-blue-700' : 'text-gray-700'; ?>">
+                                        🏫 <?php echo htmlspecialchars($_school['name']); ?>
+                                        <?php if ($_school['status'] !== 'active'): ?>
+                                            <span class="text-xs text-gray-400">(inactive)</span>
+                                        <?php endif; ?>
+                                    </a>
+                                <?php endforeach; ?>
+                            </div>
+                        </div>
+                        <script>
+                        // Close school dropdown when clicking outside
+                        document.addEventListener('click', function(e) {
+                            var dd = document.getElementById('schoolDropdown');
+                            var sw = document.getElementById('schoolSwitcher');
+                            if (dd && sw && !sw.contains(e.target)) dd.classList.add('hidden');
+                        });
+                        </script>
+                        <?php endif; ?>
+
                         <div class="flex items-center space-x-2">
                             <div class="w-8 h-8 rounded-full flex items-center justify-center text-white font-bold user-avatar">
-                                <?php echo strtoupper(substr(getCurrentUser()['username'], 0, 1)); ?>
+                                <?php echo htmlspecialchars(strtoupper(substr(getCurrentUser()['username'], 0, 1))); ?>
                             </div>
                             <span class="text-sm font-medium text-gray-700">
-                                <?php echo getCurrentUser()['full_name']; ?>
+                                <?php echo htmlspecialchars(getCurrentUser()['full_name']); ?>
                             </span>
                         </div>
                     </div>

@@ -2,37 +2,45 @@
 require_once 'config.php';
 requireLogin();
 
-// Only admins can manage users
-if (getCurrentUser()['role'] !== 'admin') {
-    header('Location: index.php');
-    exit;
+// Only admins and super_admins can manage users
+if (!in_array(getCurrentUser()['role'], ['admin', 'super_admin'])) {
+    accessDenied('User management requires Admin or Super Admin privileges.');
 }
 
 $message = '';
 
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    verify_csrf();
     if (isset($_POST['action'])) {
         switch ($_POST['action']) {
             case 'add':
-                // Check if username already exists
-                $check = $pdo->prepare("SELECT id FROM users WHERE username = ?");
-                $check->execute([sanitizeInput($_POST['username'])]);
-                
+                // Check if username already exists at this school
+                $params = [sanitizeInput($_POST['username'])];
+                $check = $pdo->prepare("SELECT id FROM users WHERE username = ?" . school_where());
+                school_param($params);
+                $check->execute($params);
+
                 if ($check->fetch()) {
                     $message = showAlert('Username already exists!', 'error');
                 } else {
                     $password_hash = password_hash($_POST['password'], PASSWORD_DEFAULT);
+                    // Only super admins can create other super admins
+                    $role = $_POST['role'];
+                    if ($role === 'super_admin' && !is_super_admin()) {
+                        $role = 'admin';
+                    }
                     $stmt = $pdo->prepare("
-                        INSERT INTO users (username, password, email, full_name, role)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO users (school_id, username, password, email, full_name, role)
+                        VALUES (?, ?, ?, ?, ?, ?)
                     ");
                     $stmt->execute([
+                        current_school_id(),
                         sanitizeInput($_POST['username']),
                         $password_hash,
                         sanitizeInput($_POST['email']),
                         sanitizeInput($_POST['full_name']),
-                        $_POST['role']
+                        $role
                     ]);
                     $message = showAlert('User added successfully!', 'success');
                 }
@@ -43,24 +51,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($_POST['user_id'] == $_SESSION['user_id']) {
                     $message = showAlert('You cannot delete your own account!', 'error');
                 } else {
-                    $stmt = $pdo->prepare("DELETE FROM users WHERE id = ?");
-                    $stmt->execute([$_POST['user_id']]);
+                    $params = [$_POST['user_id']];
+                    $stmt = $pdo->prepare("DELETE FROM users WHERE id = ?" . school_where());
+                    school_param($params);
+                    $stmt->execute($params);
                     $message = showAlert('User deleted successfully!', 'success');
                 }
                 break;
                 
             case 'reset_password':
                 $new_password = password_hash($_POST['new_password'], PASSWORD_DEFAULT);
-                $stmt = $pdo->prepare("UPDATE users SET password = ? WHERE id = ?");
-                $stmt->execute([$new_password, $_POST['user_id']]);
+                $params = [$new_password, $_POST['user_id']];
+                $stmt = $pdo->prepare("UPDATE users SET password = ? WHERE id = ?" . school_where());
+                school_param($params);
+                $stmt->execute($params);
                 $message = showAlert('Password reset successfully!', 'success');
                 break;
         }
     }
 }
 
-// Get all users
-$users = $pdo->query("SELECT * FROM users ORDER BY created_at DESC")->fetchAll();
+// Get all users (exclude password hash from results for security)
+$params = [];
+$stmt = $pdo->prepare("SELECT id, username, full_name, email, role, school_id, created_at FROM users WHERE 1=1" . school_where() . " ORDER BY created_at DESC LIMIT 500");
+school_param($params);
+$stmt->execute($params);
+$users = $stmt->fetchAll();
 
 include 'includes/header.php';
 ?>
@@ -104,6 +120,7 @@ include 'includes/header.php';
                         <td class="px-6 py-4 whitespace-nowrap">
                             <?php
                             $roleColors = [
+                                'super_admin' => 'bg-yellow-100 text-yellow-800',
                                 'admin' => 'bg-red-100 text-red-800',
                                 'instructor' => 'bg-blue-100 text-blue-800',
                                 'staff' => 'bg-green-100 text-green-800'
@@ -123,6 +140,7 @@ include 'includes/header.php';
                             </button>
                             <?php if ($user['id'] != $_SESSION['user_id']): ?>
                                 <form method="POST" class="inline" onsubmit="return confirmDelete('Delete this user?')">
+                                    <?= csrf_field() ?>
                                     <input type="hidden" name="action" value="delete">
                                     <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
                                     <button type="submit" class="text-red-600 hover:text-red-900">Delete</button>
@@ -148,8 +166,9 @@ include 'includes/header.php';
         </div>
         
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="add">
-            
+
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Username *</label>
                 <input type="text" name="username" required
@@ -182,9 +201,13 @@ include 'includes/header.php';
                     <option value="staff">Staff</option>
                     <option value="instructor">Instructor</option>
                     <option value="admin">Admin</option>
+                    <?php if (is_super_admin()): ?>
+                        <option value="super_admin">Super Admin</option>
+                    <?php endif; ?>
                 </select>
                 <p class="text-xs text-gray-500 mt-1">
-                    Staff: Basic access • Instructor: Can teach classes • Admin: Full access
+                    Staff: Basic access &bull; Instructor: Can teach classes &bull; Admin: Full access
+                    <?php if (is_super_admin()): ?>&bull; Super Admin: All schools<?php endif; ?>
                 </p>
             </div>
             
@@ -212,6 +235,7 @@ include 'includes/header.php';
         </div>
         
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="reset_password">
             <input type="hidden" name="user_id" id="reset_user_id">
             

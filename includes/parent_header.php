@@ -145,6 +145,9 @@ $_isChildPage = in_array(basename($_SERVER['PHP_SELF']), [
                 <a href="parent_profile.php" class="nav-link <?php echo basename($_SERVER['PHP_SELF']) == 'parent_profile.php' ? 'nav-link-active' : ''; ?>">
                     Profile
                 </a>
+                <a href="parent_training_wizard.php" class="nav-link <?php echo basename($_SERVER['PHP_SELF']) == 'parent_training_wizard.php' ? 'nav-link-active' : ''; ?>" title="Portal Guide">
+                    Guide
+                </a>
             </nav>
 
             <a href="parent_logout.php" class="text-white px-4 py-2 rounded-lg text-sm transition-colors" style="background-color: <?php echo $theme['primary']; ?>;" onmouseover="this.style.backgroundColor='<?php echo $primaryHover; ?>'" onmouseout="this.style.backgroundColor='<?php echo $theme['primary']; ?>'">

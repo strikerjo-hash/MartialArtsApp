@@ -199,6 +199,19 @@ ALTER TABLE membership_plans ADD COLUMN IF NOT EXISTS program_end_date DATE DEFA
 ALTER TABLE students ADD COLUMN IF NOT EXISTS must_change_password TINYINT(1) NOT NULL DEFAULT 0;
 ALTER TABLE students ADD COLUMN IF NOT EXISTS registration_incomplete TINYINT(1) NOT NULL DEFAULT 0;
 
+-- 14. Activity status tracking: separate from account status so students
+--     who stop attending but keep paying auto-renewals can be flagged.
+--     activity_status tracks class attendance activity (active/inactive).
+--     inactive_since records when the student was marked inactive.
+ALTER TABLE students ADD COLUMN IF NOT EXISTS activity_status ENUM('active','inactive') NOT NULL DEFAULT 'active' AFTER status;
+ALTER TABLE students ADD COLUMN IF NOT EXISTS inactive_since DATE DEFAULT NULL AFTER activity_status;
+
+-- 15. Allow unassigned belt resources for bulk upload staging.
+--     Making belt_id and style_id nullable lets admins upload documents
+--     first and assign them to specific belts later.
+ALTER TABLE belt_resources MODIFY COLUMN belt_id INT DEFAULT NULL;
+ALTER TABLE belt_resources MODIFY COLUMN style_id INT DEFAULT NULL;
+
 -- ============================================================
 -- Done! Your database now supports:
 --   - Student login with username & password
@@ -211,4 +224,6 @@ ALTER TABLE students ADD COLUMN IF NOT EXISTS registration_incomplete TINYINT(1)
 --   - Tax statement generation
 --   - Afterschool program plans with proration
 --   - Imported student forced password change & registration completion
+--   - Activity status tracking (inactive but still paying)
+--   - Bulk document upload with unassigned resource staging
 -- ============================================================

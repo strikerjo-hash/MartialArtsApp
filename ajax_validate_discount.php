@@ -37,6 +37,15 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
+// CSRF check — accepts token from POST body or X-CSRF-TOKEN header
+$csrfToken = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? $_POST['csrf_token'] ?? '';
+$expected = $_SESSION['csrf_token'] ?? '';
+if (!hash_equals($expected, $csrfToken)) {
+    http_response_code(403);
+    echo json_encode(['valid' => false, 'error' => 'Invalid CSRF token']);
+    exit;
+}
+
 $code           = trim($_POST['code'] ?? '');
 $planId         = !empty($_POST['plan_id']) ? (int) $_POST['plan_id'] : null;
 $eventId        = !empty($_POST['event_id']) ? (int) $_POST['event_id'] : null;

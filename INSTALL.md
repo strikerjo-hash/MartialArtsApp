@@ -83,6 +83,38 @@ Events (belt tests, tournaments, seminars) work independently from memberships:
    - PHP 7.4+ required
    - Enable PDO and PDO_MySQL extensions
 
+## 📊 Report Export Dependencies (Optional)
+
+To enable PDF and Excel report export, install the required libraries:
+
+### DomPDF (for PDF export)
+
+```bash
+cd libs
+curl -L -o dompdf.zip https://github.com/dompdf/dompdf/archive/refs/tags/v2.0.8.zip
+unzip dompdf.zip && mv dompdf-2.0.8 dompdf && rm dompdf.zip
+
+curl -L -o fontlib.zip https://github.com/dompdf/php-font-lib/archive/refs/tags/0.5.6.zip
+unzip fontlib.zip && mv php-font-lib-0.5.6 php-font-lib && rm fontlib.zip
+
+curl -L -o svglib.zip https://github.com/dompdf/php-svg-lib/archive/refs/tags/0.5.4.zip
+unzip svglib.zip && mv php-svg-lib-0.5.4 php-svg-lib && rm svglib.zip
+
+curl -L -o html5.zip https://github.com/Masterminds/html5-php/archive/refs/tags/2.9.0.zip
+unzip html5.zip && mv html5-php-2.9.0 html5-php && rm html5.zip
+cd ..
+```
+
+### PhpSpreadsheet (for Excel export)
+
+Requires [Composer](https://getcomposer.org/download/). Run from the project root:
+
+```bash
+composer install
+```
+
+> Both libraries are optional. Reports work normally without them; only the PDF/Excel download buttons require them.
+
 ## 🚀 What to Build Next
 
 - Create your martial art styles and belt systems

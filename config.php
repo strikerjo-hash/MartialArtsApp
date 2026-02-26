@@ -6,11 +6,22 @@
  * used by all admin-facing pages (students, classes, events, etc.).
  */
 
-// Database configuration
-define('DB_HOST', 'localhost');
-define('DB_NAME', 'martial_arts_app');
-define('DB_USER', 'root');
-define('DB_PASS', '');
+// Record request start time for performance monitoring
+if (!defined('REQUEST_START_TIME')) {
+    define('REQUEST_START_TIME', $_SERVER['REQUEST_TIME_FLOAT'] ?? microtime(true));
+}
+
+// Load local configuration (secrets) — not committed to version control.
+// Copy config.local.example.php → config.local.php and fill in your values.
+if (file_exists(__DIR__ . '/config.local.php')) {
+    require_once __DIR__ . '/config.local.php';
+}
+
+// Database configuration — defaults used only if config.local.php is absent
+if (!defined('DB_HOST'))    define('DB_HOST', 'localhost');
+if (!defined('DB_NAME'))    define('DB_NAME', 'martial_arts_app');
+if (!defined('DB_USER'))    define('DB_USER', 'root');
+if (!defined('DB_PASS'))    define('DB_PASS', '');
 define('DB_CHARSET', 'utf8mb4');
 
 // Session configuration
@@ -21,10 +32,10 @@ define('MAX_LOGIN_ATTEMPTS', 5);        // per 15-minute window
 define('LOGIN_LOCKOUT_SECONDS', 900);   // 15 minutes
 
 // Security — encryption key for payment data (64-char hex = 256-bit key).
-// IMPORTANT: Generate your own key with: php -r "echo bin2hex(random_bytes(32));"
-// and keep it SECRET.  If you lose this key, stored payment tokens become
-// unrecoverable.
-define('ENCRYPTION_KEY', 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2');
+// IMPORTANT: Move this to config.local.php for production deployments.
+if (!defined('ENCRYPTION_KEY')) {
+    define('ENCRYPTION_KEY', 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2');
+}
 
 // Application paths
 define('BASE_URL', '/MartialArtsApp');
@@ -37,12 +48,53 @@ define('APP_NAME', 'Martial Arts Academy');
 
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/auth.php';
+require_once __DIR__ . '/includes/tenant.php';
 
-// Auto-start session for all pages
-auth_start_session();
+// Auto-start session for all pages (skipped in API mode — API is stateless)
+if (!defined('API_MODE')) {
+    auth_start_session();
+
+    // Security headers — prevent clickjacking, MIME sniffing, and XSS
+    if (!headers_sent()) {
+        header('X-Content-Type-Options: nosniff');
+        header('X-Frame-Options: SAMEORIGIN');
+        header('X-XSS-Protection: 1; mode=block');
+        header('Referrer-Policy: strict-origin-when-cross-origin');
+    }
+}
 
 // Expose $pdo globally for pages that use it directly
 $pdo = get_db();
+
+// Audit logging & global error handling (must come after DB + auth + session)
+require_once __DIR__ . '/includes/audit.php';
+require_once __DIR__ . '/includes/error_handler.php';
+
+// Log slow requests (> 1 second) for performance monitoring
+if (!defined('API_MODE')) {
+    register_shutdown_function(function () {
+        $duration = (microtime(true) - REQUEST_START_TIME) * 1000;
+        if ($duration > 1000 && function_exists('app_log')) {
+            app_log('warning', 'Slow request: ' . round($duration) . 'ms', [
+                'category'            => 'performance',
+                'request_duration_ms' => round($duration),
+            ]);
+        }
+    });
+}
+
+// ---------- School Switch Handler ----------
+// Migrations have been moved to migrate.php — run it once after deployment.
+if (!defined('API_MODE')) {
+    // School switch handler (super admin only)
+    if (isset($_GET['switch_school']) && function_exists('is_super_admin') && is_super_admin()) {
+        $switchTo = (int) $_GET['switch_school'];
+        switch_school($switchTo === 0 ? null : $switchTo);
+        $url = strtok($_SERVER['REQUEST_URI'], '?');
+        header('Location: ' . $url);
+        exit;
+    }
+}
 
 // ---------- Session & Auth ----------
 
@@ -57,19 +109,25 @@ function requireLogin(): void
 
 function getCurrentUser(): array
 {
+    static $cached = null;
+    if ($cached !== null) {
+        return $cached;
+    }
+
     auth_start_session();
     $pdo = get_db();
 
     $id = $_SESSION['user_id'] ?? 0;
     if (!$id) {
-        return [
+        $cached = [
             'id' => 0, 'username' => 'Guest', 'full_name' => 'Guest',
-            'email' => '', 'role' => 'staff', 'password' => '',
+            'email' => '', 'role' => 'staff',
         ];
+        return $cached;
     }
 
     try {
-        $stmt = $pdo->prepare('SELECT * FROM users WHERE id = :id LIMIT 1');
+        $stmt = $pdo->prepare('SELECT id, username, full_name, email, role, school_id FROM users WHERE id = :id LIMIT 1');
         $stmt->execute([':id' => $id]);
         $user = $stmt->fetch();
         if ($user) {
@@ -77,60 +135,139 @@ function getCurrentUser(): array
             if (!isset($user['role']))      $user['role'] = $_SESSION['role'] ?? 'admin';
             if (!isset($user['full_name'])) $user['full_name'] = $_SESSION['full_name'] ?? $user['username'];
             if (!isset($user['email']))     $user['email'] = '';
-            return $user;
+            $cached = $user;
+            return $cached;
         }
     } catch (\PDOException $e) {
         // users table may not exist — fall back to session data
     }
 
-    return [
+    $cached = [
         'id'        => $id,
         'username'  => $_SESSION['username'] ?? 'Admin',
         'full_name' => $_SESSION['full_name'] ?? ($_SESSION['username'] ?? 'Admin'),
         'email'     => '',
         'role'      => $_SESSION['role'] ?? 'admin',
-        'password'  => '',
     ];
+    return $cached;
 }
 
 // ---------- Permissions ----------
 
+/**
+ * Show a styled "Access Denied" page and stop execution.
+ *
+ * @param string $message  Optional custom message (defaults to generic)
+ * @param string $backUrl  URL for the "Go Back" link (defaults to index.php)
+ */
+function accessDenied(string $message = '', string $backUrl = 'index.php'): void
+{
+    if (empty($message)) {
+        $message = 'You do not have permission to access this page. '
+                 . 'If you believe this is an error, please contact your administrator.';
+    }
+    $role = $_SESSION['role'] ?? 'unknown';
+
+    // If headers already sent, just output minimal HTML
+    if (!headers_sent()) {
+        http_response_code(403);
+    }
+
+    // Use the full layout if header.php is available, otherwise standalone page
+    $headerFile = __DIR__ . '/includes/header.php';
+    $footerFile = __DIR__ . '/includes/footer.php';
+    $useLayout  = file_exists($headerFile) && function_exists('getActiveTheme');
+
+    if ($useLayout) {
+        include $headerFile;
+        echo '<div class="container mx-auto px-4 py-16 max-w-lg">';
+        echo '  <div class="bg-white rounded-xl shadow-lg overflow-hidden">';
+        echo '    <div class="bg-red-600 px-6 py-8 text-center">';
+        echo '      <div class="text-5xl mb-3">&#128683;</div>';
+        echo '      <h1 class="text-2xl font-bold text-white">Access Denied</h1>';
+        echo '    </div>';
+        echo '    <div class="px-6 py-8 text-center">';
+        echo '      <p class="text-gray-600 mb-6">' . htmlspecialchars($message) . '</p>';
+        echo '      <p class="text-xs text-gray-400 mb-6">Your role: <span class="font-semibold">' . htmlspecialchars(ucfirst(str_replace('_', ' ', $role))) . '</span></p>';
+        echo '      <div class="flex justify-center gap-3">';
+        echo '        <a href="javascript:history.back()" class="inline-flex items-center px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-lg text-sm font-medium transition">';
+        echo '          &larr; Go Back';
+        echo '        </a>';
+        echo '        <a href="' . htmlspecialchars($backUrl) . '" class="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition">';
+        echo '          Dashboard';
+        echo '        </a>';
+        echo '      </div>';
+        echo '    </div>';
+        echo '  </div>';
+        echo '</div>';
+        include $footerFile;
+    } else {
+        // Standalone fallback (no layout available)
+        echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Access Denied</title>';
+        echo '<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f3f4f6;}';
+        echo '.card{background:#fff;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,.1);max-width:420px;overflow:hidden;text-align:center;}';
+        echo '.header{background:#dc2626;color:#fff;padding:2rem;}.header h1{margin:.5rem 0 0;font-size:1.5rem;}';
+        echo '.body{padding:2rem;}.body p{color:#666;margin-bottom:1.5rem;}';
+        echo 'a.btn{display:inline-block;padding:.5rem 1.2rem;border-radius:8px;text-decoration:none;font-size:.9rem;margin:0 .3rem;}';
+        echo '.btn-back{background:#e5e7eb;color:#374151;}.btn-home{background:#2563eb;color:#fff;}</style></head>';
+        echo '<body><div class="card"><div class="header"><div style="font-size:3rem;">&#128683;</div><h1>Access Denied</h1></div>';
+        echo '<div class="body"><p>' . htmlspecialchars($message) . '</p>';
+        echo '<a href="javascript:history.back()" class="btn btn-back">&larr; Go Back</a>';
+        echo '<a href="' . htmlspecialchars($backUrl) . '" class="btn btn-home">Dashboard</a>';
+        echo '</div></div></body></html>';
+    }
+    exit;
+}
+
+function require_super_admin(): void
+{
+    auth_start_session();
+    if (empty($_SESSION['role']) || $_SESSION['role'] !== 'super_admin') {
+        accessDenied('This page requires Super Admin privileges.');
+    }
+}
+
 function canView(string $page): bool
 {
+    static $permCache = null;
+
     auth_start_session();
     $role = $_SESSION['role'] ?? 'staff';
 
-    // Admins can see everything
-    if ($role === 'admin') {
+    // Super admins and admins can see everything
+    if ($role === 'admin' || $role === 'super_admin') {
         return true;
     }
 
-    // Check the role_permissions table if it exists
-    try {
-        $pdo  = get_db();
-        $stmt = $pdo->prepare(
-            'SELECT can_view FROM role_permissions WHERE role = :role AND page = :page LIMIT 1'
-        );
-        $stmt->execute([':role' => $role, ':page' => $page]);
-        $row = $stmt->fetch();
-        if ($row !== false) {
-            return (bool) $row['can_view'];
+    // Load all permissions for this role in one query, cache for the request
+    if ($permCache === null) {
+        $permCache = [];
+        try {
+            $pdo  = get_db();
+            $stmt = $pdo->prepare('SELECT page, can_view FROM role_permissions WHERE role = :role');
+            $stmt->execute([':role' => $role]);
+            foreach ($stmt->fetchAll() as $row) {
+                $permCache[$row['page']] = (bool) $row['can_view'];
+            }
+        } catch (\PDOException $e) {
+            // Table doesn't exist yet — default to allowing access
         }
-    } catch (\PDOException $e) {
-        // Table doesn't exist yet — default to allowing access
     }
 
-    return true;
+    return $permCache[$page] ?? true;
 }
 
 // ---------- Settings (key-value store) ----------
 
-function getSetting(string $key, string $default = ''): string
+function getSetting(string $key, string $default = '', ?int $schoolId = null): string
 {
     try {
+        if ($schoolId === null) {
+            $schoolId = function_exists('current_school_id') ? current_school_id() : 1;
+        }
         $pdo  = get_db();
-        $stmt = $pdo->prepare('SELECT setting_value FROM settings WHERE setting_key = :k LIMIT 1');
-        $stmt->execute([':k' => $key]);
+        $stmt = $pdo->prepare('SELECT setting_value FROM settings WHERE school_id = :sid AND setting_key = :k LIMIT 1');
+        $stmt->execute([':sid' => $schoolId, ':k' => $key]);
         $row = $stmt->fetch();
         return $row ? (string) $row['setting_value'] : $default;
     } catch (\PDOException $e) {
@@ -138,23 +275,19 @@ function getSetting(string $key, string $default = ''): string
     }
 }
 
-function saveSetting(string $key, string $value): void
+function saveSetting(string $key, string $value, ?int $schoolId = null): void
 {
+    if ($schoolId === null) {
+        $schoolId = function_exists('current_school_id') ? current_school_id() : 1;
+    }
     $pdo = get_db();
 
-    // Ensure settings table exists
-    $pdo->exec("CREATE TABLE IF NOT EXISTS settings (
-        setting_key VARCHAR(100) PRIMARY KEY,
-        setting_value TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )");
-
     $stmt = $pdo->prepare(
-        'INSERT INTO settings (setting_key, setting_value)
-         VALUES (:k, :v)
+        'INSERT INTO settings (school_id, setting_key, setting_value)
+         VALUES (:sid, :k, :v)
          ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)'
     );
-    $stmt->execute([':k' => $key, ':v' => $value]);
+    $stmt->execute([':sid' => $schoolId, ':k' => $key, ':v' => $value]);
 }
 
 // ---------- Theme / Branding ----------
@@ -212,6 +345,29 @@ function getActiveThemeKey(): string
     return getSetting('theme_color_scheme', 'blue');
 }
 
+/**
+ * Load all studio_config rows into an associative array, cached per request.
+ */
+function getStudioConfig(): array
+{
+    static $cache = null;
+    if ($cache !== null) {
+        return $cache;
+    }
+
+    $cache = [];
+    try {
+        $pdo = get_db();
+        $stmt = $pdo->query('SELECT config_key, config_value FROM studio_config');
+        foreach ($stmt->fetchAll() as $row) {
+            $cache[$row['config_key']] = $row['config_value'];
+        }
+    } catch (\Exception $e) {
+        // studio_config table may not exist yet
+    }
+    return $cache;
+}
+
 function getActiveTheme(): array
 {
     $schemes = getThemeColorSchemes();
@@ -219,34 +375,25 @@ function getActiveTheme(): array
     $theme = $schemes[$key] ?? $schemes['blue'];
 
     // Merge with studio_config custom colours if set
-    try {
-        $pdo = get_db();
-        $stmt = $pdo->query('SELECT config_key, config_value FROM studio_config');
-        $config = [];
-        foreach ($stmt->fetchAll() as $row) {
-            $config[$row['config_key']] = $row['config_value'];
-        }
+    $config = getStudioConfig();
 
-        // Map studio_config colours → theme array keys used by header/student_header
-        if (!empty($config['primary_color']))    $theme['primary']        = $config['primary_color'];
-        if (!empty($config['secondary_color']))  $theme['sidebar_bg']     = $config['secondary_color'];
-        if (!empty($config['accent_color']))     $theme['accent']         = $config['accent_color'];
-        if (!empty($config['background_color'])) $theme['gradient_from']  = $config['background_color'];
-        if (!empty($config['text_color']))        $theme['sidebar_text']   = $config['text_color'];
-        // Derive sidebar_active from primary
-        if (!empty($config['primary_color']))    $theme['sidebar_active'] = $config['primary_color'];
-        // Derive primary_light (lighten primary)
-        if (!empty($config['primary_color'])) {
-            $hex = ltrim($config['primary_color'], '#');
-            if (strlen($hex) === 6) {
-                $r = min(255, hexdec(substr($hex, 0, 2)) + 180);
-                $g = min(255, hexdec(substr($hex, 2, 2)) + 180);
-                $b = min(255, hexdec(substr($hex, 4, 2)) + 180);
-                $theme['primary_light'] = sprintf('#%02x%02x%02x', $r, $g, $b);
-            }
+    // Map studio_config colours → theme array keys used by header/student_header
+    if (!empty($config['primary_color']))    $theme['primary']        = $config['primary_color'];
+    if (!empty($config['secondary_color']))  $theme['sidebar_bg']     = $config['secondary_color'];
+    if (!empty($config['accent_color']))     $theme['accent']         = $config['accent_color'];
+    if (!empty($config['background_color'])) $theme['gradient_from']  = $config['background_color'];
+    if (!empty($config['text_color']))        $theme['sidebar_text']   = $config['text_color'];
+    // Derive sidebar_active from primary
+    if (!empty($config['primary_color']))    $theme['sidebar_active'] = $config['primary_color'];
+    // Derive primary_light (lighten primary)
+    if (!empty($config['primary_color'])) {
+        $hex = ltrim($config['primary_color'], '#');
+        if (strlen($hex) === 6) {
+            $r = min(255, hexdec(substr($hex, 0, 2)) + 180);
+            $g = min(255, hexdec(substr($hex, 2, 2)) + 180);
+            $b = min(255, hexdec(substr($hex, 4, 2)) + 180);
+            $theme['primary_light'] = sprintf('#%02x%02x%02x', $r, $g, $b);
         }
-    } catch (\Exception $e) {
-        // studio_config table may not exist yet — use preset as-is
     }
 
     return $theme;
@@ -254,16 +401,11 @@ function getActiveTheme(): array
 
 function getSiteName(): string
 {
-    // Check studio_config first
-    try {
-        $pdo = get_db();
-        $stmt = $pdo->prepare("SELECT config_value FROM studio_config WHERE config_key = 'studio_name' LIMIT 1");
-        $stmt->execute();
-        $row = $stmt->fetch();
-        if ($row && !empty($row['config_value'])) {
-            return $row['config_value'];
-        }
-    } catch (\Exception $e) {}
+    // Check studio_config first (cached)
+    $config = getStudioConfig();
+    if (!empty($config['studio_name'])) {
+        return $config['studio_name'];
+    }
 
     // Fall back to settings table
     $name = getSetting('site_name', '');
@@ -272,19 +414,14 @@ function getSiteName(): string
 
 function getLogoPath(): string
 {
-    // Check studio_config first
-    try {
-        $pdo = get_db();
-        $stmt = $pdo->prepare("SELECT config_value FROM studio_config WHERE config_key = 'logo_url' LIMIT 1");
-        $stmt->execute();
-        $row = $stmt->fetch();
-        if ($row && !empty($row['config_value'])) {
-            $path = $row['config_value'];
-            if (file_exists($path)) {
-                return $path;
-            }
+    // Check studio_config first (cached)
+    $config = getStudioConfig();
+    if (!empty($config['logo_url'])) {
+        $path = $config['logo_url'];
+        if (file_exists($path)) {
+            return $path;
         }
-    } catch (\Exception $e) {}
+    }
 
     // Fall back to settings table
     $logo = getSetting('site_logo', '');

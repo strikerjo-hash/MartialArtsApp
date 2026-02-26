@@ -65,8 +65,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // Check username uniqueness
     if (empty($errors)) {
-        $check = $pdo->prepare("SELECT id FROM parents WHERE username = ? LIMIT 1");
-        $check->execute([$form['username']]);
+        $checkParams = [$form['username']];
+        school_param($checkParams);
+        $check = $pdo->prepare("SELECT id FROM parents WHERE username = ?" . school_where() . " LIMIT 1");
+        $check->execute($checkParams);
         if ($check->fetch()) {
             $errors[] = 'Username is already taken.';
         }
@@ -74,8 +76,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // Check email uniqueness if provided
     if (empty($errors) && $form['email'] !== '') {
-        $check = $pdo->prepare("SELECT id FROM parents WHERE email = ? LIMIT 1");
-        $check->execute([$form['email']]);
+        $checkParams = [$form['email']];
+        school_param($checkParams);
+        $check = $pdo->prepare("SELECT id FROM parents WHERE email = ?" . school_where() . " LIMIT 1");
+        $check->execute($checkParams);
         if ($check->fetch()) {
             $errors[] = 'Email is already associated with another parent account.';
         }
@@ -84,10 +88,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (empty($errors)) {
         $hash = password_hash($password, PASSWORD_DEFAULT);
         $stmt = $pdo->prepare("
-            INSERT INTO parents (username, password_hash, first_name, last_name, email, phone, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'active')
+            INSERT INTO parents (school_id, username, password_hash, first_name, last_name, email, phone, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
         ");
         $stmt->execute([
+            current_school_id(),
             $form['username'],
             $hash,
             $form['first_name'],
@@ -97,8 +102,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ]);
 
         // Auto-login
-        $parent = $pdo->prepare("SELECT * FROM parents WHERE id = ?");
-        $parent->execute([$pdo->lastInsertId()]);
+        $fetchParams = [$pdo->lastInsertId()];
+        school_param($fetchParams);
+        $parent = $pdo->prepare("SELECT * FROM parents WHERE id = ?" . school_where());
+        $parent->execute($fetchParams);
         $parent = $parent->fetch();
         login_parent($parent);
 

@@ -24,16 +24,20 @@ $children = get_parent_children($parentId);
 // ---------------------------------------------------------------
 $studentBelts = [];
 try {
-    $bStmt = $pdo->prepare(
-        "SELECT DISTINCT sb.belt_id, sb.style_id, sb.black_belt_number,
+    $bSql = "SELECT DISTINCT sb.belt_id, sb.style_id, sb.black_belt_number,
                 b.name as belt_name, b.color, b.rank_order, mas.name as style_name
          FROM student_belts sb
          JOIN belts b ON b.id = sb.belt_id
          JOIN martial_arts_styles mas ON mas.id = sb.style_id
-         WHERE sb.student_id = :sid
-         ORDER BY mas.name, b.rank_order"
-    );
-    $bStmt->execute([':sid' => $childId]);
+         WHERE sb.student_id = :sid";
+    $bParams = [':sid' => $childId];
+    if (!is_viewing_all_schools()) {
+        $bSql .= " AND sb.school_id = :school_id";
+        $bParams[':school_id'] = current_school_id();
+    }
+    $bSql .= " ORDER BY mas.name, b.rank_order";
+    $bStmt = $pdo->prepare($bSql);
+    $bStmt->execute($bParams);
     $studentBelts = $bStmt->fetchAll();
 } catch (\PDOException $e) {}
 
@@ -61,14 +65,13 @@ try {
             $i++;
         }
         $where = implode(' OR ', $conditions);
-        $abStmt = $pdo->prepare(
-            "SELECT b.id as belt_id, b.style_id, b.name as belt_name,
+        $abSql = "SELECT b.id as belt_id, b.style_id, b.name as belt_name,
                     b.color, b.rank_order, mas.name as style_name
              FROM belts b
              JOIN martial_arts_styles mas ON mas.id = b.style_id
-             WHERE {$where}
-             ORDER BY mas.name, b.rank_order"
-        );
+             WHERE ({$where})
+             ORDER BY mas.name, b.rank_order";
+        $abStmt = $pdo->prepare($abSql);
         $abStmt->execute($params);
         $accessibleBelts = $abStmt->fetchAll();
     }
@@ -87,14 +90,9 @@ if (isset($_GET['belt']) && $_GET['belt'] === 'all') {
         }
     }
 }
-if ($selectedBeltId === null && !empty($studentBelts)) {
-    $highest = null;
-    foreach ($studentBelts as $sb) {
-        if ($highest === null || (int) $sb['rank_order'] > (int) $highest['rank_order']) {
-            $highest = $sb;
-        }
-    }
-    if ($highest) $selectedBeltId = (int) $highest['belt_id'];
+// Default to showing ALL content at or below the student's highest belt
+if ($selectedBeltId === null && !empty($accessibleBelts)) {
+    $selectedBeltId = 'all';
 }
 
 // 5. Fetch resources
@@ -107,6 +105,7 @@ try {
 
         if (!empty($beltIds)) {
             $placeholders = implode(',', array_fill(0, count($beltIds), '?'));
+            $params = $beltIds;
             $rStmt = $pdo->prepare(
                 "SELECT br.*, b.name as belt_name, b.color as belt_color,
                         b.rank_order, mas.name as style_name
@@ -116,7 +115,7 @@ try {
                  WHERE br.belt_id IN ($placeholders)
                  ORDER BY mas.name, b.rank_order, br.sort_order ASC, br.created_at DESC"
             );
-            $rStmt->execute($beltIds);
+            $rStmt->execute($params);
             foreach ($rStmt->fetchAll() as $res) {
                 $key = $res['style_name'] . ' — ' . $res['belt_name'];
                 $resourcesByBelt[$key][] = $res;
@@ -130,8 +129,9 @@ try {
     if (!empty($accessibleBelts)) {
         $allBeltIds = array_column($accessibleBelts, 'belt_id');
         $ph = implode(',', array_fill(0, count($allBeltIds), '?'));
+        $params = $allBeltIds;
         $cStmt = $pdo->prepare("SELECT COUNT(*) FROM belt_resources WHERE belt_id IN ($ph)");
-        $cStmt->execute($allBeltIds);
+        $cStmt->execute($params);
         $totalAccessibleResources = (int) $cStmt->fetchColumn();
     }
 } catch (\PDOException $e) {}

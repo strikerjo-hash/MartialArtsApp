@@ -21,7 +21,10 @@ $taxAddress = getSetting('tax_business_address', '');
 $taxNote = getSetting('tax_statement_note', 'This statement is provided for informational purposes. Please consult your tax advisor.');
 
 // Get available years
-$yearStmt = $pdo->query("SELECT DISTINCT YEAR(payment_date) as yr FROM payments ORDER BY yr DESC");
+$yearParams = [];
+$yearStmt = $pdo->prepare("SELECT DISTINCT YEAR(payment_date) as yr FROM payments " . school_where_clause() . " ORDER BY yr DESC");
+school_param($yearParams);
+$yearStmt->execute($yearParams);
 $availableYears = $yearStmt->fetchAll(PDO::FETCH_COLUMN);
 if (empty($availableYears)) {
     $availableYears = [date('Y')];
@@ -29,8 +32,10 @@ if (empty($availableYears)) {
 
 // ---------- Per-Student Detail View ----------
 if ($viewStudentId > 0) {
-    $studentStmt = $pdo->prepare("SELECT id, first_name, last_name, email, phone FROM students WHERE id = ?");
-    $studentStmt->execute([$viewStudentId]);
+    $studentParams = [$viewStudentId];
+    $studentStmt = $pdo->prepare("SELECT id, first_name, last_name, email, phone FROM students WHERE id = ?" . school_where());
+    school_param($studentParams);
+    $studentStmt->execute($studentParams);
     $student = $studentStmt->fetch();
 
     if (!$student) {
@@ -41,14 +46,16 @@ if ($viewStudentId > 0) {
     // Get parent/guardian info
     $parentInfo = null;
     try {
+        $parentParams = [$viewStudentId];
         $parentStmt = $pdo->prepare("
             SELECT s.first_name, s.last_name, s.email, s.phone
             FROM parent_students ps
             JOIN students s ON ps.parent_id = s.id
-            WHERE ps.student_id = ? AND s.is_parent = 1
+            WHERE ps.student_id = ? AND s.is_parent = 1" . school_where('s') . "
             LIMIT 1
         ");
-        $parentStmt->execute([$viewStudentId]);
+        school_param($parentParams);
+        $parentStmt->execute($parentParams);
         $parentInfo = $parentStmt->fetch();
     } catch (PDOException $e) {}
 
@@ -77,11 +84,13 @@ if ($viewStudentId > 0) {
                   WHERE mpl.tax_deductible = 1 AND m2.student_id = p.student_id
                     AND m2.id = p.reference_id
               ))
-          )
+          )" . school_where('p') . "
         ORDER BY p.payment_date ASC
     ";
+    $detailParams = [$viewStudentId, $year];
+    school_param($detailParams);
     $detailStmt = $pdo->prepare($detailQuery);
-    $detailStmt->execute([$viewStudentId, $year]);
+    $detailStmt->execute($detailParams);
     $detailPayments = $detailStmt->fetchAll();
     $detailTotal = array_sum(array_column($detailPayments, 'amount'));
 
@@ -300,11 +309,18 @@ $reportQuery = "
     GROUP BY s.id, s.first_name, s.last_name, s.email
     ORDER BY s.last_name, s.first_name
 ";
+if (!is_viewing_all_schools()) {
+    $reportQuery = str_replace('WHERE YEAR(p.payment_date) = :year', 'WHERE p.school_id = :school_id AND YEAR(p.payment_date) = :year', $reportQuery);
+}
 
 $reportData = [];
 try {
     $rStmt = $pdo->prepare($reportQuery);
-    $rStmt->execute([':year' => $year]);
+    $rStmt->bindValue(':year', $year);
+    if (!is_viewing_all_schools()) {
+        $rStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT);
+    }
+    $rStmt->execute();
     $reportData = $rStmt->fetchAll();
 } catch (PDOException $e) {
     // tax_deductible column may not exist yet
@@ -316,14 +332,16 @@ $grandTotal = array_sum(array_column($reportData, 'total_eligible'));
 $studentParents = [];
 foreach ($reportData as $rd) {
     try {
+        $pParams = [$rd['id']];
         $pStmt = $pdo->prepare("
             SELECT s.first_name, s.last_name, s.email
             FROM parent_students ps
             JOIN students s ON ps.parent_id = s.id
-            WHERE ps.student_id = ? AND s.is_parent = 1
+            WHERE ps.student_id = ? AND s.is_parent = 1" . school_where('s') . "
             LIMIT 1
         ");
-        $pStmt->execute([$rd['id']]);
+        school_param($pParams);
+        $pStmt->execute($pParams);
         $parentRow = $pStmt->fetch();
         if ($parentRow) {
             $studentParents[$rd['id']] = $parentRow['first_name'] . ' ' . $parentRow['last_name'];

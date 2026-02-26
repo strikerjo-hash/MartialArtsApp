@@ -7,14 +7,16 @@ $event_id = $_GET['id'] ?? 0;
 
 // Handle registrations
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    verify_csrf();
     switch ($_POST['action']) {
         case 'register':
             try {
                 $stmt = $pdo->prepare("
-                    INSERT INTO event_registrations (event_id, student_id, payment_status, amount_paid, notes)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO event_registrations (school_id, event_id, student_id, payment_status, amount_paid, notes)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 ");
                 $stmt->execute([
+                    current_school_id(),
                     $event_id,
                     $_POST['student_id'],
                     $_POST['payment_status'],
@@ -25,11 +27,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 // Record payment if paid
                 if ($_POST['payment_status'] === 'paid' && $_POST['amount_paid'] > 0) {
                     $stmt = $pdo->prepare("
-                        INSERT INTO payments (student_id, payment_type, reference_id, amount, 
+                        INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount,
                                             payment_method, payment_date, receipt_number, notes)
-                        VALUES (?, 'event', ?, ?, ?, CURDATE(), ?, ?)
+                        VALUES (?, ?, 'event', ?, ?, ?, CURDATE(), ?, ?)
                     ");
                     $stmt->execute([
+                        current_school_id(),
                         $_POST['student_id'],
                         $event_id,
                         $_POST['amount_paid'],
@@ -46,36 +49,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             break;
             
         case 'update_registration':
-            $stmt = $pdo->prepare("
-                UPDATE event_registrations 
-                SET attendance_status = ?, result = ?, notes = ?
-                WHERE id = ?
-            ");
-            $stmt->execute([
+            $params = [
                 $_POST['attendance_status'],
                 sanitizeInput($_POST['result']),
                 sanitizeInput($_POST['notes']),
                 $_POST['registration_id']
-            ]);
+            ];
+            $stmt = $pdo->prepare("
+                UPDATE event_registrations
+                SET attendance_status = ?, result = ?, notes = ?
+                WHERE id = ?" . school_where()
+            );
+            school_param($params);
+            $stmt->execute($params);
             $message = showAlert('Registration updated!', 'success');
             break;
             
         case 'cancel_registration':
-            $stmt = $pdo->prepare("DELETE FROM event_registrations WHERE id = ?");
-            $stmt->execute([$_POST['registration_id']]);
+            $params = [$_POST['registration_id']];
+            $stmt = $pdo->prepare("DELETE FROM event_registrations WHERE id = ?" . school_where());
+            school_param($params);
+            $stmt->execute($params);
             $message = showAlert('Registration cancelled!', 'success');
             break;
     }
 }
 
 // Get event details
+$params = [$event_id];
 $stmt = $pdo->prepare("
     SELECT e.*, u.full_name as instructor_name
     FROM events e
     LEFT JOIN users u ON e.instructor_id = u.id
-    WHERE e.id = ?
-");
-$stmt->execute([$event_id]);
+    WHERE e.id = ?" . school_where('e')
+);
+school_param($params);
+$stmt->execute($params);
 $event = $stmt->fetch();
 
 if (!$event) {
@@ -84,6 +93,7 @@ if (!$event) {
 }
 
 // Get registrations
+$params = [$event_id];
 $registrations = $pdo->prepare("
     SELECT er.*,
            s.first_name, s.last_name, s.email, s.phone, s.date_of_birth,
@@ -96,14 +106,16 @@ $registrations = $pdo->prepare("
         JOIN belts b ON sb.belt_id = b.id
         WHERE sb.id IN (SELECT MAX(id) FROM student_belts GROUP BY student_id)
     ) b ON s.id = b.student_id
-    WHERE er.event_id = ?
+    WHERE er.event_id = ?" . school_where('er') . "
     ORDER BY er.registration_date DESC
 ");
-$registrations->execute([$event_id]);
+school_param($params);
+$registrations->execute($params);
 $registrations = $registrations->fetchAll();
 
 // Get students for registration dropdown (active students only)
-$students = $pdo->query("
+$params = [];
+$students_stmt = $pdo->prepare("
     SELECT s.id, s.first_name, s.last_name, s.email,
            COALESCE(b.name, 'No Belt') as current_belt
     FROM students s
@@ -113,9 +125,12 @@ $students = $pdo->query("
         JOIN belts b ON sb.belt_id = b.id
         WHERE sb.id IN (SELECT MAX(id) FROM student_belts GROUP BY student_id)
     ) b ON s.id = b.student_id
-    WHERE s.status = 'active'
+    WHERE s.status = 'active'" . school_where('s') . "
     ORDER BY s.first_name, s.last_name
-")->fetchAll();
+");
+school_param($params);
+$students_stmt->execute($params);
+$students = $students_stmt->fetchAll();
 
 // Calculate statistics
 $total_registrations = count($registrations);
@@ -337,6 +352,7 @@ include 'includes/header.php';
                                         Edit
                                     </button>
                                     <form method="POST" class="inline" onsubmit="return confirmDelete('Cancel this registration?')">
+                                        <?= csrf_field() ?>
                                         <input type="hidden" name="action" value="cancel_registration">
                                         <input type="hidden" name="registration_id" value="<?php echo $reg['id']; ?>">
                                         <button type="submit" class="text-red-600 hover:text-red-900">Cancel</button>
@@ -361,6 +377,7 @@ include 'includes/header.php';
         </div>
         
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="register">
             
             <div>
@@ -437,6 +454,7 @@ include 'includes/header.php';
         </div>
         
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="update_registration">
             <input type="hidden" name="registration_id" id="edit_reg_id">
             

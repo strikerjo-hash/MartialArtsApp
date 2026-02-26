@@ -12,8 +12,10 @@ $student_id = $_SESSION['student_id'];
 $message = '';
 
 // Get student details
-$student = $pdo->prepare("SELECT * FROM students WHERE id = ?");
-$student->execute([$student_id]);
+$params = [$student_id];
+$student = $pdo->prepare("SELECT * FROM students WHERE id = ?" . school_where());
+school_param($params);
+$student->execute($params);
 $student = $student->fetch();
 
 // Get upcoming events (not yet happened)
@@ -37,21 +39,26 @@ if ($filter !== 'all') {
     $params[] = $filter;
 }
 
+$query .= school_where('e');
+
 $query .= " GROUP BY e.id ORDER BY e.event_date ASC";
 
+school_param($params);
 $stmt = $pdo->prepare($query);
 $stmt->execute($params);
 $events = $stmt->fetchAll();
 
 // Get student's registrations
+$params = [$student_id];
 $my_registrations = $pdo->prepare("
     SELECT er.*, e.name as event_name, e.event_date, e.event_type, e.registration_fee as fee
     FROM event_registrations er
     JOIN events e ON er.event_id = e.id
-    WHERE er.student_id = ?
+    WHERE er.student_id = ?" . school_where('er') . "
     ORDER BY e.event_date ASC
 ");
-$my_registrations->execute([$student_id]);
+school_param($params);
+$my_registrations->execute($params);
 $my_registrations = $my_registrations->fetchAll();
 
 include 'includes/student_header.php';

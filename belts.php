@@ -4,38 +4,17 @@ requireLogin();
 
 $message = '';
 
-// Ensure black_belt_number column exists on student_belts
-try {
-    $cols = $pdo->query("SHOW COLUMNS FROM student_belts LIKE 'black_belt_number'")->fetchAll();
-    if (empty($cols)) {
-        $pdo->exec("ALTER TABLE student_belts ADD COLUMN black_belt_number VARCHAR(50) DEFAULT NULL AFTER notes");
-    }
-} catch (\PDOException $e) {}
-
-// Ensure belt_resources table exists
-try {
-    $pdo->exec("CREATE TABLE IF NOT EXISTS belt_resources (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        belt_id INT NOT NULL,
-        style_id INT NOT NULL,
-        resource_type ENUM('document','video') NOT NULL,
-        title VARCHAR(255) NOT NULL,
-        description TEXT,
-        file_path VARCHAR(500),
-        video_url VARCHAR(500),
-        sort_order INT DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )");
-} catch (\PDOException $e) {}
+// Migrations have been moved to migrate.php
 
 // Ensure uploads directory exists
 $beltDocDir = 'uploads/belt_documents/';
 if (!file_exists($beltDocDir)) {
-    mkdir($beltDocDir, 0777, true);
+    mkdir($beltDocDir, 0750, true);
 }
 
 // Handle all POST actions
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    verify_csrf();
     switch ($_POST['action']) {
 
         // ======== STYLES ========
@@ -119,10 +98,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             }
 
             $stmt = $pdo->prepare("
-                INSERT INTO student_belts (student_id, belt_id, style_id, awarded_date, instructor_id, notes, black_belt_number)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO student_belts (school_id, student_id, belt_id, style_id, awarded_date, instructor_id, notes, black_belt_number)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ");
             $stmt->execute([
+                current_school_id(),
                 $_POST['student_id'],
                 $_POST['belt_id'],
                 $_POST['style_id'],
@@ -136,19 +116,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
         case 'edit_promotion':
             // Note: black_belt_number is NOT updatable once set — it's permanent
-            $stmt = $pdo->prepare("UPDATE student_belts SET belt_id = ?, style_id = ?, awarded_date = ?, notes = ? WHERE id = ?");
-            $stmt->execute([
+            $editPromoParams = [
                 $_POST['belt_id'],
                 $_POST['style_id'],
                 $_POST['awarded_date'],
                 sanitizeInput($_POST['notes']),
                 $_POST['promotion_id']
-            ]);
+            ];
+            $stmt = $pdo->prepare("UPDATE student_belts SET belt_id = ?, style_id = ?, awarded_date = ?, notes = ? WHERE id = ?" . school_where());
+            school_param($editPromoParams);
+            $stmt->execute($editPromoParams);
             $message = showAlert('Promotion updated successfully!', 'success');
             break;
 
         case 'delete_promotion':
-            $pdo->prepare("DELETE FROM student_belts WHERE id = ?")->execute([$_POST['promotion_id']]);
+            $delPromoParams = [$_POST['promotion_id']];
+            $delPromoStmt = $pdo->prepare("DELETE FROM student_belts WHERE id = ?" . school_where());
+            school_param($delPromoParams);
+            $delPromoStmt->execute($delPromoParams);
             $message = showAlert('Promotion deleted successfully!', 'success');
             break;
 
@@ -177,8 +162,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 }
 
                 // Check if student already has this exact belt+style
-                $dupCheck = $pdo->prepare("SELECT id FROM student_belts WHERE student_id = ? AND belt_id = ? AND style_id = ?");
-                $dupCheck->execute([$sid, $bid, $stid]);
+                $dupParams = [$sid, $bid, $stid];
+                $dupCheck = $pdo->prepare("SELECT id FROM student_belts WHERE student_id = ? AND belt_id = ? AND style_id = ?" . school_where());
+                school_param($dupParams);
+                $dupCheck->execute($dupParams);
                 if ($dupCheck->fetch()) {
                     $skipped++;
                     continue;
@@ -203,9 +190,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
                 try {
                     $pdo->prepare("
-                        INSERT INTO student_belts (student_id, belt_id, style_id, awarded_date, instructor_id, notes, black_belt_number)
-                        VALUES (?, ?, ?, ?, ?, 'Bulk assignment — historical record', ?)
-                    ")->execute([$sid, $bid, $stid, $dt, $_SESSION['user_id'], $finalBBNum]);
+                        INSERT INTO student_belts (school_id, student_id, belt_id, style_id, awarded_date, instructor_id, notes, black_belt_number)
+                        VALUES (?, ?, ?, ?, ?, ?, 'Bulk assignment — historical record', ?)
+                    ")->execute([current_school_id(), $sid, $bid, $stid, $dt, $_SESSION['user_id'], $finalBBNum]);
                     $assigned++;
                 } catch (PDOException $e) {
                     $skipped++;
@@ -316,14 +303,15 @@ try {
 // Pre-load all resources grouped by belt for JS
 $allResourcesByBelt = [];
 try {
-    $resStmt = $pdo->query("SELECT * FROM belt_resources ORDER BY sort_order ASC, created_at DESC");
+    $resStmt = $pdo->query("SELECT * FROM belt_resources ORDER BY sort_order ASC, created_at DESC LIMIT 1000");
     foreach ($resStmt->fetchAll() as $res) {
         $allResourcesByBelt[$res['belt_id']][] = $res;
     }
 } catch (\PDOException $e) {}
 
 // Get recent belt promotions
-$recent_promotions = $pdo->query("
+$recentPromoParams = [];
+$recentPromoSql = "
     SELECT sb.*, sb.black_belt_number,
            s.first_name, s.last_name,
            b.name as belt_name, b.color,
@@ -334,17 +322,28 @@ $recent_promotions = $pdo->query("
     JOIN belts b ON sb.belt_id = b.id
     JOIN martial_arts_styles mas ON sb.style_id = mas.id
     LEFT JOIN users u ON sb.instructor_id = u.id
+    WHERE 1=1" . school_where('s') . school_where('sb') . "
     ORDER BY sb.awarded_date DESC
     LIMIT 20
-")->fetchAll();
+";
+school_param($recentPromoParams);
+school_param($recentPromoParams);
+$recentPromoStmt = $pdo->prepare($recentPromoSql);
+$recentPromoStmt->execute($recentPromoParams);
+$recent_promotions = $recentPromoStmt->fetchAll();
 
 // Get students for dropdown
-$students = $pdo->query("SELECT id, first_name, last_name FROM students WHERE status = 'active' ORDER BY first_name, last_name")->fetchAll();
+$studentDropParams = [];
+$studentDropStmt = $pdo->prepare("SELECT id, first_name, last_name FROM students WHERE status = 'active'" . school_where() . " ORDER BY first_name, last_name");
+school_param($studentDropParams);
+$studentDropStmt->execute($studentDropParams);
+$students = $studentDropStmt->fetchAll();
 
 // Pre-load each student's highest belt per style (for Quick Assign display)
 $studentHighestBelts = [];
 try {
-    $shbRows = $pdo->query("
+    $shbParams = [];
+    $shbSql = "
         SELECT sb.student_id, sb.style_id, b.name as belt_name, b.color, b.rank_order,
                sb.black_belt_number
         FROM student_belts sb
@@ -352,10 +351,15 @@ try {
         WHERE b.rank_order = (
             SELECT MAX(b2.rank_order) FROM student_belts sb2
             JOIN belts b2 ON sb2.belt_id = b2.id
-            WHERE sb2.student_id = sb.student_id AND sb2.style_id = sb.style_id
-        )
+            WHERE sb2.student_id = sb.student_id AND sb2.style_id = sb.style_id" . school_where('sb2') . "
+        )" . school_where('sb') . "
         ORDER BY sb.student_id, sb.style_id
-    ")->fetchAll();
+    ";
+    school_param($shbParams);
+    school_param($shbParams);
+    $shbStmt = $pdo->prepare($shbSql);
+    $shbStmt->execute($shbParams);
+    $shbRows = $shbStmt->fetchAll();
     foreach ($shbRows as $row) {
         $studentHighestBelts[$row['student_id']][$row['style_id']] = $row;
     }
@@ -451,6 +455,10 @@ include 'includes/header.php';
                     class="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2 rounded-lg font-medium">
                 &#9889; Quick Assign
             </button>
+            <a href="belt_resources_upload.php"
+               class="inline-block bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg font-medium text-sm">
+                &#128206; Bulk Upload Resources
+            </a>
         </div>
     </div>
 
@@ -469,6 +477,7 @@ include 'includes/header.php';
                             <button onclick="editStyle(<?php echo htmlspecialchars(json_encode($style)); ?>)"
                                     class="text-blue-100 hover:text-white text-sm" title="Edit Style">&#9998;</button>
                             <form method="POST" class="inline" onsubmit="return confirmDelete('Delete this style? All belts must be removed first.')">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="action" value="delete_style">
                                 <input type="hidden" name="style_id" value="<?php echo $style['id']; ?>">
                                 <button type="submit" class="text-blue-100 hover:text-white text-sm" title="Delete Style">&#10005;</button>
@@ -507,6 +516,7 @@ include 'includes/header.php';
                                     <button onclick="editBelt(<?php echo htmlspecialchars(json_encode($belt)); ?>)"
                                             class="text-blue-600 hover:text-blue-800 text-sm" title="Edit Belt">&#9998;</button>
                                     <form method="POST" class="inline" onsubmit="return confirmDelete('Delete this belt?')">
+                                        <?= csrf_field() ?>
                                         <input type="hidden" name="action" value="delete_belt">
                                         <input type="hidden" name="belt_id" value="<?php echo $belt['id']; ?>">
                                         <button type="submit" class="text-red-600 hover:text-red-800 text-sm" title="Delete Belt">&#10005;</button>
@@ -586,6 +596,7 @@ include 'includes/header.php';
                                 <button onclick="editPromotion(<?php echo htmlspecialchars(json_encode($promo)); ?>)"
                                         class="text-blue-600 hover:text-blue-900 mr-2">Edit</button>
                                 <form method="POST" class="inline" onsubmit="return confirmDelete('Delete this promotion record?')">
+                                    <?= csrf_field() ?>
                                     <input type="hidden" name="action" value="delete_promotion">
                                     <input type="hidden" name="promotion_id" value="<?php echo $promo['id']; ?>">
                                     <button type="submit" class="text-red-600 hover:text-red-900">Delete</button>
@@ -615,6 +626,7 @@ include 'includes/header.php';
             <button onclick="document.getElementById('addStyleModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button>
         </div>
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="add_style">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Style Name *</label>
@@ -640,6 +652,7 @@ include 'includes/header.php';
             <button onclick="document.getElementById('editStyleModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button>
         </div>
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="edit_style">
             <input type="hidden" name="style_id" id="edit_style_id">
             <div>
@@ -666,6 +679,7 @@ include 'includes/header.php';
             <button onclick="document.getElementById('addBeltModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button>
         </div>
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="add_belt">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Martial Art Style *</label>
@@ -751,6 +765,7 @@ include 'includes/header.php';
             <button onclick="document.getElementById('editBeltModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button>
         </div>
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="edit_belt">
             <input type="hidden" name="belt_id" id="edit_belt_id">
             <div>
@@ -827,6 +842,7 @@ include 'includes/header.php';
             <button onclick="document.getElementById('promoteModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button>
         </div>
         <form method="POST" class="space-y-4" id="promoteForm">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="promote">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Student *</label>
@@ -907,6 +923,7 @@ include 'includes/header.php';
         </div>
 
         <form method="POST" id="bulkAssignForm">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="bulk_promote">
 
             <div class="overflow-x-auto">
@@ -1014,6 +1031,7 @@ include 'includes/header.php';
             <button onclick="document.getElementById('editPromotionModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button>
         </div>
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="edit_promotion">
             <input type="hidden" name="promotion_id" id="edit_promo_id">
             <div>
@@ -1072,6 +1090,7 @@ include 'includes/header.php';
         <div class="border-t border-gray-200 pt-4 mb-4">
             <h4 class="font-semibold text-gray-700 mb-3">Upload Document</h4>
             <form method="POST" enctype="multipart/form-data" class="space-y-3">
+                <?= csrf_field() ?>
                 <input type="hidden" name="action" value="add_document">
                 <input type="hidden" name="resource_belt_id" id="doc_belt_id">
                 <input type="hidden" name="resource_style_id" id="doc_style_id">
@@ -1103,6 +1122,7 @@ include 'includes/header.php';
         <div class="border-t border-gray-200 pt-4">
             <h4 class="font-semibold text-gray-700 mb-3">Add Video Link</h4>
             <form method="POST" class="space-y-3">
+                <?= csrf_field() ?>
                 <input type="hidden" name="action" value="add_video">
                 <input type="hidden" name="resource_belt_id" id="vid_belt_id">
                 <input type="hidden" name="resource_style_id" id="vid_style_id">
@@ -1272,6 +1292,7 @@ function openResources(beltId, styleId, beltName, styleName) {
                     </div>
                 </div>
                 <form method="POST" class="inline" onsubmit="return confirm('Delete this resource?')">
+                    <input type="hidden" name="csrf_token" value="${document.querySelector('meta[name=csrf-token]')?.content || document.querySelector('input[name=csrf_token]')?.value || ''}">
                     <input type="hidden" name="action" value="delete_resource">
                     <input type="hidden" name="resource_id" value="${res.id}">
                     <button type="submit" class="text-red-500 hover:text-red-700 text-sm">&#10005; Delete</button>

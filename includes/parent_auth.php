@@ -13,152 +13,9 @@
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/security.php';
 require_once __DIR__ . '/auth.php';
+require_once __DIR__ . '/tenant.php';
 
-// ─── Idempotent migrations ──────────────────────────────────────────
-
-// Add is_parent flag to students table
-try {
-    $pdo = get_db();
-    $cols = $pdo->query("SHOW COLUMNS FROM students")->fetchAll();
-    $colNames = array_column($cols, 'Field');
-    if (!in_array('is_parent', $colNames, true)) {
-        $pdo->exec("ALTER TABLE students ADD COLUMN is_parent TINYINT(1) NOT NULL DEFAULT 0");
-    }
-} catch (\PDOException $e) {}
-
-// Keep the parents table around for backward compat — old data stays
-// but new promotes won't create rows in it.
-try {
-    $pdo = get_db();
-    $pdo->exec("CREATE TABLE IF NOT EXISTS parents (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        username VARCHAR(50) NOT NULL UNIQUE,
-        password_hash VARCHAR(255) NOT NULL,
-        first_name VARCHAR(100) NOT NULL,
-        last_name VARCHAR(100) NOT NULL,
-        email VARCHAR(255) DEFAULT NULL,
-        phone VARCHAR(20) DEFAULT NULL,
-        address TEXT DEFAULT NULL,
-        stripe_customer_id VARCHAR(255) DEFAULT NULL,
-        square_customer_id VARCHAR(255) DEFAULT NULL,
-        account_credit DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-        status ENUM('active','inactive','suspended') DEFAULT 'active',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )");
-} catch (\PDOException $e) {}
-
-try {
-    $pdo = get_db();
-    $pdo->exec("CREATE TABLE IF NOT EXISTS parent_students (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        parent_id INT NOT NULL,
-        student_id INT NOT NULL,
-        relationship ENUM('parent','guardian','other') NOT NULL DEFAULT 'parent',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY unique_parent_student (parent_id, student_id)
-    )");
-} catch (\PDOException $e) {}
-
-try {
-    $pdo = get_db();
-    $pdo->exec("CREATE TABLE IF NOT EXISTS parent_payment_methods (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        parent_id INT NOT NULL,
-        label VARCHAR(100) NOT NULL,
-        card_brand VARCHAR(20) DEFAULT NULL,
-        last_four CHAR(4) NOT NULL,
-        exp_month TINYINT DEFAULT NULL,
-        exp_year SMALLINT DEFAULT NULL,
-        encrypted_token TEXT NOT NULL,
-        gateway_payment_method_id VARCHAR(255) DEFAULT NULL,
-        is_default TINYINT(1) DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )");
-} catch (\PDOException $e) {}
-
-// Add parent_id columns to existing tables if missing
-try {
-    $pdo = get_db();
-    $cols = $pdo->query("SHOW COLUMNS FROM event_registrations")->fetchAll();
-    $colNames = array_column($cols, 'Field');
-    if (!in_array('parent_id', $colNames, true)) {
-        $pdo->exec("ALTER TABLE event_registrations ADD COLUMN parent_id INT DEFAULT NULL");
-    }
-} catch (\PDOException $e) {}
-
-try {
-    $pdo = get_db();
-    $cols = $pdo->query("SHOW COLUMNS FROM payments")->fetchAll();
-    $colNames = array_column($cols, 'Field');
-    if (!in_array('parent_id', $colNames, true)) {
-        $pdo->exec("ALTER TABLE payments ADD COLUMN parent_id INT DEFAULT NULL");
-    }
-} catch (\PDOException $e) {}
-
-// ─── Migrate existing parent accounts ────────────────────────────────
-// If there are rows in the parents table that correspond to students
-// (matched by name+email), set is_parent=1 on those students.
-try {
-    $pdo = get_db();
-    $pdo->exec("
-        UPDATE students s
-        JOIN parents p ON (p.first_name = s.first_name AND p.last_name = s.last_name)
-                       OR (s.email IS NOT NULL AND s.email != '' AND p.email = s.email)
-        SET s.is_parent = 1
-        WHERE s.is_parent = 0
-    ");
-} catch (\PDOException $e) {}
-
-// Migrate parent_students links from legacy parents.id to the matching students.id.
-// If parent_students rows reference a parents.id (legacy), re-point them to the
-// corresponding students.id so the student-as-parent model works correctly.
-try {
-    $pdo = get_db();
-    // Find parent_students rows where parent_id doesn't match any student with is_parent=1
-    // but DOES match a legacy parents row that has a corresponding student.
-    $legacyLinks = $pdo->query("
-        SELECT ps.id as link_id, ps.parent_id as old_parent_id, ps.student_id, ps.relationship,
-               p.first_name, p.last_name, p.email
-        FROM parent_students ps
-        JOIN parents p ON p.id = ps.parent_id
-        WHERE NOT EXISTS (
-            SELECT 1 FROM students s WHERE s.id = ps.parent_id AND s.is_parent = 1
-        )
-    ");
-    if ($legacyLinks) {
-        foreach ($legacyLinks->fetchAll() as $link) {
-            // Find the matching promoted student for this legacy parent
-            $matchStmt = $pdo->prepare("
-                SELECT id FROM students
-                WHERE is_parent = 1
-                  AND (
-                      (first_name = :fn AND last_name = :ln)
-                      OR (email IS NOT NULL AND email != '' AND email = :em)
-                  )
-                LIMIT 1
-            ");
-            $matchStmt->execute([
-                ':fn' => $link['first_name'],
-                ':ln' => $link['last_name'],
-                ':em' => $link['email'] ?? '',
-            ]);
-            $newParentId = $matchStmt->fetchColumn();
-
-            if ($newParentId && (int)$newParentId !== (int)$link['student_id']) {
-                // Update the link to point to the student's ID, skip if duplicate
-                try {
-                    $pdo->prepare("
-                        UPDATE parent_students SET parent_id = ? WHERE id = ?
-                    ")->execute([$newParentId, $link['link_id']]);
-                } catch (\PDOException $e) {
-                    // Duplicate key — link already exists under the new parent_id, remove the old one
-                    $pdo->prepare("DELETE FROM parent_students WHERE id = ?")->execute([$link['link_id']]);
-                }
-            }
-        }
-    }
-} catch (\PDOException $e) {}
+// Migrations have been moved to migrate.php
 
 // ─── Legacy parent authentication (kept for backward compat) ─────────
 
@@ -239,6 +96,15 @@ function login_parent(array $parent): void
     $_SESSION['username']   = $parent['username'];
     $_SESSION['first_name'] = $parent['first_name'];
     $_SESSION['last_name']  = $parent['last_name'];
+
+    // Audit log: parent login
+    if (function_exists('audit_log')) {
+        audit_log('login', [
+            'description' => 'Parent login: ' . trim($parent['first_name'] . ' ' . $parent['last_name']),
+            'entity_type' => 'parent',
+            'entity_id'   => $parent['id'],
+        ]);
+    }
 }
 
 /**
@@ -281,24 +147,24 @@ function get_effective_parent_id(): int
             try {
                 $pdo = get_db();
                 $parentId = (int)$_SESSION['parent_id'];
-                $pStmt = $pdo->prepare("SELECT first_name, last_name, email FROM parents WHERE id = ? LIMIT 1");
-                $pStmt->execute([$parentId]);
+                $pParams = [$parentId];
+                $pStmt = $pdo->prepare("SELECT first_name, last_name, email FROM parents WHERE id = ?" . school_where() . " LIMIT 1");
+                school_param($pParams);
+                $pStmt->execute($pParams);
                 $pRow = $pStmt->fetch();
                 if ($pRow) {
                     $mStmt = $pdo->prepare("
                         SELECT id FROM students
                         WHERE is_parent = 1 AND status = 'active'
                           AND (
-                              (first_name = :fn AND last_name = :ln)
-                              OR (email IS NOT NULL AND email != '' AND email = :em)
-                          )
+                              (first_name = ? AND last_name = ?)
+                              OR (email IS NOT NULL AND email != '' AND email = ?)
+                          )" . school_where() . "
                         LIMIT 1
                     ");
-                    $mStmt->execute([
-                        ':fn' => $pRow['first_name'],
-                        ':ln' => $pRow['last_name'],
-                        ':em' => $pRow['email'] ?? '',
-                    ]);
+                    $mParams = [$pRow['first_name'], $pRow['last_name'], $pRow['email'] ?? ''];
+                    school_param($mParams);
+                    $mStmt->execute($mParams);
                     $resolvedId = $mStmt->fetchColumn();
                     $_SESSION['_resolved_parent_student_id'] = $resolvedId ?: $parentId;
                 } else {
@@ -339,10 +205,12 @@ function get_parent_children(int $parentId): array
         ) b ON s.id = b.student_id
         LEFT JOIN memberships m ON m.student_id = s.id AND m.status = 'active' AND m.end_date >= CURDATE()
         LEFT JOIN membership_plans mp ON mp.id = m.plan_id
-        WHERE ps.parent_id = :pid
+        WHERE ps.parent_id = ?" . school_where("s") . "
         ORDER BY s.first_name, s.last_name
     ");
-    $stmt->execute([':pid' => $parentId]);
+    $params = [$parentId];
+    school_param($params);
+    $stmt->execute($params);
     return $stmt->fetchAll();
 }
 
@@ -361,9 +229,9 @@ function link_student_to_parent(int $parentId, int $studentId, string $relations
     $pdo = get_db();
     try {
         $stmt = $pdo->prepare(
-            "INSERT INTO parent_students (parent_id, student_id, relationship) VALUES (?, ?, ?)"
+            "INSERT INTO parent_students (school_id, parent_id, student_id, relationship) VALUES (?, ?, ?, ?)"
         );
-        $stmt->execute([$parentId, $studentId, $relationship]);
+        $stmt->execute([current_school_id(), $parentId, $studentId, $relationship]);
     } catch (\PDOException $e) {
         // Duplicate or FK constraint
         return false;
@@ -397,8 +265,10 @@ function sync_parent_payment_methods_to_child(int $parentStudentId, int $childSt
         }
 
         // Get parent name for the label
-        $parentStmt = $pdo->prepare("SELECT first_name, last_name FROM students WHERE id = ? LIMIT 1");
-        $parentStmt->execute([$parentStudentId]);
+        $stParams = [$parentStudentId];
+        $parentStmt = $pdo->prepare("SELECT first_name, last_name FROM students WHERE id = ?" . school_where() . " LIMIT 1");
+        school_param($stParams);
+        $parentStmt->execute($stParams);
         $parentInfo = $parentStmt->fetch();
         $parentName = $parentInfo ? trim($parentInfo['first_name'] . ' ' . $parentInfo['last_name']) : 'Parent';
 
@@ -478,8 +348,10 @@ function sync_parent_payment_methods_to_student(int $parentId, int $studentId): 
 function unlink_student_from_parent(int $parentId, int $studentId): bool
 {
     $pdo = get_db();
-    $stmt = $pdo->prepare("DELETE FROM parent_students WHERE parent_id = ? AND student_id = ?");
-    $stmt->execute([$parentId, $studentId]);
+    $params = [$parentId, $studentId];
+    $stmt = $pdo->prepare("DELETE FROM parent_students WHERE parent_id = ? AND student_id = ?" . school_where());
+    school_param($params);
+    $stmt->execute($params);
     return $stmt->rowCount() > 0;
 }
 
@@ -491,8 +363,10 @@ function student_is_parent(int $studentId): bool
 {
     $pdo = get_db();
     try {
-        $stmt = $pdo->prepare("SELECT is_parent FROM students WHERE id = ? LIMIT 1");
-        $stmt->execute([$studentId]);
+        $params = [$studentId];
+        $stmt = $pdo->prepare("SELECT is_parent FROM students WHERE id = ?" . school_where() . " LIMIT 1");
+        school_param($params);
+        $stmt->execute($params);
         $row = $stmt->fetch();
         return $row && (int)$row['is_parent'] === 1;
     } catch (\PDOException $e) {
@@ -509,8 +383,10 @@ function student_has_parent_account(int $studentId): array|false
 {
     $pdo = get_db();
     try {
-        $stmt = $pdo->prepare("SELECT * FROM students WHERE id = ? AND is_parent = 1 LIMIT 1");
-        $stmt->execute([$studentId]);
+        $params = [$studentId];
+        $stmt = $pdo->prepare("SELECT * FROM students WHERE id = ? AND is_parent = 1" . school_where() . " LIMIT 1");
+        school_param($params);
+        $stmt->execute($params);
         $student = $stmt->fetch();
         return $student ?: false;
     } catch (\PDOException $e) {
@@ -530,8 +406,10 @@ function promote_student_to_parent(int $studentId, string $username = '', string
     $pdo = get_db();
 
     // Fetch the student
-    $stmt = $pdo->prepare("SELECT * FROM students WHERE id = ? LIMIT 1");
-    $stmt->execute([$studentId]);
+    $params = [$studentId];
+    $stmt = $pdo->prepare("SELECT * FROM students WHERE id = ?" . school_where() . " LIMIT 1");
+    school_param($params);
+    $stmt->execute($params);
     $student = $stmt->fetch();
     if (!$student) {
         return false;
@@ -544,13 +422,16 @@ function promote_student_to_parent(int $studentId, string $username = '', string
 
     // Set the is_parent flag
     try {
-        $pdo->prepare("UPDATE students SET is_parent = 1 WHERE id = ?")->execute([$studentId]);
+        $uParams = [$studentId];
+        $upd = $pdo->prepare("UPDATE students SET is_parent = 1 WHERE id = ?" . school_where());
+        school_param($uParams);
+        $upd->execute($uParams);
     } catch (\PDOException $e) {
         return false;
     }
 
     // Re-fetch and return
-    $stmt->execute([$studentId]);
+    $stmt->execute($params);
     return $stmt->fetch() ?: false;
 }
 
@@ -567,10 +448,12 @@ function get_student_parents(int $studentId): array
                    ps.relationship, ps.created_at as linked_at
             FROM parent_students ps
             JOIN students s ON s.id = ps.parent_id
-            WHERE ps.student_id = ?
+            WHERE ps.student_id = ?" . school_where("s") . "
             ORDER BY ps.created_at DESC
         ");
-        $stmt->execute([$studentId]);
+        $params = [$studentId];
+        school_param($params);
+        $stmt->execute($params);
         return $stmt->fetchAll();
     } catch (\PDOException $e) {
         return [];
@@ -589,10 +472,12 @@ function parent_verify_child(int $parentId, int $studentId, bool $redirect = tru
         $stmt = $pdo->prepare("
             SELECT s.* FROM parent_students ps
             JOIN students s ON s.id = ps.student_id
-            WHERE ps.parent_id = ? AND ps.student_id = ?
+            WHERE ps.parent_id = ? AND ps.student_id = ?" . school_where("s") . "
             LIMIT 1
         ");
-        $stmt->execute([$parentId, $studentId]);
+        $params = [$parentId, $studentId];
+        school_param($params);
+        $stmt->execute($params);
         $child = $stmt->fetch();
         if ($child) return $child;
     } catch (\PDOException $e) {}

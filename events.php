@@ -2,24 +2,24 @@
 require_once 'config.php';
 requireLogin();
 
-// --- Idempotent migrations ---
-try { $pdo->exec("ALTER TABLE events ADD COLUMN tax_deductible TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
-try { $pdo->exec("ALTER TABLE events MODIFY COLUMN event_type ENUM('belt_test','tournament','seminar','workshop','demonstration','camp','other') NOT NULL"); } catch (PDOException $e) {}
+// Migrations have been moved to migrate.php
 
 $message = '';
 
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    verify_csrf();
     if (isset($_POST['action'])) {
         switch ($_POST['action']) {
             case 'add':
                 $stmt = $pdo->prepare("
-                    INSERT INTO events (name, event_type, description, event_date, start_time,
+                    INSERT INTO events (school_id, name, event_type, description, event_date, start_time,
                                        end_time, location, max_participants, registration_fee,
                                        registration_deadline, instructor_id, status, requirements, requires_registration, tax_deductible)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
                 $stmt->execute([
+                    current_school_id(),
                     sanitizeInput($_POST['name']),
                     $_POST['event_type'],
                     sanitizeInput($_POST['description']),
@@ -40,14 +40,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
                 
             case 'delete':
-                $stmt = $pdo->prepare("DELETE FROM events WHERE id = ?");
-                $stmt->execute([$_POST['event_id']]);
+                $params = [$_POST['event_id']];
+                $stmt = $pdo->prepare("DELETE FROM events WHERE id = ?" . school_where());
+                school_param($params);
+                $stmt->execute($params);
                 $message = showAlert('Event deleted successfully!', 'success');
                 break;
                 
             case 'update_status':
-                $stmt = $pdo->prepare("UPDATE events SET status = ? WHERE id = ?");
-                $stmt->execute([$_POST['new_status'], $_POST['event_id']]);
+                $params = [$_POST['new_status'], $_POST['event_id']];
+                $stmt = $pdo->prepare("UPDATE events SET status = ? WHERE id = ?" . school_where());
+                school_param($params);
+                $stmt->execute($params);
                 $message = showAlert('Event status updated!', 'success');
                 break;
         }
@@ -69,6 +73,9 @@ $query = "
     WHERE 1=1
 ";
 
+if (!is_viewing_all_schools()) {
+    $query .= " AND e.school_id = :school_id";
+}
 if ($type_filter) {
     $query .= " AND e.event_type = :type";
 }
@@ -76,9 +83,12 @@ if ($status_filter) {
     $query .= " AND e.status = :status";
 }
 
-$query .= " GROUP BY e.id ORDER BY e.event_date ASC";
+$query .= " GROUP BY e.id ORDER BY e.event_date ASC LIMIT 500";
 
 $stmt = $pdo->prepare($query);
+if (!is_viewing_all_schools()) {
+    $stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT);
+}
 if ($type_filter) {
     $stmt->bindValue(':type', $type_filter);
 }
@@ -89,7 +99,11 @@ $stmt->execute();
 $events = $stmt->fetchAll();
 
 // Get instructors for dropdown
-$instructors = $pdo->query("SELECT id, full_name FROM users WHERE role IN ('admin', 'instructor') ORDER BY full_name")->fetchAll();
+$params = [];
+$stmt = $pdo->prepare("SELECT id, full_name FROM users WHERE role IN ('admin', 'super_admin', 'instructor')" . school_where() . " ORDER BY full_name");
+school_param($params);
+$stmt->execute($params);
+$instructors = $stmt->fetchAll();
 
 include 'includes/header.php';
 ?>
@@ -268,6 +282,7 @@ include 'includes/header.php';
                             View Details
                         </a>
                         <form method="POST" class="inline" onsubmit="return confirmDelete('Delete this event?')">
+                            <?= csrf_field() ?>
                             <input type="hidden" name="action" value="delete">
                             <input type="hidden" name="event_id" value="<?php echo $event['id']; ?>">
                             <button type="submit" 
@@ -303,6 +318,7 @@ include 'includes/header.php';
         </div>
         
         <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
             <input type="hidden" name="action" value="add">
             
             <div class="grid grid-cols-2 gap-4">

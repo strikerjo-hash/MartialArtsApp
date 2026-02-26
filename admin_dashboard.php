@@ -15,15 +15,7 @@ require_once __DIR__ . '/includes/theme.php';
 $theme_data = get_theme();
 $message = '';
 
-// Ensure studio_config table exists
-try {
-    $pdo->exec("CREATE TABLE IF NOT EXISTS studio_config (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        config_key VARCHAR(100) UNIQUE NOT NULL,
-        config_value TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )");
-} catch (\PDOException $e) {}
+// Migrations have been moved to migrate.php
 
 // ---------- Handle branding form submission ----------
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_branding'])) {
@@ -37,14 +29,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_branding'])) {
     ];
 
     $upsert = $pdo->prepare(
-        'INSERT INTO studio_config (config_key, config_value)
-         VALUES (:k, :v)
+        'INSERT INTO studio_config (school_id, config_key, config_value)
+         VALUES (:sid, :k, :v)
          ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)'
     );
 
     foreach ($editable_keys as $key) {
         if (isset($_POST[$key])) {
-            $upsert->execute([':k' => $key, ':v' => $_POST[$key]]);
+            $upsert->execute([':sid' => current_school_id(), ':k' => $key, ':v' => $_POST[$key]]);
         }
     }
 
@@ -52,13 +44,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_branding'])) {
     if (isset($_FILES['logo_file']) && $_FILES['logo_file']['error'] === UPLOAD_ERR_OK) {
         $logoDir = 'uploads/logo/';
         if (!file_exists($logoDir)) {
-            mkdir($logoDir, 0777, true);
+            mkdir($logoDir, 0750, true);
         }
 
         $fileExt = strtolower(pathinfo($_FILES['logo_file']['name'], PATHINFO_EXTENSION));
-        $allowed = ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp'];
+        $allowed = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 
-        if (!in_array($fileExt, $allowed)) {
+        // Validate MIME type matches extension
+        $finfo = new finfo(FILEINFO_MIME_TYPE);
+        $mimeType = $finfo->file($_FILES['logo_file']['tmp_name']);
+        $allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+
+        if (!in_array($fileExt, $allowed) || !in_array($mimeType, $allowedMimes)) {
             $message = showAlert('Invalid logo file type. Allowed: ' . implode(', ', $allowed), 'error');
         } elseif ($_FILES['logo_file']['size'] > 2097152) {
             $message = showAlert('Logo file too large. Max 2MB.', 'error');
@@ -71,7 +68,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_branding'])) {
 
             $newFilename = 'logo_' . time() . '.' . $fileExt;
             if (move_uploaded_file($_FILES['logo_file']['tmp_name'], $logoDir . $newFilename)) {
-                $upsert->execute([':k' => 'logo_url', ':v' => $logoDir . $newFilename]);
+                $upsert->execute([':sid' => current_school_id(), ':k' => 'logo_url', ':v' => $logoDir . $newFilename]);
             } else {
                 $message = showAlert('Logo upload failed.', 'warning');
             }
@@ -84,7 +81,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_branding'])) {
         if ($oldLogo && file_exists($oldLogo)) {
             @unlink($oldLogo);
         }
-        $upsert->execute([':k' => 'logo_url', ':v' => '']);
+        $upsert->execute([':sid' => current_school_id(), ':k' => 'logo_url', ':v' => '']);
     }
 
     // Handle favicon upload
@@ -104,7 +101,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_branding'])) {
         } else {
             $newFilename = 'favicon_' . time() . '.' . $fileExt;
             if (move_uploaded_file($_FILES['favicon_file']['tmp_name'], $faviconDir . $newFilename)) {
-                $upsert->execute([':k' => 'favicon_url', ':v' => $faviconDir . $newFilename]);
+                $upsert->execute([':sid' => current_school_id(), ':k' => 'favicon_url', ':v' => $faviconDir . $newFilename]);
             }
         }
     }

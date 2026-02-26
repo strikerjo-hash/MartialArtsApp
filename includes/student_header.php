@@ -65,12 +65,23 @@ if (!$_isStudentParent) {
 $_isChildPage = in_array(basename($_SERVER['PHP_SELF']), [
     'parent_child.php', 'parent_child_training.php', 'parent_child_membership.php', 'parent_portal.php'
 ]);
+
+// Get the student's school name for display
+$_studentSchoolName = '';
+try {
+    $_schoolRow = get_current_school();
+    $_studentSchoolName = $_schoolRow['name'] ?? '';
+} catch (\Throwable $e) {}
+
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="<?php echo $theme['primary']; ?>">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title><?php echo htmlspecialchars($siteName); ?> - Student Portal</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -149,6 +160,9 @@ $_isChildPage = in_array(basename($_SERVER['PHP_SELF']), [
                 <?php endif; ?>
                 <div>
                     <h1 class="text-xl font-bold text-gray-800"><?php echo htmlspecialchars($siteName); ?></h1>
+                    <?php if (!empty($_studentSchoolName)): ?>
+                        <p class="text-xs text-gray-500" style="margin-top: -1px;"><?php echo htmlspecialchars($_studentSchoolName); ?></p>
+                    <?php endif; ?>
                     <p class="text-sm text-gray-600">Welcome, <?php echo htmlspecialchars($studentDisplayName); ?>
                         <?php if ($_isStudentParent): ?>
                             <span class="inline-block px-2 py-0.5 text-xs font-semibold bg-blue-100 text-blue-700 rounded-full ml-1">Parent Account</span>
@@ -230,6 +244,9 @@ $_isChildPage = in_array(basename($_SERVER['PHP_SELF']), [
                     <?php endif; ?>
                 </a>
                 <?php endif; ?>
+                <a href="student_training_wizard.php" class="nav-link <?php echo basename($_SERVER['PHP_SELF']) == 'student_training_wizard.php' ? 'nav-link-active' : ''; ?>" title="Portal Guide">
+                    Guide
+                </a>
             </nav>
 
             <a href="student_logout.php" class="text-white px-4 py-2 rounded-lg text-sm transition-colors" style="background-color: <?php echo $theme['primary']; ?>;" onmouseover="this.style.backgroundColor='<?php echo $primaryHover; ?>'" onmouseout="this.style.backgroundColor='<?php echo $theme['primary']; ?>'">

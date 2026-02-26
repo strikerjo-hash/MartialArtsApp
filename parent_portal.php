@@ -28,10 +28,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($identifier === '') {
             $message = showAlert('Please enter a student username or email.', 'error');
         } else {
-            $findStmt = $pdo->prepare(
-                "SELECT id, first_name, last_name FROM students WHERE (username = :u1 OR email = :u2) AND status = 'active' LIMIT 1"
-            );
-            $findStmt->execute([':u1' => $identifier, ':u2' => $identifier]);
+            $findSql = "SELECT id, first_name, last_name FROM students WHERE (username = :u1 OR email = :u2) AND status = 'active'";
+            if (!is_viewing_all_schools()) {
+                $findSql .= ' AND school_id = :school_id';
+            }
+            $findSql .= ' LIMIT 1';
+            $findStmt = $pdo->prepare($findSql);
+            $findStmt->bindValue(':u1', $identifier);
+            $findStmt->bindValue(':u2', $identifier);
+            if (!is_viewing_all_schools()) {
+                $findStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT);
+            }
+            $findStmt->execute();
             $foundStudent = $findStmt->fetch();
 
             if (!$foundStudent) {
@@ -66,22 +74,26 @@ $childIds = array_column($children, 'id');
 $upcomingEvents = [];
 if (!empty($childIds)) {
     $placeholders = implode(',', array_fill(0, count($childIds), '?'));
+    $params = $childIds;
     $evStmt = $pdo->prepare("
         SELECT e.id, e.name, e.event_date, e.start_time, e.event_type, e.location,
                er.student_id, s.first_name, s.last_name
         FROM events e
         JOIN event_registrations er ON er.event_id = e.id
         JOIN students s ON s.id = er.student_id
-        WHERE er.student_id IN ({$placeholders}) AND e.event_date >= CURDATE()
+        WHERE er.student_id IN ({$placeholders}) AND e.event_date >= CURDATE()" . school_where('e') . "
         ORDER BY e.event_date ASC LIMIT 10
     ");
-    $evStmt->execute($childIds);
+    school_param($params);
+    $evStmt->execute($params);
     $upcomingEvents = $evStmt->fetchAll();
 }
 
 // Fetch parent profile (from students table since parent is a student)
-$parentStmt = $pdo->prepare("SELECT * FROM students WHERE id = ? LIMIT 1");
-$parentStmt->execute([$parentId]);
+$params = [$parentId];
+$parentStmt = $pdo->prepare("SELECT * FROM students WHERE id = ?" . school_where() . " LIMIT 1");
+school_param($params);
+$parentStmt->execute($params);
 $parent = $parentStmt->fetch();
 
 include 'includes/parent_header.php';

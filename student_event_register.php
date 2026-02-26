@@ -13,16 +13,21 @@ $event_id = $_GET['event_id'] ?? 0;
 $message = '';
 
 // Fetch student info (including DOB)
-$studentStmt = $pdo->prepare("SELECT first_name, last_name, date_of_birth FROM students WHERE id = ?");
-$studentStmt->execute([$student_id]);
+$params = [$student_id];
+$studentStmt = $pdo->prepare("SELECT first_name, last_name, date_of_birth FROM students WHERE id = ?" . school_where());
+school_param($params);
+$studentStmt->execute($params);
 $student_info = $studentStmt->fetch();
 
 // Handle DOB save
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_dob'])) {
+    verify_csrf();
     $dob = $_POST['date_of_birth'] ?? '';
     if ($dob) {
-        $dobStmt = $pdo->prepare("UPDATE students SET date_of_birth = ? WHERE id = ?");
-        $dobStmt->execute([$dob, $student_id]);
+        $params = [$dob, $student_id];
+        $dobStmt = $pdo->prepare("UPDATE students SET date_of_birth = ? WHERE id = ?" . school_where());
+        school_param($params);
+        $dobStmt->execute($params);
         $student_info['date_of_birth'] = $dob;
         $message = showAlert('Date of birth saved successfully!', 'success');
     } else {
@@ -33,8 +38,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_dob'])) {
 $student_dob = $student_info['date_of_birth'] ?? null;
 
 // Get event details
-$stmt = $pdo->prepare("SELECT * FROM events WHERE id = ?");
-$stmt->execute([$event_id]);
+$params = [$event_id];
+$stmt = $pdo->prepare("SELECT * FROM events WHERE id = ?" . school_where());
+school_param($params);
+$stmt->execute($params);
 $event = $stmt->fetch();
 
 if (!$event) {
@@ -49,18 +56,23 @@ if (empty($event['requires_registration'])) {
 }
 
 // Check if already registered
-$check_reg = $pdo->prepare("SELECT * FROM event_registrations WHERE student_id = ? AND event_id = ?");
-$check_reg->execute([$student_id, $event_id]);
+$params = [$student_id, $event_id];
+$check_reg = $pdo->prepare("SELECT * FROM event_registrations WHERE student_id = ? AND event_id = ?" . school_where());
+school_param($params);
+$check_reg->execute($params);
 $existing_registration = $check_reg->fetch();
 
 // Handle registration submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register'])) {
+    verify_csrf();
     if ($existing_registration) {
         $message = showAlert('You are already registered for this event!', 'error');
     } else {
         // Check if event is full
-        $count = $pdo->prepare("SELECT COUNT(*) as count FROM event_registrations WHERE event_id = ?");
-        $count->execute([$event_id]);
+        $params = [$event_id];
+        $count = $pdo->prepare("SELECT COUNT(*) as count FROM event_registrations WHERE event_id = ?" . school_where());
+        school_param($params);
+        $count->execute($params);
         $current_count = $count->fetch()['count'];
         
         if ($event['max_participants'] > 0 && $current_count >= $event['max_participants']) {
@@ -68,10 +80,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register'])) {
         } else {
             // Create registration
             $stmt = $pdo->prepare("
-                INSERT INTO event_registrations (student_id, event_id, registration_date, payment_status, attendance_status)
-                VALUES (?, ?, CURDATE(), 'pending', 'registered')
+                INSERT INTO event_registrations (school_id, student_id, event_id, registration_date, payment_status, attendance_status)
+                VALUES (?, ?, ?, CURDATE(), 'pending', 'registered')
             ");
-            $stmt->execute([$student_id, $event_id]);
+            $stmt->execute([current_school_id(), $student_id, $event_id]);
             $registration_id = $pdo->lastInsertId();
             
             // Redirect to payment if fee > 0
@@ -80,8 +92,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register'])) {
                 exit;
             } else {
                 // Free event - mark as paid
-                $stmt = $pdo->prepare("UPDATE event_registrations SET payment_status = 'waived' WHERE id = ?");
-                $stmt->execute([$registration_id]);
+                $params = [$registration_id];
+                $stmt = $pdo->prepare("UPDATE event_registrations SET payment_status = 'waived' WHERE id = ?" . school_where());
+                school_param($params);
+                $stmt->execute($params);
                 
                 header('Location: student_events.php?success=1');
                 exit;
@@ -130,8 +144,10 @@ include 'includes/student_header.php';
                         <div>
                             <p class="text-sm text-gray-600 mb-1">Capacity</p>
                             <?php 
-                            $count = $pdo->prepare("SELECT COUNT(*) as count FROM event_registrations WHERE event_id = ?");
-                            $count->execute([$event_id]);
+                            $params = [$event_id];
+                            $count = $pdo->prepare("SELECT COUNT(*) as count FROM event_registrations WHERE event_id = ?" . school_where());
+                            school_param($params);
+                            $count->execute($params);
                             $current_count = $count->fetch()['count'];
                             $spots_left = $event['max_participants'] - $current_count;
                             ?>
@@ -182,6 +198,7 @@ include 'includes/student_header.php';
                                 </div>
                             </div>
                             <form method="POST" class="flex items-end gap-3">
+                                <?= csrf_field() ?>
                                 <div class="flex-1">
                                     <label class="block text-sm font-medium text-gray-700 mb-1">Date of Birth</label>
                                     <input type="date" name="date_of_birth" required max="<?php echo date('Y-m-d'); ?>"
@@ -213,6 +230,7 @@ include 'includes/student_header.php';
                         </div>
                     <?php else: ?>
                         <form method="POST">
+                            <?= csrf_field() ?>
                             <div class="bg-blue-50 border border-blue-200 rounded-lg p-6 mb-6">
                                 <h3 class="font-semibold text-gray-800 mb-3">Registration Summary</h3>
                                 <div class="flex justify-between items-center">

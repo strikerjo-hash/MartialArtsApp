@@ -2,38 +2,45 @@
 require_once 'config.php';
 requireLogin();
 
-// Only admins and staff can approve registrations
-if (!in_array(getCurrentUser()['role'], ['admin', 'staff'])) {
-    header('Location: index.php');
-    exit;
+// Only admins, super admins, and staff can approve registrations
+if (!in_array(getCurrentUser()['role'], ['admin', 'super_admin', 'staff'])) {
+    accessDenied('Registration approval requires Admin or Staff privileges.');
 }
 
 $message = '';
 
 // Handle approval
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['approve'])) {
+    verify_csrf();
     $student_id = $_POST['student_id'];
     $membership_id = $_POST['membership_id'];
     
     // Activate student
-    $stmt = $pdo->prepare("UPDATE students SET status = 'active' WHERE id = ?");
-    $stmt->execute([$student_id]);
+    $params = [$student_id];
+    $stmt = $pdo->prepare("UPDATE students SET status = 'active' WHERE id = ?" . school_where());
+    school_param($params);
+    $stmt->execute($params);
     
     // Activate membership and mark as paid
-    $stmt = $pdo->prepare("UPDATE memberships SET status = 'active', payment_status = 'paid', amount_paid = (SELECT price FROM membership_plans WHERE id = memberships.plan_id) WHERE id = ?");
-    $stmt->execute([$membership_id]);
+    $params = [$membership_id];
+    $stmt = $pdo->prepare("UPDATE memberships SET status = 'active', payment_status = 'paid', amount_paid = (SELECT price FROM membership_plans WHERE id = memberships.plan_id) WHERE id = ?" . school_where());
+    school_param($params);
+    $stmt->execute($params);
     
     // Record payment
-    $membership = $pdo->prepare("SELECT * FROM memberships WHERE id = ?");
-    $membership->execute([$membership_id]);
+    $params = [$membership_id];
+    $membership = $pdo->prepare("SELECT * FROM memberships WHERE id = ?" . school_where());
+    school_param($params);
+    $membership->execute($params);
     $membership_data = $membership->fetch();
     
     $stmt = $pdo->prepare("
-        INSERT INTO payments (student_id, payment_type, reference_id, amount, 
+        INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount,
                             payment_method, payment_date, receipt_number, notes)
-        VALUES (?, 'membership', ?, ?, 'cash', CURDATE(), ?, 'Manual approval - Offline payment received')
+        VALUES (?, ?, 'membership', ?, ?, 'cash', CURDATE(), ?, 'Manual approval - Offline payment received')
     ");
     $stmt->execute([
+        current_school_id(),
         $student_id,
         $membership_id,
         $membership_data['amount_paid'],
@@ -45,29 +52,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['approve'])) {
 
 // Handle rejection
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['reject'])) {
+    verify_csrf();
     $student_id = $_POST['student_id'];
     $membership_id = $_POST['membership_id'];
     
     // Delete membership
-    $stmt = $pdo->prepare("DELETE FROM memberships WHERE id = ?");
-    $stmt->execute([$membership_id]);
-    
+    $params = [$membership_id];
+    $stmt = $pdo->prepare("DELETE FROM memberships WHERE id = ?" . school_where());
+    school_param($params);
+    $stmt->execute($params);
+
     // Delete student
-    $stmt = $pdo->prepare("DELETE FROM students WHERE id = ?");
-    $stmt->execute([$student_id]);
+    $params = [$student_id];
+    $stmt = $pdo->prepare("DELETE FROM students WHERE id = ?" . school_where());
+    school_param($params);
+    $stmt->execute($params);
     
     $message = showAlert('Registration rejected and removed.', 'success');
 }
 
 // Get pending registrations
-$pending = $pdo->query("
+$params = [];
+$stmt = $pdo->prepare("
     SELECT s.*, m.id as membership_id, mp.name as plan_name, mp.price as plan_price, m.created_at as registration_date
     FROM students s
     JOIN memberships m ON s.id = m.student_id
     JOIN membership_plans mp ON m.plan_id = mp.id
-    WHERE s.status = 'inactive' AND m.status = 'cancelled' AND m.payment_status = 'pending'
+    WHERE s.status = 'inactive' AND m.status = 'cancelled' AND m.payment_status = 'pending'" . school_where('s') . "
     ORDER BY m.created_at DESC
-")->fetchAll();
+");
+school_param($params);
+$stmt->execute($params);
+$pending = $stmt->fetchAll();
 
 include 'includes/header.php';
 ?>
@@ -154,6 +170,7 @@ include 'includes/header.php';
                         
                         <div class="flex space-x-3">
                             <form method="POST" class="flex-1">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="approve" value="1">
                                 <input type="hidden" name="student_id" value="<?php echo $registration['id']; ?>">
                                 <input type="hidden" name="membership_id" value="<?php echo $registration['membership_id']; ?>">
@@ -164,6 +181,7 @@ include 'includes/header.php';
                             </form>
                             
                             <form method="POST" class="flex-1" onsubmit="return confirmDelete('Are you sure you want to reject this registration? This will delete the student account.')">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="reject" value="1">
                                 <input type="hidden" name="student_id" value="<?php echo $registration['id']; ?>">
                                 <input type="hidden" name="membership_id" value="<?php echo $registration['membership_id']; ?>">

@@ -5,10 +5,9 @@ require_once __DIR__ . '/includes/parent_auth.php';
 require_once __DIR__ . '/includes/payment_gateway.php';
 requireLogin();
 
-// Admin-only access
-if (getCurrentUser()['role'] !== 'admin') {
-    header('Location: index.php');
-    exit;
+// Admin / Super Admin access
+if (!in_array(getCurrentUser()['role'], ['admin', 'super_admin'])) {
+    accessDenied('Payment import requires Admin or Super Admin privileges.');
 }
 
 $pdo = get_db();
@@ -146,10 +145,12 @@ function generatePaymentImportUsername(PDO $pdo, string $firstName, string $last
 
     $username = $base;
     $counter  = 1;
-    $stmt = $pdo->prepare('SELECT COUNT(*) FROM students WHERE username = ?');
+    $stmt = $pdo->prepare('SELECT COUNT(*) FROM students WHERE username = ?' . school_where());
 
     while (true) {
-        $stmt->execute([$username]);
+        $params = [$username];
+        school_param($params);
+        $stmt->execute($params);
         if ((int) $stmt->fetchColumn() === 0) break;
         $username = $base . $counter;
         $counter++;
@@ -167,9 +168,11 @@ function findStudentByName(PDO $pdo, string $firstName, string $lastName): ?arra
     $stmt = $pdo->prepare(
         'SELECT id, first_name, last_name, email, is_parent
          FROM students
-         WHERE LOWER(TRIM(first_name)) = LOWER(?) AND LOWER(TRIM(last_name)) = LOWER(?)'
+         WHERE LOWER(TRIM(first_name)) = LOWER(?) AND LOWER(TRIM(last_name)) = LOWER(?)' . school_where()
     );
-    $stmt->execute([trim($firstName), trim($lastName)]);
+    $params = [trim($firstName), trim($lastName)];
+    school_param($params);
+    $stmt->execute($params);
     $match = $stmt->fetch();
     return $match ?: null;
 }
@@ -184,11 +187,13 @@ function findAnyAccountByName(PDO $pdo, string $firstName, string $lastName): ?a
     $stmt = $pdo->prepare(
         'SELECT id, first_name, last_name, email, is_parent
          FROM students
-         WHERE LOWER(TRIM(first_name)) = LOWER(?) AND LOWER(TRIM(last_name)) = LOWER(?)
+         WHERE LOWER(TRIM(first_name)) = LOWER(?) AND LOWER(TRIM(last_name)) = LOWER(?)' . school_where() . '
          ORDER BY is_parent ASC
          LIMIT 1'
     );
-    $stmt->execute([trim($firstName), trim($lastName)]);
+    $params = [trim($firstName), trim($lastName)];
+    school_param($params);
+    $stmt->execute($params);
     $match = $stmt->fetch();
     return $match ?: null;
 }
@@ -232,7 +237,10 @@ function executePaymentImport(PDO $pdo, array $rows, array $options): array
         // Cache: "email" => student row (for email uniqueness checking during auto-creation)
         $emailCache = [];
         try {
-            $stmtE = $pdo->query("SELECT id, first_name, last_name, email, is_parent FROM students WHERE email IS NOT NULL AND email != ''");
+            $stmtE = $pdo->prepare("SELECT id, first_name, last_name, email, is_parent FROM students WHERE email IS NOT NULL AND email != ''" . school_where());
+            $eParams = [];
+            school_param($eParams);
+            $stmtE->execute($eParams);
             while ($eRow = $stmtE->fetch()) {
                 $emailCache[strtolower(trim($eRow['email']))] = $eRow;
             }
@@ -245,14 +253,17 @@ function executePaymentImport(PDO $pdo, array $rows, array $options): array
         // Pre-load existing payments for duplicate check (keyed by txn_id + name + amount)
         $existingPayments = [];
         try {
-            $stmt = $pdo->query("
+            $pyStmt = $pdo->prepare("
                 SELECT p.receipt_number, p.payment_date, p.amount, p.payment_type, p.payment_method, p.notes,
                        s.first_name, s.last_name
                 FROM payments p
                 LEFT JOIN students s ON p.student_id = s.id
-                WHERE p.receipt_number IS NOT NULL AND p.receipt_number != ''
+                WHERE p.receipt_number IS NOT NULL AND p.receipt_number != ''" . school_where('p') . "
             ");
-            while ($r = $stmt->fetch()) {
+            $pyParams = [];
+            school_param($pyParams);
+            $pyStmt->execute($pyParams);
+            while ($r = $pyStmt->fetch()) {
                 // Extract base transaction ID (strip -2, -3 suffixes we may have added)
                 $baseTxn = preg_replace('/-\d+$/', '', $r['receipt_number']);
                 $studentName = strtolower(trim(($r['first_name'] ?? '') . '|' . ($r['last_name'] ?? '')));
@@ -429,9 +440,10 @@ function executePaymentImport(PDO $pdo, array $rows, array $options): array
                         }
 
                         $pdo->prepare("
-                            INSERT INTO students (first_name, last_name, username, email, password_hash, join_date, belt_rank, status, notes, is_parent, must_change_password, registration_incomplete)
-                            VALUES (?, ?, ?, ?, ?, ?, 'White', 'active', '[Payment Import] Auto-created parent — buyer with no participant', 1, 1, 1)
+                            INSERT INTO students (school_id, first_name, last_name, username, email, password_hash, join_date, belt_rank, status, notes, is_parent, must_change_password, registration_incomplete)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 'White', 'active', '[Payment Import] Auto-created parent — buyer with no participant', 1, 1, 1)
                         ")->execute([
+                            current_school_id(),
                             sanitizeInput($name['first']),
                             sanitizeInput($name['last']),
                             $username,
@@ -479,9 +491,10 @@ function executePaymentImport(PDO $pdo, array $rows, array $options): array
                         }
 
                         $pdo->prepare("
-                            INSERT INTO students (first_name, last_name, username, email, password_hash, join_date, belt_rank, status, notes, is_parent, must_change_password, registration_incomplete)
-                            VALUES (?, ?, ?, ?, ?, ?, 'White', 'active', '[Payment Import] Auto-created — student not found during payment import', 0, 1, 1)
+                            INSERT INTO students (school_id, first_name, last_name, username, email, password_hash, join_date, belt_rank, status, notes, is_parent, must_change_password, registration_incomplete)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 'White', 'active', '[Payment Import] Auto-created — student not found during payment import', 0, 1, 1)
                         ")->execute([
+                            current_school_id(),
                             sanitizeInput($name['first']),
                             sanitizeInput($name['last']),
                             $username,
@@ -551,9 +564,10 @@ function executePaymentImport(PDO $pdo, array $rows, array $options): array
             // Insert payment record
             if (!$isDryRun && $student) {
                 $pdo->prepare("
-                    INSERT INTO payments (student_id, payment_type, amount, payment_method, payment_date, receipt_number, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO payments (school_id, student_id, payment_type, amount, payment_method, payment_date, receipt_number, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ")->execute([
+                    current_school_id(),
                     (int) $student['id'],
                     $paymentType,
                     $amount,
@@ -567,8 +581,10 @@ function executePaymentImport(PDO $pdo, array $rows, array $options): array
                 if ($updateEmails && !empty($emailStr) && empty($student['email'])) {
                     $emailLower = strtolower(trim($emailStr));
                     if (!isset($emailCache[$emailLower])) {
-                        $pdo->prepare("UPDATE students SET email = ? WHERE id = ? AND (email IS NULL OR email = '')")
-                            ->execute([$emailStr, (int) $student['id']]);
+                        $emailUpdateParams = [$emailStr, (int) $student['id']];
+                        school_param($emailUpdateParams);
+                        $pdo->prepare("UPDATE students SET email = ? WHERE id = ? AND (email IS NULL OR email = '')" . school_where())
+                            ->execute($emailUpdateParams);
                         $results['emails_updated']++;
                         $studentCache[$cacheKey]['email'] = $emailStr;
                         $emailCache[$emailLower] = $student; // Reserve in cache
@@ -638,13 +654,16 @@ function analyzePaymentRows(PDO $pdo, array $rows): array
     // Load existing payments for duplicate check (keyed by txn_id + name + amount)
     $existingPayments = [];
     try {
-        $stmt = $pdo->query("
+        $stmt = $pdo->prepare("
             SELECT p.receipt_number, p.payment_date, p.amount, p.payment_type, p.payment_method, p.notes,
                    s.first_name, s.last_name
             FROM payments p
             LEFT JOIN students s ON p.student_id = s.id
-            WHERE p.receipt_number IS NOT NULL AND p.receipt_number != ''
+            WHERE p.receipt_number IS NOT NULL AND p.receipt_number != ''" . school_where('p') . "
         ");
+        $analyzeParams = [];
+        school_param($analyzeParams);
+        $stmt->execute($analyzeParams);
         while ($r = $stmt->fetch()) {
             $baseTxn = preg_replace('/-\d+$/', '', $r['receipt_number']);
             $studentName = strtolower(trim(($r['first_name'] ?? '') . '|' . ($r['last_name'] ?? '')));

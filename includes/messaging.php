@@ -13,78 +13,7 @@
 
 require_once __DIR__ . '/../config.php';
 
-// ---------------------------------------------------------------------------
-// Database Migrations
-// ---------------------------------------------------------------------------
-
-function ensure_messaging_tables(): void
-{
-    $pdo = get_db();
-
-    // 1. messages table — stores each composed message
-    try {
-        $pdo->exec("CREATE TABLE IF NOT EXISTS messages (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            subject VARCHAR(255) NOT NULL,
-            body TEXT NOT NULL,
-            sender_id INT NOT NULL COMMENT 'users.id of the admin/instructor who sent it',
-            channel_email TINYINT(1) NOT NULL DEFAULT 0,
-            channel_sms TINYINT(1) NOT NULL DEFAULT 0,
-            channel_inapp TINYINT(1) NOT NULL DEFAULT 1,
-            audience_type ENUM('all','all_students','all_staff','custom') NOT NULL DEFAULT 'all_students',
-            audience_filters TEXT DEFAULT NULL COMMENT 'JSON blob of filter criteria',
-            total_recipients INT NOT NULL DEFAULT 0,
-            emails_sent INT NOT NULL DEFAULT 0,
-            emails_failed INT NOT NULL DEFAULT 0,
-            sms_sent INT NOT NULL DEFAULT 0,
-            sms_failed INT NOT NULL DEFAULT 0,
-            status ENUM('draft','sending','sent','failed') NOT NULL DEFAULT 'draft',
-            sent_at DATETIME DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_msg_sender (sender_id),
-            INDEX idx_msg_status (status),
-            INDEX idx_msg_sent (sent_at)
-        )");
-    } catch (\PDOException $e) {}
-
-    // 2. message_recipients table — per-recipient delivery tracking
-    try {
-        $pdo->exec("CREATE TABLE IF NOT EXISTS message_recipients (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            message_id INT NOT NULL,
-            recipient_type ENUM('student','user') NOT NULL,
-            recipient_id INT NOT NULL COMMENT 'students.id or users.id',
-            email_status ENUM('pending','sent','failed','skipped') DEFAULT 'skipped',
-            sms_status ENUM('pending','sent','failed','skipped') DEFAULT 'skipped',
-            inapp_status ENUM('delivered','read') DEFAULT 'delivered',
-            read_at DATETIME DEFAULT NULL,
-            email_error TEXT DEFAULT NULL,
-            sms_error TEXT DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_mr_message (message_id),
-            INDEX idx_mr_recipient (recipient_type, recipient_id),
-            INDEX idx_mr_unread (recipient_type, recipient_id, inapp_status),
-            UNIQUE KEY unique_msg_recipient (message_id, recipient_type, recipient_id)
-        )");
-    } catch (\PDOException $e) {}
-
-    // 3. Add phone column to users table (for SMS to staff/instructors)
-    try {
-        $pdo->exec("ALTER TABLE users ADD COLUMN phone VARCHAR(20) DEFAULT NULL AFTER email");
-    } catch (\PDOException $e) {}
-
-    // 4. Default role_permissions for messages.php
-    try {
-        $pdo->exec("INSERT IGNORE INTO role_permissions (role, page, can_view, can_create, can_edit, can_delete) VALUES
-            ('admin', 'messages.php', 1, 1, 1, 1),
-            ('instructor', 'messages.php', 1, 1, 0, 0),
-            ('staff', 'messages.php', 1, 0, 0, 0)
-        ");
-    } catch (\PDOException $e) {}
-}
-
-// Run migrations on include
-ensure_messaging_tables();
+// Migrations have been moved to migrate.php
 
 // ---------------------------------------------------------------------------
 // Phone Number Normalization
@@ -142,8 +71,15 @@ function get_recipients_by_filter(array $filters): array
     // ── Fetch Students ──
     $includeStudents = in_array($audienceType, ['all', 'all_students', 'custom'], true);
     if ($includeStudents) {
+        // Uses named params so we use manual is_viewing_all_schools() approach
         $sql    = "SELECT DISTINCT s.id, s.first_name, s.last_name, s.email, s.phone FROM students s WHERE 1=1";
         $params = [];
+
+        // Multi-tenancy scoping
+        if (!is_viewing_all_schools()) {
+            $sql .= " AND s.school_id = :school_id";
+            $params[':school_id'] = current_school_id();
+        }
 
         // Student status filter
         $status = $filters['student_status'] ?? '';
@@ -177,6 +113,13 @@ function get_recipients_by_filter(array $filters): array
             try {
                 $sql2    = "SELECT DISTINCT s.id, s.first_name, s.last_name, s.email, s.phone FROM students s WHERE 1=1";
                 $params2 = [];
+
+                // Multi-tenancy scoping (retry)
+                if (!is_viewing_all_schools()) {
+                    $sql2 .= " AND s.school_id = :school_id";
+                    $params2[':school_id'] = current_school_id();
+                }
+
                 if (!empty($filters['plan_id'])) {
                     $sql2 .= " AND s.id IN (SELECT m.student_id FROM memberships m WHERE m.plan_id = :plan_id AND m.status = 'active')";
                     $params2[':plan_id'] = (int) $filters['plan_id'];
@@ -205,19 +148,21 @@ function get_recipients_by_filter(array $filters): array
 
         if (!empty($userRoles)) {
             $rolePlaceholders = implode(',', array_fill(0, count($userRoles), '?'));
+            $uParams = array_values($userRoles);
             try {
-                $uStmt = $pdo->prepare(
-                    "SELECT id, full_name, email, phone FROM users WHERE role IN ({$rolePlaceholders}) ORDER BY full_name"
-                );
-                $uStmt->execute(array_values($userRoles));
+                $uSql = "SELECT id, full_name, email, phone FROM users WHERE role IN ({$rolePlaceholders})" . school_where() . " ORDER BY full_name";
+                school_param($uParams);
+                $uStmt = $pdo->prepare($uSql);
+                $uStmt->execute($uParams);
                 $users = $uStmt->fetchAll();
             } catch (\PDOException $e) {
                 // phone column might not exist yet
                 try {
-                    $uStmt2 = $pdo->prepare(
-                        "SELECT id, full_name, email, '' as phone FROM users WHERE role IN ({$rolePlaceholders}) ORDER BY full_name"
-                    );
-                    $uStmt2->execute(array_values($userRoles));
+                    $uParams2 = array_values($userRoles);
+                    $uSql2 = "SELECT id, full_name, email, '' as phone FROM users WHERE role IN ({$rolePlaceholders})" . school_where() . " ORDER BY full_name";
+                    school_param($uParams2);
+                    $uStmt2 = $pdo->prepare($uSql2);
+                    $uStmt2->execute($uParams2);
                     $users = $uStmt2->fetchAll();
                 } catch (\PDOException $e2) {}
             }
@@ -379,17 +324,22 @@ function dispatch_message(int $messageId): array
 
     $pdo = get_db();
 
-    // Fetch the message
-    $mStmt = $pdo->prepare("SELECT * FROM messages WHERE id = ?");
-    $mStmt->execute([$messageId]);
+    // Fetch the message (scoped to current school)
+    $params = [$messageId];
+    $mStmt = $pdo->prepare("SELECT * FROM messages WHERE id = ?" . school_where());
+    school_param($params);
+    $mStmt->execute($params);
     $msg = $mStmt->fetch();
 
     if (!$msg) {
         return ['total' => 0, 'emails_sent' => 0, 'emails_failed' => 0, 'sms_sent' => 0, 'sms_failed' => 0];
     }
 
-    // Mark as sending
-    $pdo->prepare("UPDATE messages SET status = 'sending' WHERE id = ?")->execute([$messageId]);
+    // Mark as sending (scoped to current school)
+    $updParams = [$messageId];
+    $updSql = "UPDATE messages SET status = 'sending' WHERE id = ?" . school_where();
+    school_param($updParams);
+    $pdo->prepare($updSql)->execute($updParams);
 
     // Resolve recipients
     $filters = json_decode($msg['audience_filters'] ?: '{}', true) ?: [];
@@ -404,15 +354,15 @@ function dispatch_message(int $messageId): array
     ];
 
     $insertRecip = $pdo->prepare("
-        INSERT IGNORE INTO message_recipients (message_id, recipient_type, recipient_id, email_status, sms_status, inapp_status)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT IGNORE INTO message_recipients (school_id, message_id, recipient_type, recipient_id, email_status, sms_status, inapp_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     ");
 
     $updateRecip = $pdo->prepare("
         UPDATE message_recipients
         SET email_status = ?, email_error = ?, sms_status = ?, sms_error = ?
-        WHERE message_id = ? AND recipient_type = ? AND recipient_id = ?
-    ");
+        WHERE message_id = ? AND recipient_type = ? AND recipient_id = ?" . school_where()
+    );
 
     // Process students
     foreach ($recipients['students'] as $s) {
@@ -422,8 +372,9 @@ function dispatch_message(int $messageId): array
         $smsError    = null;
         $inappStatus = $msg['channel_inapp'] ? 'delivered' : 'read'; // 'read' effectively means no in-app
 
-        // Insert recipient row
+        // Insert recipient row (with school_id)
         $insertRecip->execute([
+            current_school_id(),
             $messageId, 'student', $s['id'],
             $msg['channel_email'] ? 'pending' : 'skipped',
             $msg['channel_sms'] ? 'pending' : 'skipped',
@@ -457,11 +408,13 @@ function dispatch_message(int $messageId): array
             $smsError  = 'No phone number';
         }
 
-        // Update delivery statuses
-        $updateRecip->execute([
+        // Update delivery statuses (scoped to current school)
+        $urParams = [
             $emailStatus, $emailError, $smsStatus, $smsError,
             $messageId, 'student', $s['id'],
-        ]);
+        ];
+        school_param($urParams);
+        $updateRecip->execute($urParams);
 
         $stats['total']++;
     }
@@ -476,6 +429,7 @@ function dispatch_message(int $messageId): array
         $inappStatus = $msg['channel_inapp'] ? 'delivered' : 'read';
 
         $insertRecip->execute([
+            current_school_id(),
             $messageId, 'user', $u['id'],
             $msg['channel_email'] ? 'pending' : 'skipped',
             $msg['channel_sms'] ? 'pending' : 'skipped',
@@ -507,28 +461,32 @@ function dispatch_message(int $messageId): array
             $smsError  = 'No phone number';
         }
 
-        $updateRecip->execute([
+        $urParams2 = [
             $emailStatus, $emailError, $smsStatus, $smsError,
             $messageId, 'user', $u['id'],
-        ]);
+        ];
+        school_param($urParams2);
+        $updateRecip->execute($urParams2);
 
         $stats['total']++;
     }
 
-    // Update aggregate stats on the message
-    $pdo->prepare("
+    // Update aggregate stats on the message (scoped to current school)
+    $finalParams = [
+        $stats['total'],
+        $stats['emails_sent'], $stats['emails_failed'],
+        $stats['sms_sent'], $stats['sms_failed'],
+        $messageId,
+    ];
+    $finalSql = "
         UPDATE messages
         SET total_recipients = ?,
             emails_sent = ?, emails_failed = ?,
             sms_sent = ?, sms_failed = ?,
             status = 'sent', sent_at = NOW()
-        WHERE id = ?
-    ")->execute([
-        $stats['total'],
-        $stats['emails_sent'], $stats['emails_failed'],
-        $stats['sms_sent'], $stats['sms_failed'],
-        $messageId,
-    ]);
+        WHERE id = ?" . school_where();
+    school_param($finalParams);
+    $pdo->prepare($finalSql)->execute($finalParams);
 
     return $stats;
 }
@@ -544,6 +502,7 @@ function get_unread_message_count(int $studentId): int
 {
     $pdo = get_db();
     try {
+        $params = [$studentId];
         $stmt = $pdo->prepare("
             SELECT COUNT(*) FROM message_recipients mr
             JOIN messages m ON m.id = mr.message_id
@@ -551,9 +510,10 @@ function get_unread_message_count(int $studentId): int
               AND mr.recipient_id = ?
               AND mr.inapp_status = 'delivered'
               AND m.channel_inapp = 1
-              AND m.status = 'sent'
-        ");
-        $stmt->execute([$studentId]);
+              AND m.status = 'sent'" . school_where('m')
+        );
+        school_param($params);
+        $stmt->execute($params);
         return (int) $stmt->fetchColumn();
     } catch (\PDOException $e) {
         return 0;
@@ -567,6 +527,7 @@ function get_unread_message_count_user(int $userId): int
 {
     $pdo = get_db();
     try {
+        $params = [$userId];
         $stmt = $pdo->prepare("
             SELECT COUNT(*) FROM message_recipients mr
             JOIN messages m ON m.id = mr.message_id
@@ -574,9 +535,10 @@ function get_unread_message_count_user(int $userId): int
               AND mr.recipient_id = ?
               AND mr.inapp_status = 'delivered'
               AND m.channel_inapp = 1
-              AND m.status = 'sent'
-        ");
-        $stmt->execute([$userId]);
+              AND m.status = 'sent'" . school_where('m')
+        );
+        school_param($params);
+        $stmt->execute($params);
         return (int) $stmt->fetchColumn();
     } catch (\PDOException $e) {
         return 0;

@@ -21,14 +21,22 @@ $studentId = $_SESSION['student_id'];
 // ── AJAX: Mark message as read ──
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'mark_read' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Content-Type: application/json');
+    $csrfToken = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? $_POST['csrf_token'] ?? '';
+    $expected = $_SESSION['csrf_token'] ?? '';
+    if (!hash_equals($expected, $csrfToken)) {
+        http_response_code(403);
+        echo json_encode(['error' => 'Invalid CSRF token']);
+        exit;
+    }
     $msgId = (int) ($_POST['message_id'] ?? 0);
     if ($msgId && $studentId) {
         try {
-            $pdo->prepare("
-                UPDATE message_recipients
+            $params = [$msgId, $studentId];
+            $sql = "UPDATE message_recipients
                 SET inapp_status = 'read', read_at = NOW()
-                WHERE message_id = ? AND recipient_type = 'student' AND recipient_id = ? AND inapp_status = 'delivered'
-            ")->execute([$msgId, $studentId]);
+                WHERE message_id = ? AND recipient_type = 'student' AND recipient_id = ? AND inapp_status = 'delivered'" . school_where();
+            school_param($params);
+            $pdo->prepare($sql)->execute($params);
             echo json_encode(['success' => true]);
         } catch (\PDOException $e) {
             echo json_encode(['success' => false]);
@@ -42,8 +50,8 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'mark_read' && $_SERVER['REQUEST_M
 // ── Fetch messages for this student ──
 $msgs = [];
 try {
-    $stmt = $pdo->prepare("
-        SELECT m.id as message_id, m.subject, m.body, m.sent_at,
+    $params = [$studentId];
+    $sql = "SELECT m.id as message_id, m.subject, m.body, m.sent_at,
                mr.inapp_status, mr.read_at,
                u.full_name as sender_name
         FROM message_recipients mr
@@ -52,10 +60,11 @@ try {
         WHERE mr.recipient_type = 'student'
           AND mr.recipient_id = ?
           AND m.channel_inapp = 1
-          AND m.status = 'sent'
-        ORDER BY m.sent_at DESC
-    ");
-    $stmt->execute([$studentId]);
+          AND m.status = 'sent'" . school_where('m') . "
+        ORDER BY m.sent_at DESC";
+    school_param($params);
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
     $msgs = $stmt->fetchAll();
 } catch (\PDOException $e) {}
 
@@ -167,6 +176,7 @@ function toggleMessage(msgId, isUnread) {
 function markAsRead(msgId) {
     var fd = new FormData();
     fd.append('message_id', msgId);
+    fd.append('csrf_token', document.querySelector('meta[name="csrf-token"]')?.content || '<?= csrf_token() ?>');
 
     fetch('student_messages.php?ajax=mark_read', { method: 'POST', body: fd })
         .then(function(r) { return r.json(); })

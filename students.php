@@ -32,16 +32,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // Toggle activity status (active <-> inactive)
+    if (isset($_POST['toggle_activity'])) {
+        $toggleId = (int)($_POST['student_id'] ?? 0);
+        if ($toggleId) {
+            $toggleParams = [$toggleId];
+            school_param($toggleParams);
+            $toggleStmt = $pdo->prepare("SELECT activity_status FROM students WHERE id = ?" . school_where());
+            $toggleStmt->execute($toggleParams);
+            $currentActivity = $toggleStmt->fetchColumn();
+
+            $newActivity = ($currentActivity === 'inactive') ? 'active' : 'inactive';
+            $newInactiveSince = ($newActivity === 'inactive') ? date('Y-m-d') : null;
+
+            $updParams = [$newActivity, $newInactiveSince, $toggleId];
+            school_param($updParams);
+            $pdo->prepare("UPDATE students SET activity_status = ?, inactive_since = ? WHERE id = ?" . school_where())
+                ->execute($updParams);
+
+            $label = ($newActivity === 'inactive') ? 'marked as inactive' : 'marked as active';
+            $message = showAlert("Student {$label} successfully!", 'success');
+        }
+    }
+
     if (isset($_POST['action'])) {
         switch ($_POST['action']) {
             case 'add':
                 $stmt = $pdo->prepare("
-                    INSERT INTO students (first_name, last_name, email, phone, date_of_birth, 
-                                        address, emergency_contact_name, emergency_contact_phone, 
+                    INSERT INTO students (school_id, first_name, last_name, email, phone, date_of_birth,
+                                        address, emergency_contact_name, emergency_contact_phone,
                                         join_date, status, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
                 $stmt->execute([
+                    current_school_id(),
                     sanitizeInput($_POST['first_name']),
                     sanitizeInput($_POST['last_name']),
                     sanitizeInput($_POST['email']),
@@ -58,8 +82,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
                 
             case 'delete':
-                $stmt = $pdo->prepare("DELETE FROM students WHERE id = ?");
-                $stmt->execute([$_POST['student_id']]);
+                $deleteParams = [$_POST['student_id']];
+                school_param($deleteParams);
+                $stmt = $pdo->prepare("DELETE FROM students WHERE id = ?" . school_where());
+                $stmt->execute($deleteParams);
                 $message = showAlert('Student deleted successfully!', 'success');
                 break;
         }
@@ -71,6 +97,7 @@ $search = $_GET['search'] ?? '';
 $status_filter = $_GET['status'] ?? '';
 $membership_filter = $_GET['membership'] ?? '';
 $payment_filter = $_GET['payment'] ?? '';
+$activity_filter = $_GET['activity'] ?? '';
 
 $query = "
     SELECT s.*,
@@ -79,8 +106,15 @@ $query = "
            COALESCE(m.membership_status, 'No Membership') as membership_status,
            m.plan_name,
            m.payment_status,
-           m.end_date as membership_end_date
+           m.end_date as membership_end_date,
+           last_att.last_attendance_date
     FROM students s
+    LEFT JOIN (
+        SELECT student_id, MAX(attendance_date) as last_attendance_date
+        FROM attendance
+        WHERE status IN ('present', 'late')
+        GROUP BY student_id
+    ) last_att ON s.id = last_att.student_id
     LEFT JOIN (
         SELECT sb.student_id, b.name as belt_name, mas.name as style_name
         FROM student_belts sb
@@ -101,7 +135,7 @@ $query = "
             ORDER BY m2.end_date DESC LIMIT 1
         )
     ) m ON s.id = m.student_id
-    WHERE 1=1
+    WHERE 1=1 AND s.school_id = :school_id
 ";
 
 if ($search) {
@@ -126,8 +160,11 @@ if ($payment_filter === 'paid') {
 } elseif ($payment_filter === 'overdue') {
     $query .= " AND m.payment_status IN ('pending', 'partial') AND m.end_date < CURDATE()";
 }
+if ($activity_filter) {
+    $query .= " AND s.activity_status = :activity";
+}
 
-$query .= " ORDER BY s.created_at DESC";
+$query .= " ORDER BY s.created_at DESC LIMIT 500";
 
 $stmt = $pdo->prepare($query);
 if ($search) {
@@ -139,13 +176,20 @@ if ($search) {
 if ($status_filter) {
     $stmt->bindValue(':status', $status_filter);
 }
+if ($activity_filter) {
+    $stmt->bindValue(':activity', $activity_filter);
+}
+$stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT);
 $stmt->execute();
 $students = $stmt->fetchAll();
 
 // Build lookup of students who have parent capabilities (is_parent=1)
 $studentsWithParent = [];
 try {
-    $spStmt = $pdo->query("SELECT id, username FROM students WHERE is_parent = 1");
+    $spParams = [];
+    school_param($spParams);
+    $spStmt = $pdo->prepare("SELECT id, username FROM students WHERE is_parent = 1" . school_where());
+    $spStmt->execute($spParams);
     foreach ($spStmt->fetchAll() as $sp) {
         $studentsWithParent[$sp['id']] = $sp['username'];
     }
@@ -194,6 +238,12 @@ include 'includes/header.php';
                 <option value="overdue" <?php echo $payment_filter === 'overdue' ? 'selected' : ''; ?>>Overdue</option>
             </select>
 
+            <select name="activity" class="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                <option value="">All Activity</option>
+                <option value="active" <?php echo $activity_filter === 'active' ? 'selected' : ''; ?>>Actively Attending</option>
+                <option value="inactive" <?php echo $activity_filter === 'inactive' ? 'selected' : ''; ?>>Inactive (Not Attending)</option>
+            </select>
+
             <button type="submit" class="bg-gray-600 hover:bg-gray-700 text-white px-6 py-2 rounded-lg">
                 Filter
             </button>
@@ -213,6 +263,7 @@ include 'includes/header.php';
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Current Belt</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Join Date</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Attended</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Membership</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
@@ -256,6 +307,36 @@ include 'includes/header.php';
                             <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo $statusColors[$student['status']]; ?>">
                                 <?php echo ucfirst($student['status']); ?>
                             </span>
+                            <?php
+                            $activityStatus = $student['activity_status'] ?? 'active';
+                            $mStatusForBadge = $student['membership_status'];
+                            $hasPaidMembership = ($mStatusForBadge === 'active' && !empty($student['membership_end_date']) && $student['membership_end_date'] >= date('Y-m-d'));
+                            if ($activityStatus === 'inactive'): ?>
+                                <span class="mt-1 px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo $hasPaidMembership ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-600'; ?>">
+                                    <?php echo $hasPaidMembership ? 'Inactive - Paying' : 'Not Attending'; ?>
+                                </span>
+                            <?php endif; ?>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <?php
+                            $lastDate = $student['last_attendance_date'] ?? null;
+                            if ($lastDate) {
+                                $daysAgo = (int)((strtotime('today') - strtotime($lastDate)) / 86400);
+                                if ($daysAgo <= 30) {
+                                    $daysBadge = 'bg-green-100 text-green-700';
+                                } elseif ($daysAgo <= 60) {
+                                    $daysBadge = 'bg-yellow-100 text-yellow-700';
+                                } elseif ($daysAgo <= 90) {
+                                    $daysBadge = 'bg-orange-100 text-orange-700';
+                                } else {
+                                    $daysBadge = 'bg-red-100 text-red-700';
+                                }
+                                echo '<div class="text-sm text-gray-900">' . formatDate($lastDate) . '</div>';
+                                echo '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ' . $daysBadge . '">' . $daysAgo . ' days ago</span>';
+                            } else {
+                                echo '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-500">Never</span>';
+                            }
+                            ?>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap">
                             <?php
@@ -313,6 +394,20 @@ include 'includes/header.php';
                                     <button type="submit" class="text-purple-600 hover:text-purple-900 mr-3" title="Enable parent capabilities">Make Parent</button>
                                 </form>
                             <?php endif; ?>
+                            <?php
+                            $isActivityInactive = ($student['activity_status'] ?? 'active') === 'inactive';
+                            $toggleLabel = $isActivityInactive ? 'Mark Active' : 'Mark Inactive';
+                            $toggleColor = $isActivityInactive ? 'text-green-600 hover:text-green-900' : 'text-yellow-600 hover:text-yellow-900';
+                            $toggleConfirm = $isActivityInactive
+                                ? 'Mark this student as actively attending?'
+                                : 'Mark this student as inactive (not attending)?';
+                            ?>
+                            <form method="POST" class="inline" onsubmit="return confirm('<?php echo $toggleConfirm; ?>')">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="toggle_activity" value="1">
+                                <input type="hidden" name="student_id" value="<?php echo $student['id']; ?>">
+                                <button type="submit" class="<?php echo $toggleColor; ?> mr-3" title="<?php echo $toggleLabel; ?>"><?php echo $toggleLabel; ?></button>
+                            </form>
                             <form method="POST" class="inline" onsubmit="return confirmDelete('Are you sure you want to delete this student?')">
                                 <?= csrf_field() ?>
                                 <input type="hidden" name="action" value="delete">

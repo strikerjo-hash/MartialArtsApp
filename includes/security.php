@@ -41,12 +41,25 @@ function verify_csrf(): bool
     $expected  = $_SESSION['csrf_token'] ?? '';
 
     if (!hash_equals($expected, $submitted)) {
+        // Log CSRF failure
+        if (function_exists('app_log')) {
+            app_log('warning', 'CSRF token validation failed', [
+                'category' => 'security',
+                'ip'       => $_SERVER['REMOTE_ADDR'] ?? 'unknown',
+                'uri'      => $_SERVER['REQUEST_URI'] ?? 'unknown',
+            ]);
+        }
         http_response_code(403);
         die('Invalid security token. Please go back and try again.');
     }
 
     // Rotate token after successful verification.
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+
+    // Auto-log POST action for audit trail
+    if (function_exists('audit_log_post')) {
+        audit_log_post();
+    }
 
     return true;
 }

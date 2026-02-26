@@ -17,11 +17,13 @@ $isStudentParent = (!empty($_SESSION['user_type']) && $_SESSION['user_type'] ===
 
 // Fetch parent profile from the appropriate table
 if ($isStudentParent) {
-    $stmt = $pdo->prepare("SELECT * FROM students WHERE id = ? AND is_parent = 1 LIMIT 1");
+    $stmt = $pdo->prepare("SELECT * FROM students WHERE id = ? AND is_parent = 1" . school_where() . " LIMIT 1");
 } else {
-    $stmt = $pdo->prepare("SELECT * FROM parents WHERE id = ? LIMIT 1");
+    $stmt = $pdo->prepare("SELECT * FROM parents WHERE id = ?" . school_where() . " LIMIT 1");
 }
-$stmt->execute([$parentId]);
+$params = [$parentId];
+school_param($params);
+$stmt->execute($params);
 $parent = $stmt->fetch();
 
 if (!$parent) {
@@ -30,6 +32,7 @@ if (!$parent) {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    verify_csrf();
     if (isset($_POST['update_profile'])) {
         $firstName = trim($_POST['first_name'] ?? '');
         $lastName  = trim($_POST['last_name'] ?? '');
@@ -43,8 +46,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Check email uniqueness in the appropriate table
             $tbl = $isStudentParent ? 'students' : 'parents';
             if ($email !== '' && $email !== ($parent['email'] ?? '')) {
-                $check = $pdo->prepare("SELECT id FROM {$tbl} WHERE email = ? AND id != ? LIMIT 1");
-                $check->execute([$email, $parentId]);
+                $checkParams = [$email, $parentId];
+                $check = $pdo->prepare("SELECT id FROM {$tbl} WHERE email = ? AND id != ?" . school_where() . " LIMIT 1");
+                school_param($checkParams);
+                $check->execute($checkParams);
                 if ($check->fetch()) {
                     $message = showAlert('Email is already in use by another account.', 'error');
                 }
@@ -52,24 +57,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if ($message === '') {
                 if ($isStudentParent) {
+                    $updParams = [$firstName, $lastName, $email ?: null, $phone ?: null, $parentId];
                     $upd = $pdo->prepare("
                         UPDATE students SET first_name = ?, last_name = ?, email = ?, phone = ?
-                        WHERE id = ?
+                        WHERE id = ?" . school_where() . "
                     ");
-                    $upd->execute([$firstName, $lastName, $email ?: null, $phone ?: null, $parentId]);
+                    school_param($updParams);
+                    $upd->execute($updParams);
                 } else {
+                    $updParams = [$firstName, $lastName, $email ?: null, $phone ?: null, $address ?: null, $parentId];
                     $upd = $pdo->prepare("
                         UPDATE parents SET first_name = ?, last_name = ?, email = ?, phone = ?, address = ?
-                        WHERE id = ?
+                        WHERE id = ?" . school_where() . "
                     ");
-                    $upd->execute([$firstName, $lastName, $email ?: null, $phone ?: null, $address ?: null, $parentId]);
+                    school_param($updParams);
+                    $upd->execute($updParams);
                 }
 
                 $_SESSION['first_name'] = $firstName;
                 $_SESSION['last_name']  = $lastName;
 
                 // Re-fetch
-                $stmt->execute([$parentId]);
+                $params = [$parentId];
+                school_param($params);
+                $stmt->execute($params);
                 $parent = $stmt->fetch();
                 $message = showAlert('Profile updated successfully!', 'success');
             }
@@ -90,7 +101,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $hash = password_hash($newPw, PASSWORD_DEFAULT);
             $tbl = $isStudentParent ? 'students' : 'parents';
-            $pdo->prepare("UPDATE {$tbl} SET password_hash = ? WHERE id = ?")->execute([$hash, $parentId]);
+            $pwParams = [$hash, $parentId];
+            $pwStmt = $pdo->prepare("UPDATE {$tbl} SET password_hash = ? WHERE id = ?" . school_where());
+            school_param($pwParams);
+            $pwStmt->execute($pwParams);
             $message = showAlert('Password changed successfully!', 'success');
         }
     }
@@ -141,6 +155,7 @@ include 'includes/parent_header.php';
             <h2 class="text-lg font-semibold text-gray-800 mb-4">Account Information</h2>
 
             <form method="POST" class="space-y-4">
+                <?= csrf_field() ?>
                 <input type="hidden" name="update_profile" value="1">
 
                 <div>
@@ -199,6 +214,7 @@ include 'includes/parent_header.php';
             <h2 class="text-lg font-semibold text-gray-800 mb-4">Change Password</h2>
 
             <form method="POST" class="space-y-4">
+                <?= csrf_field() ?>
                 <input type="hidden" name="change_password" value="1">
 
                 <div>

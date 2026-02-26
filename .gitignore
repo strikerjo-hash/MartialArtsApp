@@ -2,6 +2,9 @@
 .env
 config.local.php
 
+# Firebase service account keys (contain private keys)
+uploads/fcm/
+
 # IDE
 .idea/
 .vscode/
@@ -15,3 +18,9 @@ Thumbs.db
 # Dependencies
 vendor/
 node_modules/
+libs/dompdf/
+libs/php-font-lib/
+libs/php-svg-lib/
+libs/html5-php/
+composer.lock
+composer.phar

@@ -18,9 +18,11 @@ $stmt = $pdo->prepare("
     SELECT er.*, e.name as event_name, e.registration_fee as fee, e.event_type, e.event_date
     FROM event_registrations er
     JOIN events e ON er.event_id = e.id
-    WHERE er.id = ? AND er.student_id = ?
+    WHERE er.id = ? AND er.student_id = ?" . school_where('er') . "
 ");
-$stmt->execute([$registration_id, $student_id]);
+$params = [$registration_id, $student_id];
+school_param($params);
+$stmt->execute($params);
 $registration = $stmt->fetch();
 
 if (!$registration) {
@@ -51,6 +53,7 @@ $cardChargeAmount = round($totalWithFees - $creditToApply, 2);
 
 // Handle payment
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
+    verify_csrf();
     $gateway = get_active_gateway();
 
     // Recalculate with submitted discount
@@ -65,8 +68,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
 
     if ($gateway === 'none' || !is_gateway_ready()) {
         // No gateway configured — mark as pending
-        $stmt = $pdo->prepare("UPDATE event_registrations SET payment_status = 'pending' WHERE id = ?");
-        $stmt->execute([$registration_id]);
+        $params = [$registration_id];
+        $stmt = $pdo->prepare("UPDATE event_registrations SET payment_status = 'pending' WHERE id = ?" . school_where());
+        school_param($params);
+        $stmt->execute($params);
         $message = showAlert('Payment gateway not configured. Your registration is pending. Please contact the studio to complete payment.', 'warning');
     } elseif (!$defaultPayment) {
         $message = showAlert('No payment method on file. Please add a card in Payment Methods first.', 'error');
@@ -81,8 +86,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
             $amountCharged = $chargeResult['amount_charged'] ?? $totalWithFees;
 
             // Update registration
-            $stmt = $pdo->prepare("UPDATE event_registrations SET payment_status = 'paid' WHERE id = ?");
-            $stmt->execute([$registration_id]);
+            $params = [$registration_id];
+            $stmt = $pdo->prepare("UPDATE event_registrations SET payment_status = 'paid' WHERE id = ?" . school_where());
+            school_param($params);
+            $stmt->execute($params);
 
             // Build payment notes
             $notes = $chargeDesc;
@@ -94,21 +101,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
             // Record card payment (if any)
             if ($amountCharged > 0) {
                 $stmt = $pdo->prepare("
-                    INSERT INTO payments (student_id, payment_type, reference_id, amount,
+                    INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount,
                                         payment_method, payment_date, receipt_number, notes)
-                    VALUES (?, 'event', ?, ?, 'credit_card', CURDATE(), ?, ?)
+                    VALUES (?, ?, 'event', ?, ?, 'credit_card', CURDATE(), ?, ?)
                 ");
-                $stmt->execute([$student_id, $eventId, $amountCharged, generateReceiptNumber(), $notes]);
+                $stmt->execute([current_school_id(), $student_id, $eventId, $amountCharged, generateReceiptNumber(), $notes]);
             }
 
             // Record credit payment portion (if credit was used)
             if ($creditUsed > 0) {
                 $stmt = $pdo->prepare("
-                    INSERT INTO payments (student_id, payment_type, reference_id, amount,
+                    INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount,
                                         payment_method, payment_date, receipt_number, notes)
-                    VALUES (?, 'event', ?, ?, 'account_credit', CURDATE(), ?, ?)
+                    VALUES (?, ?, 'event', ?, ?, 'account_credit', CURDATE(), ?, ?)
                 ");
-                $stmt->execute([$student_id, $eventId, $creditUsed, generateReceiptNumber(), 'Account credit applied to event: ' . $registration['event_name']]);
+                $stmt->execute([current_school_id(), $student_id, $eventId, $creditUsed, generateReceiptNumber(), 'Account credit applied to event: ' . $registration['event_name']]);
             }
 
             // Record discount code usage
@@ -193,6 +200,7 @@ include 'includes/student_header.php';
                 </div>
 
                 <form method="POST">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="process_payment" value="1">
                     <button type="submit"
                             class="w-full bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 px-4 rounded-lg">
@@ -212,6 +220,7 @@ include 'includes/student_header.php';
                 </div>
 
                 <form method="POST" id="payment-form">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="process_payment" value="1">
                     <input type="hidden" name="discount_code" class="discount-hidden" value="<?php echo htmlspecialchars($discountCodeFromPost); ?>">
                     <button type="submit"
@@ -265,6 +274,7 @@ include 'includes/student_header.php';
                 <?php endif; ?>
 
                 <form method="POST" id="payment-form">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="process_payment" value="1">
                     <input type="hidden" name="discount_code" class="discount-hidden" value="<?php echo htmlspecialchars($discountCodeFromPost); ?>">
 

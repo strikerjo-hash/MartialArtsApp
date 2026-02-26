@@ -18,8 +18,11 @@ $student_id = $_SESSION['student_id'];
 $new_plan_id = $_SESSION['upgrade_plan_id'];
 
 // Get new plan details
-$new_plan = $pdo->prepare("SELECT * FROM membership_plans WHERE id = ?");
-$new_plan->execute([$new_plan_id]);
+$params = [$new_plan_id];
+$sql = "SELECT * FROM membership_plans WHERE id = ?" . school_where();
+school_param($params);
+$new_plan = $pdo->prepare($sql);
+$new_plan->execute($params);
 $new_plan = $new_plan->fetch();
 
 if (!$new_plan) {
@@ -29,15 +32,16 @@ if (!$new_plan) {
 }
 
 // Get current membership (may be null for first-time enrollment)
-$current_membership = $pdo->prepare("
-    SELECT m.*, mp.name as plan_name, mp.price as plan_price, mp.duration_months, mp.billing_frequency
+$params = [$student_id];
+$sql = "SELECT m.*, mp.name as plan_name, mp.price as plan_price, mp.duration_months, mp.billing_frequency
     FROM memberships m
     JOIN membership_plans mp ON m.plan_id = mp.id
-    WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()
+    WHERE m.student_id = ? AND m.status = 'active' AND m.end_date >= CURDATE()" . school_where('m') . "
     ORDER BY m.end_date DESC
-    LIMIT 1
-");
-$current_membership->execute([$student_id]);
+    LIMIT 1";
+school_param($params);
+$current_membership = $pdo->prepare($sql);
+$current_membership->execute($params);
 $current_membership = $current_membership->fetch() ?: null;
 
 // ALWAYS recalculate proration fresh — never rely solely on stale session data
@@ -76,6 +80,7 @@ $message = '';
 
 // Handle payment
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
+    verify_csrf();
     $gateway = get_active_gateway();
 
     // Recalculate with submitted discount code
@@ -112,8 +117,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
 
             // Cancel current membership
             if ($current_membership) {
-                $stmt = $pdo->prepare("UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?");
-                $stmt->execute([$current_membership['id']]);
+                $params = [$current_membership['id']];
+                $sql = "UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?" . school_where();
+                school_param($params);
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute($params);
             }
 
             // Create new membership
@@ -134,10 +142,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
             $monthly_charges = $isMonthlyPlan ? 1 : 0;
 
             $stmt = $pdo->prepare("
-                INSERT INTO memberships (student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, auto_renew, billing_day, monthly_charges_made)
-                VALUES (?, ?, ?, ?, 'active', 'paid', ?, ?, ?, ?)
+                INSERT INTO memberships (school_id, student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, auto_renew, billing_day, monthly_charges_made)
+                VALUES (?, ?, ?, ?, ?, 'active', 'paid', ?, ?, ?, ?)
             ");
-            $stmt->execute([$student_id, $new_plan_id, $start_date, $end_date, $totalWithFees, $auto_renew, $billing_day, $monthly_charges]);
+            $stmt->execute([current_school_id(), $student_id, $new_plan_id, $start_date, $end_date, $totalWithFees, $auto_renew, $billing_day, $monthly_charges]);
             $membership_id = $pdo->lastInsertId();
 
             // Build payment notes
@@ -150,21 +158,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
             // Record card payment (if any amount was charged to card)
             if ($amountCharged > 0) {
                 $stmt = $pdo->prepare("
-                    INSERT INTO payments (student_id, payment_type, reference_id, amount,
+                    INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount,
                                         payment_method, payment_date, receipt_number, notes)
-                    VALUES (?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, ?)
+                    VALUES (?, ?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, ?)
                 ");
-                $stmt->execute([$student_id, $membership_id, $amountCharged, generateReceiptNumber(), $notes]);
+                $stmt->execute([current_school_id(), $student_id, $membership_id, $amountCharged, generateReceiptNumber(), $notes]);
             }
 
             // Record credit payment portion (if credit was used)
             if ($creditUsed > 0) {
                 $stmt = $pdo->prepare("
-                    INSERT INTO payments (student_id, payment_type, reference_id, amount,
+                    INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount,
                                         payment_method, payment_date, receipt_number, notes)
-                    VALUES (?, 'membership', ?, ?, 'account_credit', CURDATE(), ?, ?)
+                    VALUES (?, ?, 'membership', ?, ?, 'account_credit', CURDATE(), ?, ?)
                 ");
-                $stmt->execute([$student_id, $membership_id, $creditUsed, generateReceiptNumber(), 'Account credit applied: ' . $chargeDesc]);
+                $stmt->execute([current_school_id(), $student_id, $membership_id, $creditUsed, generateReceiptNumber(), 'Account credit applied: ' . $chargeDesc]);
             }
 
             // Record discount code usage
@@ -179,7 +187,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
             }
 
             // Record plan change date for lockout
-            $pdo->prepare("UPDATE students SET last_plan_change = CURDATE() WHERE id = ?")->execute([$student_id]);
+            $params = [$student_id]; $sql = "UPDATE students SET last_plan_change = CURDATE() WHERE id = ?" . school_where(); school_param($params);
+            $pdo->prepare($sql)->execute($params);
 
             // Clear session
             unset($_SESSION['upgrade_plan_id']);
@@ -316,6 +325,7 @@ include 'includes/student_header.php';
                 </div>
 
                 <form method="POST" id="payment-form">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="process_payment" value="1">
                     <input type="hidden" name="discount_code" id="discount_code_hidden_credit" value="<?php echo htmlspecialchars($discountCodeFromPost); ?>">
                     <button type="submit"
@@ -369,6 +379,7 @@ include 'includes/student_header.php';
                 <?php endif; ?>
 
                 <form method="POST" id="payment-form">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="process_payment" value="1">
                     <input type="hidden" name="discount_code" id="discount_code_hidden" value="<?php echo htmlspecialchars($discountCodeFromPost); ?>">
 

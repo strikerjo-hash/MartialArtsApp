@@ -10,6 +10,7 @@
 
 require_once 'config.php';
 requireLogin();
+if (!canView('makeup_classes.php')) { accessDenied(); }
 require_once __DIR__ . '/includes/belt_cycle.php';
 
 $message = '';
@@ -316,15 +317,7 @@ include 'includes/header.php';
 
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Student *</label>
-                <select name="student_id" id="makeupStudentSelect" required
-                        class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                    <option value="">Select Student...</option>
-                    <?php foreach ($allActiveStudents as $st): ?>
-                        <option value="<?php echo $st['id']; ?>">
-                            <?php echo htmlspecialchars($st['last_name'] . ', ' . $st['first_name']); ?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
+                <div id="makeup-student-picker"></div>
             </div>
 
             <div>
@@ -374,6 +367,18 @@ function openMakeupModalFor(studentId, studentName) {
     }
     document.getElementById('addMakeupModal').classList.remove('hidden');
 }
+</script>
+
+<script src="assets/js/student-picker.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    StudentPicker.init({
+        container: '#makeup-student-picker',
+        inputName: 'student_id',
+        placeholder: 'Type student name to search\u2026',
+        data: <?= json_encode(array_map(function($s) { return ['id' => $s['id'], 'name' => trim($s['first_name'] . ' ' . $s['last_name'])]; }, $allActiveStudents)) ?>
+    });
+});
 </script>
 
 <?php include 'includes/footer.php'; ?>

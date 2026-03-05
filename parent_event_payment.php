@@ -82,10 +82,12 @@ $feeBreakdown = calculateTotalWithFees([
 $totalWithFees = $feeBreakdown['total'];
 
 // Parent's payment method and credit
-$defaultPayment = get_student_default_payment($parentId);
-$parentCredit   = get_student_credit($parentId);
+$defaultPayment = get_parent_default_payment($parentId, $childIds);
+$isStudentParent = (!empty($_SESSION['user_type']) && $_SESSION['user_type'] === 'student' && !empty($_SESSION['is_parent']));
+$parentCredit   = $isStudentParent ? get_student_credit($parentId) : 0;
 $creditToApply  = min($parentCredit, $totalWithFees);
 $cardChargeAmount = round($totalWithFees - $creditToApply, 2);
+$stripePk = (get_active_gateway() === 'stripe') ? getSetting('stripe_publishable_key') : '';
 
 // ---------------------------------------------------------------------------
 // 3. Handle payment POST
@@ -109,8 +111,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
     if ($gateway === 'none' || !is_gateway_ready()) {
         // No gateway — leave as pending with a message
         $message = showAlert('Payment gateway not configured. Registrations are pending — please contact the studio to complete payment.', 'warning');
-    } elseif ($cardChargeAmount > 0 && !$defaultPayment) {
-        $message = showAlert('No payment method on file. Please add a card in Payment Methods first.', 'error');
     } else {
         // Build a human-readable description
         $childNames = [];
@@ -123,10 +123,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
             $chargeDesc .= ' (incl. service fee)';
         }
 
-        // Charge the parent's card
-        $chargeResult = charge_student($parentId, $totalWithFees, $chargeDesc);
+        $walletPmId = trim($_POST['wallet_pm_id'] ?? '');
+        $chargeResult = null;
 
-        if ($chargeResult['success']) {
+        if (!empty($walletPmId)) {
+            $chargeResult = charge_wallet_token($parentId, $walletPmId, $totalWithFees, $chargeDesc);
+        } elseif ($cardChargeAmount > 0 && !$defaultPayment) {
+            $message = showAlert('No payment method on file. Please add a card in Payment Methods first.', 'error');
+        } else {
+            $chargeResult = charge_parent($parentId, $totalWithFees, $chargeDesc, $childIds);
+        }
+
+        if ($chargeResult && $chargeResult['success']) {
             $creditUsed    = $chargeResult['credit_used'] ?? 0;
             $amountCharged = $chargeResult['amount_charged'] ?? $totalWithFees;
 
@@ -191,6 +199,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
                 ]);
             }
 
+            // Send payment receipt email (one receipt for the parent's total payment)
+            send_payment_receipt_email([
+                'student_id'     => $parentId,
+                'parent_id'      => $parentId,
+                'amount'         => $totalWithFees,
+                'payment_type'   => 'event',
+                'description'    => 'Event registration: ' . $eventName . ' for ' . implode(', ', $childNames),
+                'receipt_number' => '',
+                'transaction_id' => $chargeResult['transaction_id'] ?? null,
+                'payment_method' => $amountCharged > 0 ? 'credit_card' : 'account_credit',
+            ]);
+
             // Record discount code usage
             if ($feeBreakdown['discount_code_id']) {
                 recordDiscountCodeUse(
@@ -204,7 +224,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
 
             header('Location: parent_events.php?success=payment');
             exit;
-        } else {
+        } elseif ($chargeResult) {
             $message = showAlert('Payment failed: ' . ($chargeResult['error'] ?? 'Unknown error') . '. Please try again or update your card.', 'error');
         }
     }
@@ -331,7 +351,7 @@ include 'includes/parent_header.php';
                     Cancel and Return to Events
                 </a>
 
-            <?php elseif (!$defaultPayment): ?>
+            <?php elseif (!$defaultPayment && empty($stripePk)): ?>
                 <!-- No payment method -->
                 <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-6 mb-6">
                     <p class="text-gray-700 mb-3">
@@ -343,6 +363,31 @@ include 'includes/parent_header.php';
                 </div>
 
             <?php else: ?>
+                <?php if (!empty($stripePk)): ?>
+                    <form method="POST" id="wallet-form" style="display:none;">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="process_payment" value="1">
+                        <input type="hidden" name="wallet_pm_id" id="wallet_pm_id" value="">
+                        <input type="hidden" name="discount_code" class="discount-hidden" value="<?= htmlspecialchars($discountCodeFromPost) ?>">
+                    </form>
+                    <div id="wallet-pay-container" style="display:none;" class="mb-3"></div>
+                    <div id="wallet-pay-divider" style="display:none;" class="flex items-center gap-3 mb-4">
+                        <div class="flex-1 h-px bg-gray-200"></div>
+                        <span class="text-sm text-gray-400">or pay with saved card</span>
+                        <div class="flex-1 h-px bg-gray-200"></div>
+                    </div>
+                <?php endif; ?>
+
+                <?php if (!$defaultPayment): ?>
+                    <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-6 mb-6">
+                        <p class="text-gray-700 mb-3">
+                            <strong>No payment method on file.</strong> Please add a credit or debit card before completing this payment.
+                        </p>
+                        <a href="parent_payment.php" class="inline-block bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">
+                            Add Payment Method
+                        </a>
+                    </div>
+                <?php else: ?>
                 <!-- Show payment method and pay button -->
                 <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6">
                     <div class="flex items-center justify-between">
@@ -391,10 +436,34 @@ include 'includes/parent_header.php';
                 <a href="parent_events.php" class="block text-center text-blue-600 hover:text-blue-800">
                     Cancel and Return to Events
                 </a>
+                <?php endif; ?>
             <?php endif; ?>
         </div>
     </div>
 </div>
+
+<?php if (get_active_gateway() === 'stripe' && is_gateway_ready() && $stripePk && $cardChargeAmount > 0): ?>
+<script src="https://js.stripe.com/v3/"></script>
+<script src="assets/js/wallet-pay.js"></script>
+<script>
+(function() {
+    var stripe = Stripe('<?= htmlspecialchars($stripePk) ?>');
+    var walletForm = document.getElementById('wallet-form');
+    if (!walletForm) return;
+
+    initWalletPay(stripe, {
+        amount:      <?= (int) round($cardChargeAmount * 100) ?>,
+        label:       <?= json_encode($registrations[0]['event_name'] ?? 'Event Registration') ?>,
+        containerId: 'wallet-pay-container',
+        dividerId:   'wallet-pay-divider',
+        onToken: function(pm) {
+            document.getElementById('wallet_pm_id').value = pm.id;
+            walletForm.submit();
+        }
+    });
+})();
+</script>
+<?php endif; ?>
 
 <script>
 (function() {

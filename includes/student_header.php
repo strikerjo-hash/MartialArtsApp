@@ -22,11 +22,18 @@ if (!$primaryHover) {
 $studentDisplayName = $_SESSION['student_name']
     ?? (isset($_SESSION['first_name']) ? $_SESSION['first_name'] . ' ' . ($_SESSION['last_name'] ?? '') : 'Student');
 
-// Unread message count for nav badge
+// Unread message counts for nav badge (separate broadcast + conversations)
 require_once __DIR__ . '/messaging.php';
+require_once __DIR__ . '/conversation_helpers.php';
+$_broadcastUnreadCount = 0;
+$_convUnreadCount = 0;
 $_studentUnreadCount = 0;
 if (!empty($_SESSION['student_id'])) {
-    $_studentUnreadCount = get_unread_message_count((int)$_SESSION['student_id']);
+    $_broadcastUnreadCount = get_unread_message_count((int)$_SESSION['student_id']);
+    $_convUnreadCount = get_unread_conversation_count(
+        (int)($_SESSION['school_id'] ?? 1), 'student', (int)$_SESSION['student_id']
+    );
+    $_studentUnreadCount = $_broadcastUnreadCount + $_convUnreadCount;
 }
 
 // Payment lockout state for nav rendering
@@ -80,10 +87,10 @@ try {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="<?php echo $theme['primary']; ?>">
-    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title><?php echo htmlspecialchars($siteName); ?> - Student Portal</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="assets/css/tailwind.css">
     <style>
         .active-nav { background-color: <?php echo $theme['primary']; ?>; color: white; }
         .student-header {
@@ -151,15 +158,15 @@ try {
 <body class="bg-gray-50">
     <!-- Header -->
     <header class="bg-white shadow-sm" style="border-bottom: 3px solid <?php echo $theme['primary']; ?>;">
-        <div class="container mx-auto px-4 py-4 flex justify-between items-center">
-            <div class="flex items-center gap-3">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center gap-2 min-w-0">
+            <div class="flex items-center gap-2 min-w-0 flex-1">
                 <?php if ($logoPath): ?>
-                    <img src="<?php echo htmlspecialchars($logoPath); ?>" alt="Logo" class="max-h-9 object-contain">
+                    <img src="<?php echo htmlspecialchars($logoPath); ?>" alt="Logo" class="max-h-9 object-contain flex-shrink-0">
                 <?php else: ?>
-                    <span class="text-2xl">🥋</span>
+                    <span class="text-2xl flex-shrink-0">🥋</span>
                 <?php endif; ?>
-                <div>
-                    <h1 class="text-xl font-bold text-gray-800"><?php echo htmlspecialchars($siteName); ?></h1>
+                <div class="min-w-0">
+                    <h1 class="text-base sm:text-xl font-bold text-gray-800 truncate"><?php echo htmlspecialchars($siteName); ?></h1>
                     <?php if (!empty($_studentSchoolName)): ?>
                         <p class="text-xs text-gray-500" style="margin-top: -1px;"><?php echo htmlspecialchars($_studentSchoolName); ?></p>
                     <?php endif; ?>
@@ -237,7 +244,7 @@ try {
                 <?php if ($_isPaymentLocked): ?>
                     <span class="text-gray-400 cursor-not-allowed text-sm py-1" title="Access restricted — please update your payment method">Messages</span>
                 <?php else: ?>
-                <a href="student_messages.php" class="nav-link relative <?php echo basename($_SERVER['PHP_SELF']) == 'student_messages.php' ? 'nav-link-active' : ''; ?>">
+                <a href="student_messages.php" class="nav-link relative <?php echo in_array(basename($_SERVER['PHP_SELF']), ['student_messages.php', 'student_conversations.php']) ? 'nav-link-active' : ''; ?>">
                     Messages
                     <?php if ($_studentUnreadCount > 0): ?>
                         <span class="msg-unread-badge absolute -top-1 -right-2 inline-flex items-center justify-center w-5 h-5 text-xs font-bold text-white bg-red-500 rounded-full"><?php echo $_studentUnreadCount; ?></span>
@@ -249,58 +256,85 @@ try {
                 </a>
             </nav>
 
-            <a href="student_logout.php" class="text-white px-4 py-2 rounded-lg text-sm transition-colors" style="background-color: <?php echo $theme['primary']; ?>;" onmouseover="this.style.backgroundColor='<?php echo $primaryHover; ?>'" onmouseout="this.style.backgroundColor='<?php echo $theme['primary']; ?>'">
+            <!-- Notification Icons -->
+            <div class="flex items-center space-x-1 flex-shrink-0">
+                <?php if (!$_isPaymentLocked): ?>
+                <a href="student_messages.php" class="relative p-1.5 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-full transition-colors" title="Broadcast Messages">
+                    <span class="text-base leading-none">💬</span>
+                    <?php if ($_broadcastUnreadCount > 0): ?>
+                        <span class="absolute top-0 right-0 inline-flex items-center justify-center min-w-[16px] h-[16px] px-0.5 text-[9px] font-bold text-white bg-red-500 rounded-full transform translate-x-1 -translate-y-1"><?= min($_broadcastUnreadCount, 99) ?></span>
+                    <?php endif; ?>
+                </a>
+                <a href="student_conversations.php" class="relative p-1.5 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-full transition-colors" title="Conversations">
+                    <span class="text-base leading-none">✉️</span>
+                    <?php if ($_convUnreadCount > 0): ?>
+                        <span class="absolute top-0 right-0 inline-flex items-center justify-center min-w-[16px] h-[16px] px-0.5 text-[9px] font-bold text-white bg-red-500 rounded-full transform translate-x-1 -translate-y-1"><?= min($_convUnreadCount, 99) ?></span>
+                    <?php endif; ?>
+                </a>
+                <?php endif; ?>
+            </div>
+
+            <?php if (!empty($_SESSION['_impersonating'])): ?>
+            <a href="admin_impersonate.php?stop=1" class="flex-shrink-0 text-white px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm transition-colors whitespace-nowrap bg-red-600 hover:bg-red-700">
+                &larr; Return to Admin
+            </a>
+            <?php else: ?>
+            <a href="student_logout.php" class="flex-shrink-0 text-white px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm transition-colors whitespace-nowrap" style="background-color: <?php echo $theme['primary']; ?>;" onmouseover="this.style.backgroundColor='<?php echo $primaryHover; ?>'" onmouseout="this.style.backgroundColor='<?php echo $theme['primary']; ?>'">
                 Logout
             </a>
+            <?php endif; ?>
         </div>
 
         <!-- Mobile Navigation -->
         <nav class="md:hidden border-t border-gray-200 px-4 py-2">
-            <div class="flex space-x-2">
+            <div class="flex space-x-1 overflow-x-auto -mx-4 px-4" style="-webkit-overflow-scrolling: touch;">
                 <?php if ($_isPaymentLocked): ?>
-                    <span class="flex-1 text-center py-2 text-sm text-gray-400 cursor-not-allowed">Dashboard</span>
+                    <span class="flex-shrink-0 text-center py-2 px-2.5 text-xs text-gray-400 cursor-not-allowed rounded-lg">Dashboard</span>
                 <?php else: ?>
-                <a href="student_portal.php" class="flex-1 text-center py-2 text-sm <?php echo basename($_SERVER['PHP_SELF']) == 'student_portal.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+                <a href="student_portal.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'student_portal.php' ? 'mobile-active' : 'text-gray-700'; ?>">
                     Dashboard
                 </a>
                 <?php endif; ?>
                 <?php if ($_isPaymentLocked): ?>
-                    <span class="flex-1 text-center py-2 text-sm text-gray-400 cursor-not-allowed">Events</span>
+                    <span class="flex-shrink-0 text-center py-2 px-2.5 text-xs text-gray-400 cursor-not-allowed rounded-lg">Events</span>
                 <?php else: ?>
-                <a href="student_events.php" class="flex-1 text-center py-2 text-sm <?php echo basename($_SERVER['PHP_SELF']) == 'student_events.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+                <a href="student_events.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'student_events.php' ? 'mobile-active' : 'text-gray-700'; ?>">
                     Events
                 </a>
                 <?php endif; ?>
                 <?php if ($_isPaymentLocked): ?>
-                    <span class="flex-1 text-center py-2 text-sm text-gray-400 cursor-not-allowed">Membership</span>
+                    <span class="flex-shrink-0 text-center py-2 px-2.5 text-xs text-gray-400 cursor-not-allowed rounded-lg">Membership</span>
                 <?php else: ?>
-                <a href="student_upgrade.php" class="flex-1 text-center py-2 text-sm <?php echo basename($_SERVER['PHP_SELF']) == 'student_upgrade.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+                <a href="student_upgrade.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'student_upgrade.php' ? 'mobile-active' : 'text-gray-700'; ?>">
                     Membership
                 </a>
                 <?php endif; ?>
                 <?php if ($_isPaymentLocked): ?>
-                    <span class="flex-1 text-center py-2 text-sm text-gray-400 cursor-not-allowed">Training</span>
+                    <span class="flex-shrink-0 text-center py-2 px-2.5 text-xs text-gray-400 cursor-not-allowed rounded-lg">Training</span>
                 <?php else: ?>
-                <a href="student_training.php" class="flex-1 text-center py-2 text-sm <?php echo basename($_SERVER['PHP_SELF']) == 'student_training.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+                <a href="student_training.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'student_training.php' ? 'mobile-active' : 'text-gray-700'; ?>">
                     Training
                 </a>
                 <?php endif; ?>
-                <a href="student_payment.php" class="flex-1 text-center py-2 text-sm <?php echo basename($_SERVER['PHP_SELF']) == 'student_payment.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+                <a href="student_payment.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'student_payment.php' ? 'mobile-active' : 'text-gray-700'; ?>">
                     Payment
                 </a>
-                <a href="student_transactions.php" class="flex-1 text-center py-2 text-sm <?php echo basename($_SERVER['PHP_SELF']) == 'student_transactions.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+                <a href="student_transactions.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'student_transactions.php' ? 'mobile-active' : 'text-gray-700'; ?>">
                     Transactions
                 </a>
                 <?php if ($_isPaymentLocked): ?>
-                    <span class="flex-1 text-center py-2 text-sm text-gray-400 cursor-not-allowed">Messages</span>
+                    <span class="flex-shrink-0 text-center py-2 px-2.5 text-xs text-gray-400 cursor-not-allowed rounded-lg">Messages</span>
                 <?php else: ?>
-                <a href="student_messages.php" class="flex-1 text-center py-2 text-sm relative <?php echo basename($_SERVER['PHP_SELF']) == 'student_messages.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+                <a href="student_messages.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg relative <?php echo in_array(basename($_SERVER['PHP_SELF']), ['student_messages.php', 'student_conversations.php']) ? 'mobile-active' : 'text-gray-700'; ?>">
                     Messages
                     <?php if ($_studentUnreadCount > 0): ?>
                         <span class="msg-unread-badge absolute -top-1 -right-0 inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold text-white bg-red-500 rounded-full"><?php echo $_studentUnreadCount; ?></span>
                     <?php endif; ?>
                 </a>
                 <?php endif; ?>
+                <a href="student_training_wizard.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'student_training_wizard.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+                    Guide
+                </a>
             </div>
             <?php if ($_isStudentParent && !empty($_navChildren)): ?>
                 <div class="border-t border-gray-100 mt-1 pt-1 flex space-x-2 overflow-x-auto">
@@ -314,3 +348,13 @@ try {
             <?php endif; ?>
         </nav>
     </header>
+<?php if (!empty($_SESSION['_impersonating'])): ?>
+    <div style="background:linear-gradient(90deg,#dc2626,#b91c1c);color:#fff;padding:10px 16px;text-align:center;font-size:14px;font-weight:600;position:sticky;top:0;z-index:9999;box-shadow:0 2px 8px rgba(0,0,0,.2);">
+        &#128065; Viewing as <strong><?php echo htmlspecialchars($_SESSION['_impersonating_name'] ?? 'Student'); ?></strong>
+        <span style="margin-left:8px;font-weight:400;opacity:.9;">(Admin Preview Mode)</span>
+        <a href="admin_impersonate.php?stop=1"
+           style="margin-left:16px;background:#fff;color:#dc2626;padding:5px 18px;border-radius:6px;text-decoration:none;font-weight:600;font-size:13px;display:inline-block;">
+            &larr; Return to Admin
+        </a>
+    </div>
+<?php endif; ?>

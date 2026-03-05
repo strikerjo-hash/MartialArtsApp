@@ -68,16 +68,9 @@ try {
 // Handle upgrade request
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upgrade'])) {
     verify_csrf();
-    // Server-side lockout enforcement
-    if ($is_locked_out) {
-        $message = showAlert('You can only change your membership plan once every 30 days. Your next change will be available on ' . $lockout_until->format('M j, Y') . '.', 'error');
-    } elseif ($has_pending_change) {
-        $message = showAlert('You have a pending plan change awaiting your confirmation. Please approve or decline it before requesting another change.', 'error');
-    } else {
-
     $new_plan_id = $_POST['new_plan_id'];
 
-    // Get new plan details
+    // Get new plan details first (needed to check if lockout bypass applies)
     $params = [$new_plan_id];
     $sql = "SELECT * FROM membership_plans WHERE id = ?" . school_where();
     school_param($params);
@@ -85,61 +78,113 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upgrade'])) {
     $new_plan->execute($params);
     $new_plan = $new_plan->fetch();
 
+    // Afterschool, camp, and tax-deductible plans bypass the 30-day lockout
+    $bypass_lockout = $new_plan && (!empty($new_plan['is_afterschool']) || !empty($new_plan['is_camp']) || !empty($new_plan['tax_deductible']));
+
+    // Server-side lockout enforcement (only for regular plans)
+    if ($is_locked_out && !$bypass_lockout) {
+        $message = showAlert('You can only change your membership plan once every 30 days. Your next change will be available on ' . $lockout_until->format('M j, Y') . '.', 'error');
+    } elseif ($has_pending_change) {
+        $message = showAlert('You have a pending plan change awaiting your confirmation. Please approve or decline it before requesting another change.', 'error');
+    } else {
+
     if ($new_plan) {
-        // Calculate proration
-        $proration = calculateProration($current_membership, $new_plan);
-        
-        // Store in session for payment
-        $_SESSION['upgrade_plan_id'] = $new_plan_id;
-        $_SESSION['upgrade_proration'] = $proration;
-        
-        // Redirect to payment if amount due
-        if ($proration['amount'] > 0) {
-            header('Location: student_upgrade_payment.php');
-            exit;
+        $is_program = (!empty($new_plan['is_afterschool']) || !empty($new_plan['is_camp']));
+
+        if ($is_program) {
+            // Camp/afterschool: charge full price, keep existing membership
+            $programAmount = (float)$new_plan['price'];
+
+            // Store in session for payment
+            $_SESSION['upgrade_plan_id'] = $new_plan_id;
+            $_SESSION['upgrade_proration'] = [
+                'amount' => $programAmount,
+                'credit' => 0,
+                'type' => 'program_signup',
+                'days_remaining' => 0,
+                'unused_value' => 0,
+                'new_cost' => $programAmount,
+                'is_monthly' => ($new_plan['billing_frequency'] ?? 'upfront') === 'monthly',
+                'is_program' => true,
+            ];
+
+            if ($programAmount > 0) {
+                header('Location: student_upgrade_payment.php');
+                exit;
+            } else {
+                // Free program - enroll immediately without cancelling existing membership
+                $start_date = date('Y-m-d');
+                $end_date = $new_plan['program_end_date'];
+                $isMonthlyNewPlan = (isset($new_plan['billing_frequency']) && $new_plan['billing_frequency'] === 'monthly' && $new_plan['duration_months'] > 1);
+                $billing_day = $isMonthlyNewPlan ? min((int) date('j'), 28) : null;
+
+                $stmt = $pdo->prepare("
+                    INSERT INTO memberships (school_id, student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, auto_renew, billing_day, monthly_charges_made)
+                    VALUES (?, ?, ?, ?, ?, 'active', 'paid', 0, 0, ?, 0)
+                ");
+                $stmt->execute([current_school_id(), $student_id, $new_plan_id, $start_date, $end_date, $billing_day]);
+
+                header('Location: student_upgrade.php?success=program');
+                exit;
+            }
         } else {
-            // Downgrade - process immediately
-            // Cancel current membership
-            if ($current_membership) {
-                $params = [$current_membership['id']];
-                $sql = "UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?" . school_where();
-                school_param($params);
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute($params);
+            // Regular plan: calculate proration, switch memberships
+            $proration = calculateProration($current_membership, $new_plan);
+
+            // Store in session for payment
+            $_SESSION['upgrade_plan_id'] = $new_plan_id;
+            $_SESSION['upgrade_proration'] = $proration;
+
+            // Redirect to payment if amount due
+            if ($proration['amount'] > 0) {
+                header('Location: student_upgrade_payment.php');
+                exit;
+            } else {
+                // Downgrade - process immediately
+                // Cancel current membership
+                if ($current_membership) {
+                    $params = [$current_membership['id']];
+                    $sql = "UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?" . school_where();
+                    school_param($params);
+                    $stmt = $pdo->prepare($sql);
+                    $stmt->execute($params);
+                }
+
+                // Create new membership starting today
+                $start_date = date('Y-m-d');
+                $end_date = date('Y-m-d', strtotime($start_date . ' + ' . $new_plan['duration_months'] . ' months'));
+
+                // For monthly plans, set billing_day and monthly_charges_made
+                $isMonthlyNewPlan = (isset($new_plan['billing_frequency']) && $new_plan['billing_frequency'] === 'monthly' && $new_plan['duration_months'] > 1);
+                $billing_day = $isMonthlyNewPlan ? min((int) date('j'), 28) : null;
+
+                $stmt = $pdo->prepare("
+                    INSERT INTO memberships (school_id, student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, auto_renew, billing_day, monthly_charges_made)
+                    VALUES (?, ?, ?, ?, ?, 'active', 'paid', ?, 1, ?, 0)
+                ");
+                $stmt->execute([current_school_id(), $student_id, $new_plan_id, $start_date, $end_date, 0, $billing_day]);
+
+                // Add credit to student's account balance
+                if ($proration['credit'] > 0) {
+                    $membershipId = $pdo->lastInsertId();
+                    add_student_credit(
+                        $student_id,
+                        $proration['credit'],
+                        'Membership downgrade credit: ' . ($current_membership['plan_name'] ?? 'Previous') . ' to ' . $new_plan['name'],
+                        'downgrade',
+                        (int) $membershipId
+                    );
+                }
+
+                // Record plan change date for lockout (only for regular plans)
+                if (empty($new_plan['tax_deductible'])) {
+                    $params = [$student_id]; $sql = "UPDATE students SET last_plan_change = CURDATE() WHERE id = ?" . school_where(); school_param($params);
+                    $pdo->prepare($sql)->execute($params);
+                }
+
+                header('Location: student_upgrade.php?success=downgrade');
+                exit;
             }
-            
-            // Create new membership starting today
-            $start_date = date('Y-m-d');
-            $end_date = date('Y-m-d', strtotime($start_date . ' + ' . $new_plan['duration_months'] . ' months'));
-
-            // For monthly plans, set billing_day and monthly_charges_made
-            $isMonthlyNewPlan = (isset($new_plan['billing_frequency']) && $new_plan['billing_frequency'] === 'monthly' && $new_plan['duration_months'] > 1);
-            $billing_day = $isMonthlyNewPlan ? min((int) date('j'), 28) : null;
-
-            $stmt = $pdo->prepare("
-                INSERT INTO memberships (school_id, student_id, plan_id, start_date, end_date, status, payment_status, amount_paid, billing_day, monthly_charges_made)
-                VALUES (?, ?, ?, ?, ?, 'active', 'paid', ?, ?, 0)
-            ");
-            $stmt->execute([current_school_id(), $student_id, $new_plan_id, $start_date, $end_date, 0, $billing_day]);
-            
-            // Add credit to student's account balance
-            if ($proration['credit'] > 0) {
-                $membershipId = $pdo->lastInsertId();
-                add_student_credit(
-                    $student_id,
-                    $proration['credit'],
-                    'Membership downgrade credit: ' . ($current_membership['plan_name'] ?? 'Previous') . ' to ' . $new_plan['name'],
-                    'downgrade',
-                    (int) $membershipId
-                );
-            }
-
-            // Record plan change date for lockout
-            $params = [$student_id]; $sql = "UPDATE students SET last_plan_change = CURDATE() WHERE id = ?" . school_where(); school_param($params);
-            $pdo->prepare($sql)->execute($params);
-
-            header('Location: student_upgrade.php?success=downgrade');
-            exit;
         }
     }
 
@@ -155,8 +200,12 @@ include 'includes/student_header.php';
 <div class="container mx-auto px-4 py-8">
     <?php if (isset($_GET['success'])): ?>
         <div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-6">
-            Membership successfully updated!
-            <?php if (isset($_GET['success']) && $_GET['success'] === 'downgrade' && $studentCredit > 0): ?>
+            <?php if ($_GET['success'] === 'program'): ?>
+                Successfully signed up for the program!
+            <?php else: ?>
+                Membership successfully updated!
+            <?php endif; ?>
+            <?php if ($_GET['success'] === 'downgrade' && $studentCredit > 0): ?>
                 <br><span class="text-sm">A credit of <?php echo formatMoney($studentCredit); ?> has been applied to your account.</span>
             <?php endif; ?>
         </div>
@@ -167,7 +216,8 @@ include 'includes/student_header.php';
     <?php if ($is_locked_out): ?>
         <div class="bg-yellow-50 border border-yellow-300 text-yellow-800 px-4 py-3 rounded mb-6">
             <p class="font-semibold">&#128274; Plan Change Locked</p>
-            <p class="text-sm">You can only change your membership plan once every 30 days. Your next change will be available on <strong><?php echo $lockout_until->format('M j, Y'); ?></strong>.</p>
+            <p class="text-sm">Regular plan changes are limited to once every 30 days. Your next change will be available on <strong><?php echo $lockout_until->format('M j, Y'); ?></strong>.</p>
+            <p class="text-xs mt-1">Afterschool, camp, and tax-deductible programs can still be enrolled at any time.</p>
         </div>
     <?php endif; ?>
 
@@ -270,31 +320,39 @@ include 'includes/student_header.php';
                             <?php if ($planIsMonthly): ?>
                                 <li>✓ Billed monthly on day <?php echo min((int) date('j'), 28); ?></li>
                             <?php endif; ?>
-                            <?php if (!empty($plan['is_afterschool'])): ?>
+                            <?php if (!empty($plan['is_afterschool']) || !empty($plan['is_camp'])): ?>
                                 <li>✓ Fixed-term (no auto-renewal)</li>
                             <?php endif; ?>
                         </ul>
-                        <?php if (!empty($plan['is_afterschool']) && $plan['program_start_date'] && $plan['program_end_date']): ?>
+                        <?php if ((!empty($plan['is_afterschool']) || !empty($plan['is_camp'])) && $plan['program_start_date'] && $plan['program_end_date']): ?>
                             <div class="mb-4">
-                                <span class="inline-block bg-indigo-100 text-indigo-800 text-xs font-semibold px-2 py-1 rounded-full">Afterschool Program</span>
-                                <p class="text-xs text-indigo-600 mt-1">&#128197; <?php echo date('M j, Y', strtotime($plan['program_start_date'])); ?> &ndash; <?php echo date('M j, Y', strtotime($plan['program_end_date'])); ?></p>
+                                <?php if (!empty($plan['is_camp'])): ?>
+                                    <span class="inline-block bg-teal-100 text-teal-800 text-xs font-semibold px-2 py-1 rounded-full">Camp Program</span>
+                                <?php else: ?>
+                                    <span class="inline-block bg-indigo-100 text-indigo-800 text-xs font-semibold px-2 py-1 rounded-full">Afterschool Program</span>
+                                <?php endif; ?>
+                                <p class="text-xs <?php echo !empty($plan['is_camp']) ? 'text-teal-600' : 'text-indigo-600'; ?> mt-1">&#128197; <?php echo date('M j, Y', strtotime($plan['program_start_date'])); ?> &ndash; <?php echo date('M j, Y', strtotime($plan['program_end_date'])); ?></p>
                                 <?php if (date('Y-m-d') > $plan['program_end_date']): ?>
                                     <p class="text-xs text-red-600 font-semibold mt-1">&#9888; This program has ended</p>
                                 <?php elseif (date('Y-m-d') > $plan['program_start_date']): ?>
-                                    <p class="text-xs text-indigo-600 mt-1">Prorated enrollment available</p>
+                                    <p class="text-xs <?php echo !empty($plan['is_camp']) ? 'text-teal-600' : 'text-indigo-600'; ?> mt-1">Enrollment available &mdash; program in progress</p>
                                 <?php endif; ?>
                             </div>
                         <?php endif; ?>
-                        
+
                         <?php
-                        $afterschool_ended = (!empty($plan['is_afterschool']) && !empty($plan['program_end_date']) && date('Y-m-d') > $plan['program_end_date']);
+                        $fixed_term_ended = ((!empty($plan['is_afterschool']) || !empty($plan['is_camp'])) && !empty($plan['program_end_date']) && date('Y-m-d') > $plan['program_end_date']);
                         ?>
                         <?php if (!$is_current): ?>
-                            <?php if ($afterschool_ended): ?>
+                            <?php
+                            $plan_bypasses_lockout = (!empty($plan['is_afterschool']) || !empty($plan['is_camp']) || !empty($plan['tax_deductible']));
+                            $plan_is_locked = (($is_locked_out && !$plan_bypasses_lockout) || $has_pending_change);
+                            ?>
+                            <?php if ($fixed_term_ended): ?>
                                 <button disabled class="w-full bg-gray-300 text-gray-500 font-bold py-3 px-4 rounded-lg cursor-not-allowed text-sm">
                                     Program Ended
                                 </button>
-                            <?php elseif ($is_locked_out || $has_pending_change): ?>
+                            <?php elseif ($plan_is_locked): ?>
                                 <?php if ($current_membership): ?>
                                     <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 mb-4 text-xs">
                                         <?php if ($proration['type'] === 'upgrade'): ?>
@@ -316,12 +374,13 @@ include 'includes/student_header.php';
                                     <?php endif; ?>
                                 </button>
                             <?php else: ?>
+                                <?php $is_program = (!empty($plan['is_afterschool']) || !empty($plan['is_camp'])); ?>
                                 <form method="POST" class="mb-4">
                                     <?= csrf_field() ?>
                                     <input type="hidden" name="upgrade" value="1">
                                     <input type="hidden" name="new_plan_id" value="<?php echo $plan['id']; ?>">
 
-                                    <?php if ($current_membership): ?>
+                                    <?php if ($current_membership && !$is_program): ?>
                                         <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 mb-4 text-xs">
                                             <?php if ($proration['type'] === 'upgrade'): ?>
                                                 <p class="font-semibold text-gray-800 mb-1">Pro-rated Upgrade Cost:</p>
@@ -335,10 +394,17 @@ include 'includes/student_header.php';
                                         </div>
                                     <?php endif; ?>
 
-                                    <button type="submit"
-                                            class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition">
-                                        <?php echo $current_membership ? 'Switch to This Plan' : 'Select Plan'; ?>
-                                    </button>
+                                    <?php if ($is_program): ?>
+                                        <button type="submit"
+                                                class="w-full bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-4 rounded-lg transition">
+                                            Sign Up for <?php echo !empty($plan['is_camp']) ? 'Camp' : 'Program'; ?>
+                                        </button>
+                                    <?php else: ?>
+                                        <button type="submit"
+                                                class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition">
+                                            <?php echo $current_membership ? 'Switch to This Plan' : 'Select Plan'; ?>
+                                        </button>
+                                    <?php endif; ?>
                                 </form>
                             <?php endif; ?>
                         <?php else: ?>

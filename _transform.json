@@ -1,0 +1,1 @@
+[[" *   - If auto_renew is OFF => expire the membership\n */", " *   - If auto_renew is OFF => expire the membership\n *\n * Multi-tenancy: this file processes ALL active schools in a loop.\n */"]]

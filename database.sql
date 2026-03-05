@@ -490,10 +490,13 @@ CREATE TABLE studio_config (
 -- ────────────────────────────────────────────────────────────
 CREATE TABLE role_permissions (
     id INT PRIMARY KEY AUTO_INCREMENT,
-    role VARCHAR(20) NOT NULL,
+    role VARCHAR(50) NOT NULL,
     page VARCHAR(100) NOT NULL,
     can_view TINYINT(1) DEFAULT 0,
+    can_create TINYINT(1) DEFAULT 0,
     can_edit TINYINT(1) DEFAULT 0,
+    can_delete TINYINT(1) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY unique_role_page (role, page)
 );
 

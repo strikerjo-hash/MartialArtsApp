@@ -49,6 +49,24 @@ school_param($params);
 $memStmt->execute($params);
 $membership = $memStmt->fetch();
 
+// Pending plan change (proposed by admin)
+$childPendingChange = null;
+try {
+    $pcParams = [$childId];
+    school_param($pcParams);
+    $pcStmt = $pdo->prepare("
+        SELECT pc.*, mp.name as new_plan_name, mp.price as new_plan_price, mp.duration_months as new_duration,
+               mp.billing_frequency as new_billing_frequency, u.full_name as requested_by_name
+        FROM pending_plan_changes pc
+        JOIN membership_plans mp ON pc.new_plan_id = mp.id
+        LEFT JOIN users u ON pc.requested_by = u.id
+        WHERE pc.student_id = ? AND pc.status = 'pending' AND pc.expires_at > NOW()" . school_where('pc') . "
+        ORDER BY pc.created_at DESC LIMIT 1
+    ");
+    $pcStmt->execute($pcParams);
+    $childPendingChange = $pcStmt->fetch() ?: null;
+} catch (PDOException $e) {}
+
 // Enrolled classes (schedule)
 $params = [$childId];
 $schedStmt = $pdo->prepare("
@@ -195,13 +213,18 @@ include 'includes/parent_header.php';
             <div class="bg-white rounded-lg shadow p-6">
                 <h3 class="text-lg font-semibold text-gray-800 mb-4">🥋 Belt Rank</h3>
                 <?php if ($currentBelt): ?>
-                    <div class="flex items-center gap-4">
-                        <div class="w-16 h-8 rounded" style="background: <?= htmlspecialchars($currentBelt['color']) ?>;"></div>
-                        <div>
-                            <p class="font-bold text-gray-800"><?= htmlspecialchars($currentBelt['belt_name']) ?></p>
-                            <p class="text-sm text-gray-500"><?= htmlspecialchars($currentBelt['style_name']) ?></p>
-                            <p class="text-xs text-gray-400">Awarded: <?= formatDate($currentBelt['awarded_date']) ?></p>
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-4">
+                            <div class="w-16 h-8 rounded" style="background: <?= htmlspecialchars($currentBelt['color']) ?>;"></div>
+                            <div>
+                                <p class="font-bold text-gray-800"><?= htmlspecialchars($currentBelt['belt_name']) ?></p>
+                                <p class="text-sm text-gray-500"><?= htmlspecialchars($currentBelt['style_name']) ?></p>
+                                <p class="text-xs text-gray-400">Awarded: <?= formatDate($currentBelt['awarded_date']) ?></p>
+                            </div>
                         </div>
+                        <a href="student_certificate.php?child_id=<?= $childId ?>&belt_index=0"
+                           target="_blank"
+                           class="text-xs text-amber-600 hover:text-amber-800 font-medium whitespace-nowrap">&#128220; Certificate</a>
                     </div>
                 <?php else: ?>
                     <p class="text-gray-500">No belt rank awarded yet.</p>
@@ -211,11 +234,16 @@ include 'includes/parent_header.php';
                     <div class="mt-4 pt-4 border-t border-gray-100">
                         <p class="text-sm font-medium text-gray-600 mb-2">Belt History</p>
                         <div class="space-y-2">
-                            <?php foreach (array_slice($beltHistory, 1) as $bh): ?>
-                                <div class="flex items-center gap-3 text-sm">
-                                    <div class="w-6 h-3 rounded" style="background: <?= htmlspecialchars($bh['color']) ?>;"></div>
-                                    <span class="text-gray-700"><?= htmlspecialchars($bh['belt_name']) ?></span>
-                                    <span class="text-gray-400 text-xs"><?= formatDate($bh['awarded_date']) ?></span>
+                            <?php foreach (array_slice($beltHistory, 1) as $bhIdx => $bh): ?>
+                                <div class="flex items-center justify-between text-sm">
+                                    <div class="flex items-center gap-3">
+                                        <div class="w-6 h-3 rounded" style="background: <?= htmlspecialchars($bh['color']) ?>;"></div>
+                                        <span class="text-gray-700"><?= htmlspecialchars($bh['belt_name']) ?></span>
+                                        <span class="text-gray-400 text-xs"><?= formatDate($bh['awarded_date']) ?></span>
+                                    </div>
+                                    <a href="student_certificate.php?child_id=<?= $childId ?>&belt_index=<?= $bhIdx + 1 ?>"
+                                       target="_blank"
+                                       class="text-xs text-amber-600 hover:text-amber-800 font-medium">&#128220; Certificate</a>
                                 </div>
                             <?php endforeach; ?>
                         </div>
@@ -252,6 +280,36 @@ include 'includes/parent_header.php';
                         <div class="flex justify-between">
                             <span class="text-gray-500">Price</span>
                             <span class="font-semibold text-green-700"><?= formatMoney($membership['price']) ?></span>
+                        </div>
+                    </div>
+                <?php elseif ($childPendingChange): ?>
+                    <?php
+                    $pcIsMonthly = (isset($childPendingChange['new_billing_frequency']) && $childPendingChange['new_billing_frequency'] === 'monthly' && $childPendingChange['new_duration'] > 1);
+                    $pcMonthlyAmt = $pcIsMonthly ? round($childPendingChange['new_plan_price'] / $childPendingChange['new_duration'], 2) : 0;
+                    ?>
+                    <div class="space-y-2">
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-500">Proposed Plan</span>
+                            <span class="font-semibold text-gray-800"><?= htmlspecialchars($childPendingChange['new_plan_name']) ?></span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-500">Price</span>
+                            <?php if ($pcIsMonthly): ?>
+                                <span class="font-semibold text-green-700"><?= formatMoney($pcMonthlyAmt) ?>/mo</span>
+                            <?php else: ?>
+                                <span class="font-semibold text-green-700"><?= formatMoney($childPendingChange['new_plan_price']) ?></span>
+                            <?php endif; ?>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-500">Status</span>
+                            <span class="inline-block px-2 py-0.5 text-xs font-semibold rounded-full bg-orange-100 text-orange-700">Pending Approval</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-500">Proposed By</span>
+                            <span class="text-gray-800 text-sm"><?= htmlspecialchars($childPendingChange['requested_by_name'] ?? 'Studio Admin') ?></span>
+                        </div>
+                        <div class="text-xs text-gray-400 pt-1">
+                            Expires <?= date('M j, Y', strtotime($childPendingChange['expires_at'])) ?> &bull; Awaiting student approval
                         </div>
                     </div>
                 <?php else: ?>

@@ -1,0 +1,1 @@
+C:\Users\joejo\OneDrive\Documents\GitHub\MartialArtsApp\flutter_app\android\app\build\intermediates\cxx\release\231a3u6x\obj\armeabi-v7a

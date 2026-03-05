@@ -51,7 +51,7 @@ $belt_history = $belt_history->fetchAll();
 // Get memberships
 $params = [$student_id];
 $memberships = $pdo->prepare("
-    SELECT m.*, mp.name as plan_name, mp.price, mp.classes_per_week
+    SELECT m.*, mp.name as plan_name, mp.price, mp.classes_per_week, mp.duration_months
     FROM memberships m
     JOIN membership_plans mp ON m.plan_id = mp.id
     WHERE m.student_id = ?" . school_where('m') . "
@@ -145,8 +145,54 @@ try {
 // Handle admin payment method actions
 $pm_message = '';
 $credit_message = '';
+$status_message = '';
+
+// PRG flash messages: restore after a redirect
+if (!empty($_SESSION['student_detail_flash'])) {
+    $flash = $_SESSION['student_detail_flash'];
+    unset($_SESSION['student_detail_flash']);
+    $pm_message     = $flash['pm'] ?? '';
+    $credit_message = $flash['credit'] ?? '';
+    $status_message = $flash['status'] ?? '';
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     require_once __DIR__ . '/includes/security.php';
+
+    // Handle account status change
+    if (isset($_POST['change_account_status'])) {
+        verify_csrf();
+        $newStatus = $_POST['new_status'] ?? '';
+        if (in_array($newStatus, ['active', 'inactive', 'suspended'])) {
+            $stParams = [$newStatus, $student_id];
+            school_param($stParams);
+            $pdo->prepare("UPDATE students SET status = ? WHERE id = ?" . school_where())
+                ->execute($stParams);
+
+            if ($newStatus === 'inactive' || $newStatus === 'suspended') {
+                $inactParams = [date('Y-m-d'), $student_id];
+                school_param($inactParams);
+                $pdo->prepare("UPDATE students SET inactive_since = ? WHERE id = ?" . school_where())
+                    ->execute($inactParams);
+                deactivate_student_cascade($student_id, 'manual');
+            } elseif ($newStatus === 'active') {
+                $actParams = [$student_id];
+                school_param($actParams);
+                $pdo->prepare("UPDATE students SET inactive_since = NULL WHERE id = ?" . school_where())
+                    ->execute($actParams);
+                reactivate_student($student_id);
+            }
+
+            $status_message = showAlert('Account status changed to ' . ucfirst($newStatus) . '.', 'success');
+
+            // Refresh student data
+            $refreshParams = [$student_id];
+            school_param($refreshParams);
+            $refreshStmt = $pdo->prepare("SELECT * FROM students WHERE id = ?" . school_where());
+            $refreshStmt->execute($refreshParams);
+            $student = $refreshStmt->fetch();
+        }
+    }
 
     if (isset($_POST['admin_delete_pm'])) {
         verify_csrf();
@@ -245,6 +291,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     json_encode($proration),
                     $change_notes ?: null,
                 ]);
+
+                // Send email notification to the student about the proposed plan change
+                send_plan_change_notification_email($student_id, $newPlanRow['name'], $change_notes ?: null);
 
                 $credit_message = showAlert('Plan change proposed! The student must approve this on their portal. It will expire in 7 days if not acted upon.', 'success');
             }
@@ -346,6 +395,77 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $student = $stmt->fetch();
     }
 
+    // Membership management actions
+    if (isset($_POST['membership_action'])) {
+        verify_csrf();
+        $memAction = $_POST['membership_action'];
+        $memId = (int) ($_POST['membership_id'] ?? 0);
+
+        switch ($memAction) {
+            case 'cancel_membership':
+                $cancel_reason = sanitizeInput($_POST['cancel_reason'] ?? '');
+                $cancel_params = [date('Y-m-d H:i:s'), $cancel_reason ?: null, $memId, $student_id];
+                school_param($cancel_params);
+                $pdo->prepare("UPDATE memberships SET status = 'cancelled', auto_renew = 0, cancelled_at = ?, cancel_reason = ? WHERE id = ? AND student_id = ?" . school_where())->execute($cancel_params);
+                $status_message = showAlert('Membership cancelled successfully.', 'success');
+                // Refresh memberships
+                $memberships = $pdo->prepare("SELECT m.*, mp.name as plan_name, mp.price, mp.classes_per_week, mp.duration_months FROM memberships m JOIN membership_plans mp ON m.plan_id = mp.id WHERE m.student_id = ?" . school_where('m') . " ORDER BY m.created_at DESC");
+                $mRefreshParams = [$student_id];
+                school_param($mRefreshParams);
+                $memberships->execute($mRefreshParams);
+                $memberships = $memberships->fetchAll();
+                break;
+
+            case 'hold_membership':
+                $hold_reason = sanitizeInput($_POST['hold_reason'] ?? '');
+                $hold_end = !empty($_POST['hold_end_date']) ? $_POST['hold_end_date'] : null;
+                $hold_params = [date('Y-m-d'), $hold_end, $hold_reason ?: null, $memId, $student_id];
+                school_param($hold_params);
+                $pdo->prepare("UPDATE memberships SET status = 'on_hold', hold_start_date = ?, hold_end_date = ?, hold_reason = ? WHERE id = ? AND student_id = ?" . school_where())->execute($hold_params);
+                $msg = 'Membership placed on hold.';
+                if ($hold_end) $msg .= ' Will resume on ' . date('M j, Y', strtotime($hold_end)) . '.';
+                $status_message = showAlert($msg, 'success');
+                // Refresh memberships
+                $memberships = $pdo->prepare("SELECT m.*, mp.name as plan_name, mp.price, mp.classes_per_week, mp.duration_months FROM memberships m JOIN membership_plans mp ON m.plan_id = mp.id WHERE m.student_id = ?" . school_where('m') . " ORDER BY m.created_at DESC");
+                $mRefreshParams = [$student_id];
+                school_param($mRefreshParams);
+                $memberships->execute($mRefreshParams);
+                $memberships = $memberships->fetchAll();
+                break;
+
+            case 'resume_membership':
+                $resume_params = [$memId, $student_id];
+                school_param($resume_params);
+                $pdo->prepare("UPDATE memberships SET status = 'active', hold_start_date = NULL, hold_end_date = NULL, hold_reason = NULL WHERE id = ? AND student_id = ?" . school_where())->execute($resume_params);
+                $status_message = showAlert('Membership resumed successfully!', 'success');
+                // Refresh memberships
+                $memberships = $pdo->prepare("SELECT m.*, mp.name as plan_name, mp.price, mp.classes_per_week, mp.duration_months FROM memberships m JOIN membership_plans mp ON m.plan_id = mp.id WHERE m.student_id = ?" . school_where('m') . " ORDER BY m.created_at DESC");
+                $mRefreshParams = [$student_id];
+                school_param($mRefreshParams);
+                $memberships->execute($mRefreshParams);
+                $memberships = $memberships->fetchAll();
+                break;
+
+            case 'reactivate_membership':
+                $new_end = $_POST['new_end_date'] ?? '';
+                if (empty($new_end)) {
+                    $status_message = showAlert('Please provide a new end date to reactivate.', 'error');
+                } else {
+                    $react_params = [$new_end, $memId, $student_id];
+                    school_param($react_params);
+                    $pdo->prepare("UPDATE memberships SET status = 'active', end_date = ?, cancelled_at = NULL, cancel_reason = NULL WHERE id = ? AND student_id = ?" . school_where())->execute($react_params);
+                    $status_message = showAlert('Membership reactivated until ' . date('M j, Y', strtotime($new_end)) . '.', 'success');
+                }
+                // Refresh memberships
+                $memberships = $pdo->prepare("SELECT m.*, mp.name as plan_name, mp.price, mp.classes_per_week, mp.duration_months FROM memberships m JOIN membership_plans mp ON m.plan_id = mp.id WHERE m.student_id = ?" . school_where('m') . " ORDER BY m.created_at DESC");
+                $mRefreshParams = [$student_id];
+                school_param($mRefreshParams);
+                $memberships->execute($mRefreshParams);
+                $memberships = $memberships->fetchAll();
+                break;
+        }
+    }
+
     // Link student to parent account
     if (isset($_POST['link_to_parent'])) {
         verify_csrf();
@@ -416,6 +536,59 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // Sync payment methods from a child student to this parent account (used on PARENT's page)
+    if (isset($_POST['sync_child_cards_to_parent'])) {
+        verify_csrf();
+        $childId = (int)($_POST['child_student_id'] ?? 0);
+
+        if ($childId && !empty($student['is_parent'])) {
+            // Verify this child is actually linked to this parent
+            $verifyLink = $pdo->prepare("SELECT 1 FROM parent_students WHERE parent_id = ? AND student_id = ? LIMIT 1");
+            $verifyLink->execute([$student_id, $childId]);
+
+            if ($verifyLink->fetch()) {
+                $copied = sync_child_payment_methods_to_parent($childId, $student_id);
+                if ($copied > 0) {
+                    $pm_message = showAlert($copied . ' payment method(s) synced from child to this parent account.', 'success');
+                    // Refresh payment methods list
+                    $pmStmt->execute([$student_id]);
+                    $paymentMethods = $pmStmt->fetchAll();
+                } else {
+                    $pm_message = showAlert('No new payment methods to sync &mdash; cards already exist on parent account or child has no cards.', 'info');
+                }
+            } else {
+                $pm_message = showAlert('Child is not linked to this parent account.', 'error');
+            }
+        } else {
+            $pm_message = showAlert('Invalid request.', 'error');
+        }
+    }
+
+    // Sync THIS student's payment methods UP to a linked parent account (used on CHILD's page)
+    if (isset($_POST['sync_my_cards_to_parent'])) {
+        verify_csrf();
+        $targetParentId = (int)($_POST['target_parent_id'] ?? 0);
+
+        if ($targetParentId) {
+            // Verify this parent is actually linked to this student
+            $verifyLink = $pdo->prepare("SELECT 1 FROM parent_students WHERE parent_id = ? AND student_id = ? LIMIT 1");
+            $verifyLink->execute([$targetParentId, $student_id]);
+
+            if ($verifyLink->fetch()) {
+                $copied = sync_child_payment_methods_to_parent($student_id, $targetParentId);
+                if ($copied > 0) {
+                    $pm_message = showAlert($copied . ' payment method(s) synced from this student to the parent account.', 'success');
+                } else {
+                    $pm_message = showAlert('No new payment methods to sync &mdash; cards already exist on parent account or this student has no cards.', 'info');
+                }
+            } else {
+                $pm_message = showAlert('Parent is not linked to this student.', 'error');
+            }
+        } else {
+            $pm_message = showAlert('Invalid request.', 'error');
+        }
+    }
+
     // Transfer student to another school (super admin only)
     if (isset($_POST['transfer_student'])) {
         verify_csrf();
@@ -441,10 +614,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     }
+
+    // PRG redirect: store any messages in session and redirect to prevent re-submission on refresh
+    $_SESSION['student_detail_flash'] = [
+        'pm'     => $pm_message,
+        'credit' => $credit_message,
+        'status' => $status_message,
+    ];
+    header('Location: student_detail.php?id=' . $student_id);
+    exit;
 }
 
 // Fetch linked parent accounts for this student
 $linkedParents = get_student_parents($student_id);
+
+// If this student IS a parent, fetch their linked children
+$linkedChildren = [];
+$childCardCounts = [];
+if (!empty($student['is_parent'])) {
+    $linkedChildren = get_parent_children($student_id);
+    // Pre-fetch which children have payment methods (for sync button)
+    if (!empty($linkedChildren)) {
+        $childIds = array_column($linkedChildren, 'id');
+        $placeholders = implode(',', array_fill(0, count($childIds), '?'));
+        $ccStmt = $pdo->prepare("SELECT student_id, COUNT(*) as cnt FROM payment_methods WHERE student_id IN ($placeholders) GROUP BY student_id");
+        $ccStmt->execute($childIds);
+        foreach ($ccStmt->fetchAll() as $ccRow) {
+            $childCardCounts[(int)$ccRow['student_id']] = (int)$ccRow['cnt'];
+        }
+    }
+}
 
 // Transfer preview data (super admin only)
 $transferPreview = [];
@@ -561,6 +760,9 @@ include 'includes/header.php';
                     <h1 class="text-3xl font-bold text-gray-800">
                         <?php echo $student['first_name'] . ' ' . $student['last_name']; ?>
                     </h1>
+                    <?php if (!empty($student['username'])): ?>
+                        <p class="text-sm text-gray-400 mt-0.5">@<?php echo htmlspecialchars($student['username']); ?></p>
+                    <?php endif; ?>
                     <p class="text-gray-600 mt-1">
                         <?php if ($current_belt): ?>
                             Current Belt: <span class="font-semibold"><?php echo $current_belt['belt_name']; ?></span>
@@ -627,7 +829,35 @@ include 'includes/header.php';
                     <?php endif; ?>
                 </div>
             </div>
-            <div class="flex items-center gap-3 flex-shrink-0">
+            <div class="flex items-center gap-3 flex-shrink-0 flex-wrap">
+                <?php if (!empty($status_message)) echo $status_message; ?>
+                <?php if ($student['status'] === 'active'): ?>
+                    <form method="POST" class="inline" onsubmit="return confirm('Deactivate this student account? They will not be able to log in.')">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="change_account_status" value="1">
+                        <input type="hidden" name="new_status" value="inactive">
+                        <button type="submit" class="bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-lg font-medium text-sm">
+                            Deactivate
+                        </button>
+                    </form>
+                    <form method="POST" class="inline" onsubmit="return confirm('Suspend this student account?')">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="change_account_status" value="1">
+                        <input type="hidden" name="new_status" value="suspended">
+                        <button type="submit" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg font-medium text-sm">
+                            Suspend
+                        </button>
+                    </form>
+                <?php elseif ($student['status'] === 'inactive' || $student['status'] === 'suspended'): ?>
+                    <form method="POST" class="inline" onsubmit="return confirm('Reactivate this student account?')">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="change_account_status" value="1">
+                        <input type="hidden" name="new_status" value="active">
+                        <button type="submit" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg font-medium text-sm">
+                            Reactivate Account
+                        </button>
+                    </form>
+                <?php endif; ?>
                 <?php if (is_super_admin() && !empty($transferSchools)): ?>
                 <button onclick="document.getElementById('transferModal').classList.remove('hidden')"
                         class="bg-orange-500 hover:bg-orange-600 text-white px-5 py-2 rounded-lg font-medium text-sm">
@@ -645,6 +875,14 @@ include 'includes/header.php';
                    class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium">
                     Edit Student
                 </a>
+                <form method="POST" action="admin_impersonate.php" class="inline-block">
+                    <?php echo csrf_field(); ?>
+                    <input type="hidden" name="action" value="start_student">
+                    <input type="hidden" name="student_id" value="<?php echo $student_id; ?>">
+                    <button type="submit" class="bg-purple-600 hover:bg-purple-700 text-white px-5 py-2 rounded-lg font-medium text-sm">
+                        &#128065; View as Student
+                    </button>
+                </form>
             </div>
         </div>
 
@@ -671,6 +909,18 @@ include 'includes/header.php';
                 <p class="font-medium text-gray-800"><?php echo $student['emergency_contact_name'] ?: 'N/A'; ?></p>
                 <p class="text-sm text-gray-600"><?php echo $student['emergency_contact_phone'] ?: ''; ?></p>
             </div>
+            <?php if (!empty($student['school_district'])): ?>
+            <div>
+                <p class="text-sm text-gray-600">School District</p>
+                <p class="font-medium text-gray-800"><?php echo htmlspecialchars($student['school_district']); ?></p>
+            </div>
+            <?php endif; ?>
+            <?php if (!empty($student['medical_info'])): ?>
+            <div class="col-span-2">
+                <p class="text-sm text-gray-600">Medical Info / Allergies</p>
+                <p class="font-medium text-gray-800"><?php echo htmlspecialchars($student['medical_info']); ?></p>
+            </div>
+            <?php endif; ?>
         </div>
     </div>
 
@@ -744,9 +994,9 @@ include 'includes/header.php';
                 <?php else: ?>
                     <div class="space-y-3">
                         <?php foreach ($memberships as $membership): ?>
-                            <div class="p-3 bg-gray-50 rounded-lg">
+                            <div class="p-4 bg-gray-50 rounded-lg">
                                 <div class="flex justify-between items-start">
-                                    <div>
+                                    <div class="flex-1">
                                         <p class="font-semibold"><?php echo $membership['plan_name']; ?></p>
                                         <p class="text-sm text-gray-600">
                                             <?php echo formatDate($membership['start_date']); ?> -
@@ -756,13 +1006,52 @@ include 'includes/header.php';
                                             <?php echo (int)$membership['classes_per_week'] >= 99 ? 'Unlimited classes' : $membership['classes_per_week'] . ' classes/week'; ?>
                                             &bull; Auto-renew: <?php echo (isset($membership['auto_renew']) && $membership['auto_renew']) ? 'ON' : 'OFF'; ?>
                                         </p>
+                                        <?php if ($membership['status'] === 'on_hold'): ?>
+                                            <div class="mt-1">
+                                                <?php if (!empty($membership['hold_end_date'])): ?>
+                                                    <p class="text-xs text-yellow-700">On hold until <?php echo date('M j, Y', strtotime($membership['hold_end_date'])); ?></p>
+                                                <?php else: ?>
+                                                    <p class="text-xs text-yellow-700">On hold (indefinite)</p>
+                                                <?php endif; ?>
+                                                <?php if (!empty($membership['hold_reason'])): ?>
+                                                    <p class="text-xs text-gray-500">Reason: <?php echo htmlspecialchars($membership['hold_reason']); ?></p>
+                                                <?php endif; ?>
+                                            </div>
+                                        <?php endif; ?>
+                                        <?php if ($membership['status'] === 'cancelled' && !empty($membership['cancelled_at'])): ?>
+                                            <div class="mt-1">
+                                                <p class="text-xs text-gray-500">Cancelled <?php echo date('M j, Y', strtotime($membership['cancelled_at'])); ?></p>
+                                                <?php if (!empty($membership['cancel_reason'])): ?>
+                                                    <p class="text-xs text-gray-500">Reason: <?php echo htmlspecialchars($membership['cancel_reason']); ?></p>
+                                                <?php endif; ?>
+                                            </div>
+                                        <?php endif; ?>
                                     </div>
-                                    <span class="px-2 py-1 text-xs font-semibold rounded-full <?php
-                                        $colors = ['active' => 'bg-green-100 text-green-800', 'expired' => 'bg-red-100 text-red-800', 'cancelled' => 'bg-gray-100 text-gray-800'];
-                                        echo $colors[$membership['status']];
-                                    ?>">
-                                        <?php echo ucfirst($membership['status']); ?>
-                                    </span>
+                                    <div class="flex flex-col items-end gap-2">
+                                        <span class="px-2 py-1 text-xs font-semibold rounded-full <?php
+                                            $colors = ['active' => 'bg-green-100 text-green-800', 'expired' => 'bg-red-100 text-red-800', 'cancelled' => 'bg-gray-100 text-gray-800', 'on_hold' => 'bg-yellow-100 text-yellow-800'];
+                                            echo $colors[$membership['status']] ?? 'bg-gray-100 text-gray-800';
+                                        ?>">
+                                            <?php echo $membership['status'] === 'on_hold' ? 'On Hold' : ucfirst($membership['status']); ?>
+                                        </span>
+                                        <!-- Membership action buttons -->
+                                        <div class="flex items-center gap-1 flex-wrap justify-end">
+                                            <?php if ($membership['status'] === 'active'): ?>
+                                                <button type="button" onclick="openStudentHoldModal(<?php echo $membership['id']; ?>)" class="px-2 py-1 text-xs font-medium text-yellow-700 bg-yellow-50 border border-yellow-300 rounded hover:bg-yellow-100">Hold</button>
+                                                <button type="button" onclick="openStudentCancelModal(<?php echo $membership['id']; ?>, '<?php echo htmlspecialchars(addslashes($membership['plan_name'])); ?>')" class="px-2 py-1 text-xs font-medium text-red-700 bg-red-50 border border-red-300 rounded hover:bg-red-100">Cancel</button>
+                                            <?php elseif ($membership['status'] === 'on_hold'): ?>
+                                                <form method="POST" class="inline" onsubmit="return confirm('Resume this membership?')">
+                                                    <?php echo csrf_field(); ?>
+                                                    <input type="hidden" name="membership_action" value="resume_membership">
+                                                    <input type="hidden" name="membership_id" value="<?php echo $membership['id']; ?>">
+                                                    <button type="submit" class="px-2 py-1 text-xs font-medium text-green-700 bg-green-50 border border-green-300 rounded hover:bg-green-100">Resume</button>
+                                                </form>
+                                                <button type="button" onclick="openStudentCancelModal(<?php echo $membership['id']; ?>, '<?php echo htmlspecialchars(addslashes($membership['plan_name'])); ?>')" class="px-2 py-1 text-xs font-medium text-red-700 bg-red-50 border border-red-300 rounded hover:bg-red-100">Cancel</button>
+                                            <?php elseif ($membership['status'] === 'cancelled' || $membership['status'] === 'expired'): ?>
+                                                <button type="button" onclick="openStudentReactivateModal(<?php echo $membership['id']; ?>, <?php echo (int)($membership['duration_months'] ?? 1); ?>)" class="px-2 py-1 text-xs font-medium text-green-700 bg-green-50 border border-green-300 rounded hover:bg-green-100">Reactivate</button>
+                                            <?php endif; ?>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         <?php endforeach; ?>
@@ -1425,10 +1714,81 @@ include 'includes/header.php';
             </div>
         </div>
 
+        <!-- Linked Children (shown when this student IS a parent) -->
+        <?php if (!empty($student['is_parent'])): ?>
+            <div class="px-6 py-4 border-b border-gray-200" id="linked-children">
+                <h3 class="text-sm font-semibold text-gray-600 uppercase tracking-wider mb-3">
+                    👶 Linked Students (<?= count($linkedChildren) ?>)
+                </h3>
+                <?php if (empty($linkedChildren)): ?>
+                    <div class="py-4 text-center text-gray-400 text-sm">
+                        <p>No students linked to this parent account yet.</p>
+                        <p class="mt-1">Use the <a href="student_detail.php?id=<?= $student_id ?>" class="text-blue-600 hover:underline">Link to Parent</a> option on a student's profile to add them.</p>
+                    </div>
+                <?php else: ?>
+                    <div class="space-y-2">
+                        <?php foreach ($linkedChildren as $child):
+                            $childName = htmlspecialchars($child['first_name'] . ' ' . $child['last_name']);
+                            $childBelt = htmlspecialchars($child['current_belt'] ?? 'No Belt');
+                            $childMembership = $child['membership_status'] ?? null;
+                            $childRelationship = ucfirst($child['relationship'] ?? 'parent');
+                            $childStatus = $child['status'] ?? 'active';
+                        ?>
+                            <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-9 h-9 bg-purple-100 rounded-full flex items-center justify-center flex-shrink-0">
+                                        <span class="text-purple-600 font-bold text-xs"><?= strtoupper(substr($child['first_name'], 0, 1) . substr($child['last_name'], 0, 1)) ?></span>
+                                    </div>
+                                    <div>
+                                        <a href="student_detail.php?id=<?= $child['id'] ?>" class="font-medium text-gray-800 hover:text-blue-600">
+                                            <?= $childName ?>
+                                        </a>
+                                        <div class="flex items-center gap-2 mt-0.5">
+                                            <span class="text-xs text-gray-500"><?= $childRelationship ?></span>
+                                            <span class="text-xs text-gray-300">&bull;</span>
+                                            <span class="text-xs text-gray-500"><?= $childBelt ?></span>
+                                            <?php if ($childMembership === 'active'): ?>
+                                                <span class="text-xs text-gray-300">&bull;</span>
+                                                <span class="inline-flex px-1.5 py-0.5 text-xs rounded-full bg-green-100 text-green-700"><?= htmlspecialchars($child['plan_name'] ?? 'Active') ?></span>
+                                            <?php elseif ($childMembership): ?>
+                                                <span class="text-xs text-gray-300">&bull;</span>
+                                                <span class="inline-flex px-1.5 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600"><?= ucfirst($childMembership) ?></span>
+                                            <?php endif; ?>
+                                            <?php if ($childStatus !== 'active'): ?>
+                                                <span class="inline-flex px-1.5 py-0.5 text-xs rounded-full bg-red-100 text-red-700"><?= ucfirst($childStatus) ?></span>
+                                            <?php endif; ?>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-2 flex-shrink-0">
+                                    <?php if (!empty($childCardCounts[$child['id']])): ?>
+                                        <form method="POST" class="inline" onsubmit="return confirm('Copy <?= $childCardCounts[$child['id']] ?> payment method(s) from <?= $childName ?> to this parent account?')">
+                                            <?= csrf_field() ?>
+                                            <input type="hidden" name="sync_child_cards_to_parent" value="1">
+                                            <input type="hidden" name="child_student_id" value="<?= $child['id'] ?>">
+                                            <button type="submit" class="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-md bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-colors" title="Copy this child's card(s) to the parent account">
+                                                💳 Sync Card<?= $childCardCounts[$child['id']] > 1 ? 's' : '' ?> ↑
+                                            </button>
+                                        </form>
+                                    <?php endif; ?>
+                                    <a href="student_detail.php?id=<?= $child['id'] ?>" class="text-blue-600 hover:text-blue-800 text-sm font-medium">View →</a>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
+
+        <!-- Linked Parents (shown for this student's parent accounts) -->
+        <div class="px-6 py-4">
+            <h3 class="text-sm font-semibold text-gray-600 uppercase tracking-wider mb-3">
+                👨‍👩‍👧 Parent Accounts
+            </h3>
         <?php if (empty($linkedParents)): ?>
-            <div class="p-8 text-center text-gray-500">
+            <div class="py-4 text-center text-gray-400 text-sm">
                 <p>No parent accounts linked to this student.</p>
-                <p class="text-sm mt-1">Link a parent account to allow family management of this student.</p>
+                <p class="mt-1">Link a parent account to allow family management of this student.</p>
             </div>
         <?php else: ?>
             <div class="divide-y divide-gray-200">
@@ -1454,16 +1814,29 @@ include 'includes/header.php';
                                 </p>
                             </div>
                         </div>
-                        <form method="POST" class="inline" onsubmit="return confirm('Unlink this parent from the student?')">
-                            <?= csrf_field() ?>
-                            <input type="hidden" name="unlink_from_parent" value="1">
-                            <input type="hidden" name="parent_id" value="<?= $lp['id'] ?>">
-                            <button type="submit" class="text-red-600 hover:text-red-800 text-sm font-medium">Unlink</button>
-                        </form>
+                        <div class="flex items-center gap-3">
+                            <?php if (!empty($paymentMethods)): ?>
+                                <form method="POST" class="inline" onsubmit="return confirm('Copy this student\'s payment method(s) to <?= htmlspecialchars($lp['first_name'] . ' ' . $lp['last_name']) ?>\'s parent account?')">
+                                    <?= csrf_field() ?>
+                                    <input type="hidden" name="sync_my_cards_to_parent" value="1">
+                                    <input type="hidden" name="target_parent_id" value="<?= $lp['id'] ?>">
+                                    <button type="submit" class="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-md bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-colors" title="Copy this student's card(s) to the parent account">
+                                        💳 Sync Card<?= count($paymentMethods) > 1 ? 's' : '' ?> to Parent ↑
+                                    </button>
+                                </form>
+                            <?php endif; ?>
+                            <form method="POST" class="inline" onsubmit="return confirm('Unlink this parent from the student?')">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="unlink_from_parent" value="1">
+                                <input type="hidden" name="parent_id" value="<?= $lp['id'] ?>">
+                                <button type="submit" class="text-red-600 hover:text-red-800 text-sm font-medium">Unlink</button>
+                            </form>
+                        </div>
                     </div>
                 <?php endforeach; ?>
             </div>
         <?php endif; ?>
+        </div>
     </div>
 </div>
 
@@ -1628,5 +2001,119 @@ include 'includes/header.php';
     </div>
 </div>
 <?php endif; ?>
+
+<!-- Hold Membership Modal (Student Detail) -->
+<div id="studentHoldModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center">
+    <div class="relative mx-auto p-6 border w-full max-w-md shadow-lg rounded-lg bg-white">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-bold text-gray-800">Put Membership On Hold</h3>
+            <button onclick="document.getElementById('studentHoldModal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-2xl">&times;</button>
+        </div>
+        <form method="POST" class="space-y-4">
+            <?php echo csrf_field(); ?>
+            <input type="hidden" name="membership_action" value="hold_membership">
+            <input type="hidden" name="membership_id" id="student_hold_membership_id">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Reason (optional)</label>
+                <input type="text" name="hold_reason" id="student_hold_reason" maxlength="255" placeholder="e.g., Injury, Travel, Personal reasons"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-yellow-500">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Resume Date (optional)</label>
+                <input type="date" name="hold_end_date" id="student_hold_end_date"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-yellow-500">
+                <p class="text-xs text-gray-500 mt-1">Leave blank for indefinite hold. Manual resume required.</p>
+            </div>
+            <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm text-yellow-700">
+                Billing will be paused while the membership is on hold. The student will not be charged until the membership is resumed.
+            </div>
+            <div class="flex justify-end space-x-3 pt-2">
+                <button type="button" onclick="document.getElementById('studentHoldModal').classList.add('hidden')" class="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Cancel</button>
+                <button type="submit" class="px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg font-medium">Put On Hold</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Cancel Membership Modal (Student Detail) -->
+<div id="studentCancelModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center">
+    <div class="relative mx-auto p-6 border w-full max-w-md shadow-lg rounded-lg bg-white">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-bold text-gray-800">Cancel Membership</h3>
+            <button onclick="document.getElementById('studentCancelModal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-2xl">&times;</button>
+        </div>
+        <form method="POST" class="space-y-4" onsubmit="return confirm('Are you sure you want to cancel this membership? This will disable auto-renewal.')">
+            <?php echo csrf_field(); ?>
+            <input type="hidden" name="membership_action" value="cancel_membership">
+            <input type="hidden" name="membership_id" id="student_cancel_membership_id">
+            <p class="text-sm text-gray-600">Cancelling: <strong id="student_cancel_plan_name"></strong></p>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Reason (optional)</label>
+                <input type="text" name="cancel_reason" id="student_cancel_reason" maxlength="255" placeholder="e.g., Student request, Non-payment, Moving"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-red-500">
+            </div>
+            <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+                This will cancel the membership and disable auto-renewal. The student will lose access to membership benefits.
+            </div>
+            <div class="flex justify-end space-x-3 pt-2">
+                <button type="button" onclick="document.getElementById('studentCancelModal').classList.add('hidden')" class="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Go Back</button>
+                <button type="submit" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium">Cancel Membership</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Reactivate Membership Modal (Student Detail) -->
+<div id="studentReactivateModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center">
+    <div class="relative mx-auto p-6 border w-full max-w-md shadow-lg rounded-lg bg-white">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-bold text-gray-800">Reactivate Membership</h3>
+            <button onclick="document.getElementById('studentReactivateModal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-2xl">&times;</button>
+        </div>
+        <form method="POST" class="space-y-4">
+            <?php echo csrf_field(); ?>
+            <input type="hidden" name="membership_action" value="reactivate_membership">
+            <input type="hidden" name="membership_id" id="student_reactivate_membership_id">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">New End Date *</label>
+                <input type="date" name="new_end_date" id="student_new_end_date" required
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
+                <p class="text-xs text-gray-500 mt-1">Set the new membership end date.</p>
+            </div>
+            <div class="bg-green-50 border border-green-200 rounded-lg p-3 text-sm text-green-700">
+                This will reactivate the membership and set it back to active status with the specified end date.
+            </div>
+            <div class="flex justify-end space-x-3 pt-2">
+                <button type="button" onclick="document.getElementById('studentReactivateModal').classList.add('hidden')" class="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Cancel</button>
+                <button type="submit" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium">Reactivate</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+function openStudentHoldModal(membershipId) {
+    document.getElementById('student_hold_membership_id').value = membershipId;
+    document.getElementById('student_hold_reason').value = '';
+    document.getElementById('student_hold_end_date').value = '';
+    document.getElementById('studentHoldModal').classList.remove('hidden');
+}
+
+function openStudentCancelModal(membershipId, planName) {
+    document.getElementById('student_cancel_membership_id').value = membershipId;
+    document.getElementById('student_cancel_plan_name').textContent = planName;
+    document.getElementById('student_cancel_reason').value = '';
+    document.getElementById('studentCancelModal').classList.remove('hidden');
+}
+
+function openStudentReactivateModal(membershipId, durationMonths) {
+    document.getElementById('student_reactivate_membership_id').value = membershipId;
+    // Default end date: today + plan duration
+    var d = new Date();
+    d.setMonth(d.getMonth() + (durationMonths || 1));
+    document.getElementById('student_new_end_date').value = d.toISOString().split('T')[0];
+    document.getElementById('studentReactivateModal').classList.remove('hidden');
+}
+</script>
 
 <?php include 'includes/footer.php'; ?>

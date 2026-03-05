@@ -82,7 +82,7 @@ $feeBreakdown = calculateTotalWithFees([
 ]);
 
 // Get default payment method — try parent first, then child
-$defaultPayment = get_student_default_payment($parentId);
+$defaultPayment = get_parent_default_payment($parentId, [$childId]);
 $paymentSource  = 'parent';
 if (!$defaultPayment) {
     $defaultPayment = get_student_default_payment($childId);
@@ -94,6 +94,7 @@ $studentCredit   = get_student_credit($childId);
 $totalWithFees   = $feeBreakdown['total'];
 $creditToApply   = min($studentCredit, $totalWithFees);
 $cardChargeAmount = round($totalWithFees - $creditToApply, 2);
+$stripePk = (get_active_gateway() === 'stripe') ? getSetting('stripe_publishable_key') : '';
 
 $childName = htmlspecialchars($child['first_name'] . ' ' . $child['last_name']);
 $message   = '';
@@ -116,8 +117,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
 
     if ($gateway === 'none' || !is_gateway_ready()) {
         $message = showAlert('Payment gateway not configured. Please contact the studio.', 'error');
-    } elseif (!$defaultPayment) {
-        $message = showAlert('No payment method on file. Please add a card in Payment Methods first.', 'error');
     } else {
         $chargeDesc = $current_membership
             ? 'Membership upgrade for ' . $child['first_name'] . ': ' . $current_membership['plan_name'] . ' to ' . $new_plan['name']
@@ -126,19 +125,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
             $chargeDesc .= ' (incl. service fee)';
         }
 
-        // Charge the parent's card (parent is paying on behalf of the child)
-        $chargeResult = charge_student(
-            $parentId,
-            $totalWithFees,
-            $chargeDesc
-        );
+        $walletPmId = trim($_POST['wallet_pm_id'] ?? '');
+        $chargeResult = null;
 
-        if ($chargeResult['success']) {
+        if (!empty($walletPmId)) {
+            $chargeResult = charge_wallet_token($parentId, $walletPmId, $totalWithFees, $chargeDesc);
+        } elseif (!$defaultPayment) {
+            $message = showAlert('No payment method on file. Please add a card in Payment Methods first.', 'error');
+        } else {
+            $chargeResult = charge_parent($parentId, $totalWithFees, $chargeDesc, [$childId]);
+        }
+
+        if ($chargeResult && $chargeResult['success']) {
             $creditUsed    = $chargeResult['credit_used'] ?? 0;
             $amountCharged = $chargeResult['amount_charged'] ?? $totalWithFees;
 
-            // Cancel current membership
-            if ($current_membership) {
+            $is_program = (!empty($new_plan['is_afterschool']) || !empty($new_plan['is_camp']));
+
+            // Cancel current membership only for regular plan switches (not camps/afterschool)
+            if ($current_membership && !$is_program) {
                 $cancelParams = [$current_membership['id']];
                 school_param($cancelParams);
                 $stmt = $pdo->prepare("UPDATE memberships SET status = 'cancelled', end_date = CURDATE() WHERE id = ?" . school_where());
@@ -148,8 +153,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
             // Create new membership
             $start_date = date('Y-m-d');
 
-            // Afterschool plans: use fixed program end date, no auto-renewal
-            if (!empty($new_plan['is_afterschool'])) {
+            // Afterschool/camp plans: use fixed program end date, no auto-renewal
+            if ($is_program) {
                 $end_date   = $new_plan['program_end_date'];
                 $auto_renew = 0;
             } else {
@@ -195,6 +200,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
                 $stmt->execute([current_school_id(), $childId, $parentId, $membership_id, $creditUsed, generateReceiptNumber(), 'Account credit applied: ' . $chargeDesc]);
             }
 
+            // Send payment receipt email
+            send_payment_receipt_email([
+                'student_id'     => $childId,
+                'parent_id'      => $parentId,
+                'amount'         => $totalWithFees,
+                'payment_type'   => 'membership',
+                'description'    => $chargeDesc,
+                'receipt_number' => '',
+                'transaction_id' => $chargeResult['transaction_id'] ?? null,
+                'payment_method' => $amountCharged > 0 ? 'credit_card' : 'account_credit',
+            ]);
+
             // Record discount code usage
             if ($feeBreakdown['discount_code_id']) {
                 recordDiscountCodeUse(
@@ -216,7 +233,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
 
             header('Location: parent_child_membership.php?id=' . $childId . '&success=upgrade');
             exit;
-        } else {
+        } elseif ($chargeResult) {
             $message = showAlert('Payment failed: ' . ($chargeResult['error'] ?? 'Unknown error') . '. Please try again or update your card.', 'error');
         }
     }
@@ -225,7 +242,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
 // Fetch all children for the child switcher
 $children = get_parent_children($parentId);
 
-include 'includes/student_header.php';
+include 'includes/parent_header.php';
 ?>
 
 <div class="container mx-auto px-4 py-8">
@@ -371,7 +388,7 @@ include 'includes/student_header.php';
                 <a href="parent_child_membership.php?id=<?= $childId ?>" class="block text-center text-blue-600 hover:text-blue-800">
                     Cancel and Return
                 </a>
-            <?php elseif (!$defaultPayment): ?>
+            <?php elseif (!$defaultPayment && empty($stripePk)): ?>
                 <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-6 mb-6">
                     <p class="text-gray-700 mb-3">
                         <strong>No payment method on file.</strong> Please add a credit or debit card before completing this upgrade.
@@ -381,6 +398,31 @@ include 'includes/student_header.php';
                     </a>
                 </div>
             <?php else: ?>
+                <?php if (!empty($stripePk)): ?>
+                    <form method="POST" id="wallet-form" style="display:none;">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="process_payment" value="1">
+                        <input type="hidden" name="wallet_pm_id" id="wallet_pm_id" value="">
+                        <input type="hidden" name="discount_code" class="discount-hidden" value="<?= htmlspecialchars($discountCodeFromPost) ?>">
+                    </form>
+                    <div id="wallet-pay-container" style="display:none;" class="mb-3"></div>
+                    <div id="wallet-pay-divider" style="display:none;" class="flex items-center gap-3 mb-4">
+                        <div class="flex-1 h-px bg-gray-200"></div>
+                        <span class="text-sm text-gray-400">or pay with saved card</span>
+                        <div class="flex-1 h-px bg-gray-200"></div>
+                    </div>
+                <?php endif; ?>
+
+                <?php if (!$defaultPayment): ?>
+                    <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-6 mb-6">
+                        <p class="text-gray-700 mb-3">
+                            <strong>No payment method on file.</strong> Please add a credit or debit card before completing this upgrade.
+                        </p>
+                        <a href="parent_payment.php" class="inline-block bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">
+                            Add Payment Method
+                        </a>
+                    </div>
+                <?php else: ?>
                 <!-- Payment method summary -->
                 <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6">
                     <div class="flex items-center justify-between">
@@ -430,10 +472,34 @@ include 'includes/student_header.php';
                 <a href="parent_child_membership.php?id=<?= $childId ?>" class="block text-center text-blue-600 hover:text-blue-800">
                     Cancel and Return
                 </a>
+                <?php endif; ?>
             <?php endif; ?>
         </div>
     </div>
 </div>
+
+<?php if (get_active_gateway() === 'stripe' && is_gateway_ready() && $stripePk && $cardChargeAmount > 0): ?>
+<script src="https://js.stripe.com/v3/"></script>
+<script src="assets/js/wallet-pay.js"></script>
+<script>
+(function() {
+    var stripe = Stripe('<?= htmlspecialchars($stripePk) ?>');
+    var walletForm = document.getElementById('wallet-form');
+    if (!walletForm) return;
+
+    initWalletPay(stripe, {
+        amount:      <?= (int) round($cardChargeAmount * 100) ?>,
+        label:       <?= json_encode(($child['first_name'] ?? '') . ' — ' . ($new_plan['name'] ?? 'Membership')) ?>,
+        containerId: 'wallet-pay-container',
+        dividerId:   'wallet-pay-divider',
+        onToken: function(pm) {
+            document.getElementById('wallet_pm_id').value = pm.id;
+            walletForm.submit();
+        }
+    });
+})();
+</script>
+<?php endif; ?>
 
 <script>
 (function() {

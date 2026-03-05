@@ -1,0 +1,292 @@
+/* ============================================================
+   Training Wizard Styles
+   Extends the existing step-indicator styles from style.css.
+   Uses CSS custom properties for theme integration.
+   ============================================================ */
+
+:root {
+    --wizard-primary: #3b82f6;
+    --wizard-primary-light: #dbeafe;
+    --wizard-accent: #f59e0b;
+}
+
+/* ---------- Layout ---------- */
+
+.wizard-layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 1.5rem;
+    min-height: calc(100vh - 220px);
+}
+
+@media (max-width: 768px) {
+    .wizard-layout {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ---------- Sidebar ---------- */
+
+.wizard-sidebar {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.75rem;
+    padding: 1rem 0.75rem;
+    height: fit-content;
+    position: sticky;
+    top: 1rem;
+    max-height: calc(100vh - 250px);
+    overflow-y: auto;
+}
+
+.wizard-sidebar::-webkit-scrollbar { width: 4px; }
+.wizard-sidebar::-webkit-scrollbar-track { background: transparent; }
+.wizard-sidebar::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
+.wizard-sidebar::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+.wizard-sidebar-group {
+    border-bottom: 1px solid #f3f4f6;
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+.wizard-sidebar-group:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+.wizard-sidebar-step {
+    transition: background-color 0.15s ease;
+}
+
+/* ---------- Main Content ---------- */
+
+.wizard-main {
+    min-width: 0;
+}
+
+/* ---------- Progress Bar ---------- */
+
+.wizard-progress-bar {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.75rem;
+    padding: 1rem 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.wizard-progress-fill {
+    transition: width 0.5s ease;
+}
+
+/* ---------- Content Body ---------- */
+
+.wizard-content-body img {
+    max-width: 100%;
+    border-radius: 0.5rem;
+    border: 1px solid #e5e7eb;
+    margin: 0.5rem 0;
+}
+
+/* ---------- Reset Button ---------- */
+
+.wizard-reset-btn {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    cursor: pointer;
+    transition: color 0.15s;
+}
+.wizard-reset-btn:hover {
+    color: #ef4444;
+}
+
+/* ---------- Completion Banner ---------- */
+
+.wizard-complete-banner {
+    background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+    border: 2px solid #10b981;
+    border-radius: 0.75rem;
+    padding: 2rem;
+    text-align: center;
+    margin-bottom: 1.5rem;
+}
+
+.wizard-complete-banner h3 {
+    color: #065f46;
+    font-size: 1.25rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+}
+
+.wizard-complete-banner p {
+    color: #047857;
+    font-size: 0.875rem;
+}
+
+/* ---------- Step Highlights ---------- */
+
+.wizard-highlights {
+    background-color: #f9fafb;
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+.wizard-highlights h4 {
+    font-size: 0.875rem;
+    font-weight: 700;
+    color: #374151;
+    margin-bottom: 0.5rem;
+}
+
+.wizard-highlights li {
+    font-size: 0.875rem;
+    color: #4b5563;
+    padding: 0.25rem 0;
+}
+
+/* ---------- Pro Tips ---------- */
+
+.wizard-tips {
+    background-color: #fefce8;
+    border: 1px solid #fde68a;
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+.wizard-tips h4 {
+    font-size: 0.875rem;
+    font-weight: 700;
+    color: #92400e;
+    margin-bottom: 0.5rem;
+}
+
+.wizard-tips p {
+    font-size: 0.875rem;
+    color: #a16207;
+    margin-bottom: 0.25rem;
+}
+
+/* ---------- Action Buttons ---------- */
+
+.wizard-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: all 0.15s ease;
+    cursor: pointer;
+    border: none;
+    text-decoration: none;
+}
+
+.wizard-btn-primary {
+    background-color: var(--wizard-primary);
+    color: white;
+}
+.wizard-btn-primary:hover {
+    opacity: 0.9;
+    filter: brightness(1.05);
+}
+
+.wizard-btn-success {
+    background-color: #16a34a;
+    color: white;
+}
+.wizard-btn-success:hover {
+    background-color: #15803d;
+}
+
+.wizard-btn-secondary {
+    background-color: #e5e7eb;
+    color: #374151;
+}
+.wizard-btn-secondary:hover {
+    background-color: #d1d5db;
+}
+
+.wizard-btn-ghost {
+    background-color: #f3f4f6;
+    color: #6b7280;
+}
+.wizard-btn-ghost:hover {
+    background-color: #e5e7eb;
+}
+
+/* ---------- Role Banners ---------- */
+
+.wizard-role-banner {
+    border-radius: 0.75rem;
+    padding: 1rem 1.5rem;
+    border: 2px solid;
+}
+
+.wizard-role-parent {
+    background: linear-gradient(135deg, #faf5ff 0%, #f3e8ff 50%, #ede9fe 100%);
+    border-color: #c084fc;
+}
+
+.wizard-role-student {
+    background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 50%, #bfdbfe 100%);
+    border-color: #60a5fa;
+}
+
+.wizard-role-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 3rem;
+    height: 3rem;
+    border-radius: 0.75rem;
+    font-size: 1.5rem;
+    flex-shrink: 0;
+}
+
+.wizard-role-icon-parent {
+    background-color: #e9d5ff;
+}
+
+.wizard-role-icon-student {
+    background-color: #bfdbfe;
+}
+
+/* ---------- Role-Specific Sidebar Accents ---------- */
+
+.wizard-sidebar-parent {
+    border-top: 3px solid #a855f7;
+}
+
+.wizard-sidebar-student {
+    border-top: 3px solid #3b82f6;
+}
+
+/* ---------- Mobile Adjustments ---------- */
+
+@media (max-width: 768px) {
+    .wizard-sidebar {
+        position: static;
+        max-height: none;
+    }
+
+    .wizard-progress-bar {
+        padding: 0.75rem 1rem;
+    }
+
+    .wizard-content-body {
+        padding: 1rem !important;
+    }
+
+    .wizard-role-banner {
+        padding: 0.75rem 1rem;
+    }
+
+    .wizard-role-icon {
+        width: 2.5rem;
+        height: 2.5rem;
+        font-size: 1.25rem;
+    }
+}

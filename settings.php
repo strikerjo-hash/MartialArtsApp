@@ -2,29 +2,19 @@
 require_once 'config.php';
 requireLogin();
 
+if (!canViewAnySettings()) {
+    accessDenied('You do not have permission to view settings.');
+}
+
 $message = '';
 
 // Migrations have been moved to migrate.php
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (isset($_POST['change_password'])) {
-        $current_user = getCurrentUser();
-        
-        if (password_verify($_POST['current_password'], $current_user['password'])) {
-            if ($_POST['new_password'] === $_POST['confirm_password']) {
-                $new_hash = password_hash($_POST['new_password'], PASSWORD_DEFAULT);
-                $stmt = $pdo->prepare("UPDATE users SET password = ? WHERE id = ?");
-                $stmt->execute([$new_hash, $_SESSION['user_id']]);
-                $message = showAlert('Password changed successfully!', 'success');
-            } else {
-                $message = showAlert('New passwords do not match!', 'error');
-            }
-        } else {
-            $message = showAlert('Current password is incorrect!', 'error');
-        }
-    }
-    
-    if (isset($_POST['save_stripe'])) {
+    // Profile and password editing moved to profile_handler.php
+
+    if (isset($_POST['save_stripe']) && canEdit('settings_billing.php')) {
+        requireFinancialAccess('Only admins can modify payment gateway settings.');
         // If enabling Stripe, disable Square
         if (isset($_POST['stripe_enabled'])) {
             saveSetting('square_enabled', '0');
@@ -42,12 +32,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $message = showAlert('Stripe settings saved! Square has been automatically disabled.', 'success');
     }
     
-    if (isset($_POST['save_membership_settings'])) {
+    if (isset($_POST['save_membership_settings']) && canEdit('settings_school.php')) {
         saveSetting('allow_plan_change_override', isset($_POST['allow_plan_change_override']) ? '1' : '0');
         $message = showAlert('Membership settings saved!', 'success');
     }
 
-    if (isset($_POST['save_belt_cycle'])) {
+    if (isset($_POST['save_belt_cycle']) && canEdit('settings_belt.php')) {
         saveSetting('belt_testing_cycle_start_date', $_POST['belt_testing_cycle_start_date'] ?? date('Y-m-d'));
         $defaultEnd = (new \DateTime())->modify('+4 months')->format('Y-m-d');
         saveSetting('belt_testing_cycle_end_date', $_POST['belt_testing_cycle_end_date'] ?? $defaultEnd);
@@ -57,7 +47,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $message = showAlert('Belt testing cycle and notification settings saved!', 'success');
     }
 
-    if (isset($_POST['save_waiver'])) {
+    if (isset($_POST['save_waiver']) && canEdit('settings_registration.php')) {
         $waiver_text = trim($_POST['waiver_content'] ?? '');
         saveSetting('waiver_content', $waiver_text);
 
@@ -70,14 +60,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $message = showAlert('Registration waiver saved successfully!', 'success');
     }
 
-    if (isset($_POST['save_fee_settings'])) {
+    if (isset($_POST['save_comm_consent']) && canEdit('settings_registration.php')) {
+        $consentText = trim($_POST['comm_consent_content'] ?? '');
+        saveSetting('comm_consent_content', $consentText);
+
+        $consentVersion = trim($_POST['comm_consent_version'] ?? '');
+        if ($consentVersion === '') {
+            $consentVersion = date('Y-m-d');
+        }
+        saveSetting('comm_consent_version', $consentVersion);
+
+        $message = showAlert('Communication consent settings saved successfully!', 'success');
+    }
+
+    if (isset($_POST['save_fee_settings']) && canEdit('settings_registration.php')) {
+        requireFinancialAccess('Only admins can modify fee settings.');
         $feePct = (float) ($_POST['service_fee_percentage'] ?? 0);
         $feePct = max(0, min(100, $feePct));
         saveSetting('service_fee_percentage', (string) $feePct);
         $message = showAlert('Fee settings saved successfully!', 'success');
     }
 
-    if (isset($_POST['save_tax_settings'])) {
+    if (isset($_POST['save_tax_settings']) && canEdit('settings_billing.php')) {
+        requireFinancialAccess('Only admins can modify tax settings.');
         saveSetting('tax_business_name', trim($_POST['tax_business_name'] ?? ''));
         saveSetting('tax_id_ein', trim($_POST['tax_id_ein'] ?? ''));
         saveSetting('tax_business_address', trim($_POST['tax_business_address'] ?? ''));
@@ -85,8 +90,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $message = showAlert('Tax statement settings saved!', 'success');
     }
 
+    // ── Timezone Setting ──
+    if (isset($_POST['save_timezone']) && canEdit('settings_school.php')) {
+        verify_csrf();
+        $newTz = trim($_POST['school_timezone'] ?? 'America/New_York');
+        // Validate the timezone string
+        if (in_array($newTz, timezone_identifiers_list())) {
+            $pdo->prepare("UPDATE schools SET timezone = ? WHERE id = ?")
+                ->execute([$newTz, current_school_id()]);
+            // Apply immediately for the rest of this request
+            date_default_timezone_set($newTz);
+            $message = showAlert("Timezone updated to {$newTz}. All timestamps will now display in this timezone.", 'success');
+        } else {
+            $message = showAlert('Invalid timezone selected.', 'error');
+        }
+    }
+
     // ── SMTP Email Settings ──
-    if (isset($_POST['save_smtp'])) {
+    if (isset($_POST['save_smtp']) && canEdit('settings_communications.php')) {
+        verify_csrf();
+        requireFinancialAccess('Only admins can modify email settings.');
         saveSetting('smtp_host', trim($_POST['smtp_host'] ?? ''));
         saveSetting('smtp_port', trim($_POST['smtp_port'] ?? '587'));
         saveSetting('smtp_username', trim($_POST['smtp_username'] ?? ''));
@@ -99,7 +122,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $message = showAlert('SMTP email settings saved!', 'success');
     }
 
-    if (isset($_POST['test_email'])) {
+    if (isset($_POST['test_email']) && canEdit('settings_communications.php')) {
+        verify_csrf();
         require_once __DIR__ . '/includes/messaging.php';
         $testTo = getCurrentUser()['email'] ?? '';
         if ($testTo) {
@@ -113,7 +137,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // ── Twilio SMS Settings ──
-    if (isset($_POST['save_twilio'])) {
+    if (isset($_POST['save_twilio']) && canEdit('settings_communications.php')) {
+        verify_csrf();
+        requireFinancialAccess('Only admins can modify SMS settings.');
         saveSetting('twilio_account_sid', trim($_POST['twilio_account_sid'] ?? ''));
         if (!empty($_POST['twilio_auth_token'])) {
             saveSetting('twilio_auth_token', $_POST['twilio_auth_token']);
@@ -122,7 +148,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $message = showAlert('Twilio SMS settings saved!', 'success');
     }
 
-    if (isset($_POST['test_sms'])) {
+    if (isset($_POST['test_sms']) && canEdit('settings_communications.php')) {
+        verify_csrf();
         require_once __DIR__ . '/includes/messaging.php';
         $testNumber = trim($_POST['test_sms_number'] ?? '');
         if ($testNumber) {
@@ -133,6 +160,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $message = showAlert('Please enter a phone number to send the test SMS to.', 'error');
         }
+    }
+
+    // ── Save Notification Templates ──
+    if (isset($_POST['save_notification_templates']) && canEdit('settings_communications.php')) {
+        verify_csrf();
+        require_once __DIR__ . '/includes/messaging.php';
+        $defs = get_notification_template_definitions();
+        foreach ($defs as $tplKey => $tplDef) {
+            $subjectField = "notif_tpl_{$tplKey}_subject";
+            $bodyField    = "notif_tpl_{$tplKey}_body";
+            if ($tplDef['channel'] === 'email') {
+                saveSetting($subjectField, trim($_POST[$subjectField] ?? ''));
+            }
+            saveSetting($bodyField, trim($_POST[$bodyField] ?? ''));
+        }
+        $message = showAlert('Notification templates saved!', 'success');
     }
 
     // ── Certificate Template Upload (dual config: color & black belt) ──
@@ -197,7 +240,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         return $msg;
     }
 
-    if (isset($_POST['save_certificate_templates'])) {
+    if (isset($_POST['save_certificate_templates']) && canEdit('settings_certs.php')) {
         $uploadDir = __DIR__ . '/uploads/certificates/';
         if (!is_dir($uploadDir)) { mkdir($uploadDir, 0755, true); }
 
@@ -210,32 +253,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // Remove handlers
-    if (isset($_POST['remove_color_belt_template'])) {
+    if (isset($_POST['remove_color_belt_template']) && canEdit('settings_certs.php')) {
         $path = getSetting('cert_color_belt_template', '');
         if ($path && file_exists(__DIR__ . '/' . $path)) { @unlink(__DIR__ . '/' . $path); }
         saveSetting('cert_color_belt_template', '');
         $message = showAlert('Color belt template removed.', 'success');
     }
-    if (isset($_POST['remove_black_belt_template'])) {
+    if (isset($_POST['remove_black_belt_template']) && canEdit('settings_certs.php')) {
         $path = getSetting('cert_black_belt_template', '');
         if ($path && file_exists(__DIR__ . '/' . $path)) { @unlink(__DIR__ . '/' . $path); }
         saveSetting('cert_black_belt_template', '');
         $message = showAlert('Black belt template removed.', 'success');
     }
-    if (isset($_POST['remove_color_font'])) {
+    if (isset($_POST['remove_color_font']) && canEdit('settings_certs.php')) {
         $path = getSetting('cert_color_font', '');
         if ($path && file_exists(__DIR__ . '/' . $path)) { @unlink(__DIR__ . '/' . $path); }
         saveSetting('cert_color_font', ''); saveSetting('cert_color_font_name', '');
         $message = showAlert('Color belt font removed.', 'success');
     }
-    if (isset($_POST['remove_black_font'])) {
+    if (isset($_POST['remove_black_font']) && canEdit('settings_certs.php')) {
         $path = getSetting('cert_black_font', '');
         if ($path && file_exists(__DIR__ . '/' . $path)) { @unlink(__DIR__ . '/' . $path); }
         saveSetting('cert_black_font', ''); saveSetting('cert_black_font_name', '');
         $message = showAlert('Black belt font removed.', 'success');
     }
     // Legacy single-font remove
-    if (isset($_POST['remove_custom_font'])) {
+    if (isset($_POST['remove_custom_font']) && canEdit('settings_certs.php')) {
         $path = getSetting('cert_custom_font', '');
         if ($path && file_exists(__DIR__ . '/' . $path)) { @unlink(__DIR__ . '/' . $path); }
         saveSetting('cert_custom_font', '');
@@ -243,7 +286,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $message = showAlert('Custom font removed. Default serif font will be used.', 'success');
     }
 
-    if (isset($_POST['save_square'])) {
+    if (isset($_POST['save_square']) && canEdit('settings_billing.php')) {
+        requireFinancialAccess('Only admins can modify payment gateway settings.');
         // If enabling Square, disable Stripe
         if (isset($_POST['square_enabled'])) {
             saveSetting('stripe_enabled', '0');
@@ -262,7 +306,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // ── Room Management ──
-    if (isset($_POST['add_room'])) {
+    if (isset($_POST['add_room']) && canEdit('settings_school.php')) {
         $roomName = sanitizeInput($_POST['room_name'] ?? '');
         if ($roomName) {
             $params = [];
@@ -277,7 +321,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    if (isset($_POST['edit_room'])) {
+    if (isset($_POST['edit_room']) && canEdit('settings_school.php')) {
         $roomId = (int)($_POST['room_id'] ?? 0);
         $roomName = sanitizeInput($_POST['room_name'] ?? '');
         if ($roomId && $roomName) {
@@ -289,7 +333,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    if (isset($_POST['toggle_room_status'])) {
+    if (isset($_POST['toggle_room_status']) && canEdit('settings_school.php')) {
         $roomId = (int)($_POST['room_id'] ?? 0);
         if ($roomId) {
             $params = [$roomId];
@@ -308,7 +352,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    if (isset($_POST['reorder_room'])) {
+    if (isset($_POST['reorder_room']) && canEdit('settings_school.php')) {
         $roomId = (int)($_POST['room_id'] ?? 0);
         $direction = $_POST['direction'] ?? '';
         if ($roomId && in_array($direction, ['up', 'down'])) {
@@ -342,7 +386,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // Hours of Operation
-    if (isset($_POST['save_hours_of_operation'])) {
+    if (isset($_POST['save_hours_of_operation']) && canEdit('settings_school.php')) {
         verify_csrf();
         $frames = [];
         $labels = $_POST['hop_label'] ?? [];
@@ -371,7 +415,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // Testing & Debug: payment lockout test toggle
-    if (isset($_POST['save_test_settings'])) {
+    if (isset($_POST['save_test_settings']) && canEdit('settings_system.php')) {
         verify_csrf();
         saveSetting('test_lockout_all_students', isset($_POST['test_lockout_all_students']) ? '1' : '0');
         $lockoutState = isset($_POST['test_lockout_all_students']) ? 'ENABLED' : 'DISABLED';
@@ -379,7 +423,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // Log Retention Settings
-    if (isset($_POST['save_log_retention'])) {
+    if (isset($_POST['save_log_retention']) && canEdit('settings_system.php')) {
         verify_csrf();
         $retentionDays = max(7, min(365, (int) ($_POST['log_retention_days'] ?? 90)));
         saveSetting('log_retention_days', (string) $retentionDays);
@@ -387,7 +431,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // Push Notifications (FCM) Settings — Service Account Upload
-    if (isset($_POST['save_fcm_settings'])) {
+    if (isset($_POST['save_fcm_settings']) && canEdit('settings_system.php')) {
         verify_csrf();
 
         if (!empty($_FILES['fcm_service_account']['name'])) {
@@ -459,7 +503,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // Remove FCM service account
-    if (isset($_POST['remove_fcm_service_account'])) {
+    if (isset($_POST['remove_fcm_service_account']) && canEdit('settings_system.php')) {
         verify_csrf();
         $schoolId = current_school_id();
 
@@ -489,20 +533,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // ── Tab persistence after POST ──────────────────────────────────────
 $postTabMap = [
-    'change_password' => 'general',
     'save_membership_settings' => 'school-schedule',
     'add_room' => 'school-schedule', 'edit_room' => 'school-schedule',
     'toggle_room_status' => 'school-schedule', 'reorder_room' => 'school-schedule',
-    'save_hours_of_operation' => 'school-schedule',
+    'save_hours_of_operation' => 'school-schedule', 'save_timezone' => 'school-schedule',
     'save_belt_cycle' => 'belt-testing',
     'save_certificate_templates' => 'certificates',
     'remove_color_belt_template' => 'certificates', 'remove_black_belt_template' => 'certificates',
     'remove_color_font' => 'certificates', 'remove_black_font' => 'certificates',
     'remove_custom_font' => 'certificates',
-    'save_waiver' => 'registration', 'save_fee_settings' => 'registration',
+    'save_waiver' => 'registration', 'save_comm_consent' => 'registration', 'save_fee_settings' => 'registration',
     'save_tax_settings' => 'billing', 'save_stripe' => 'billing', 'save_square' => 'billing',
     'save_smtp' => 'communications', 'test_email' => 'communications',
     'save_twilio' => 'communications', 'test_sms' => 'communications',
+    'save_notification_templates' => 'communications',
     'save_test_settings' => 'system',
     'save_log_retention' => 'system',
     'save_fcm_settings' => 'system',
@@ -526,78 +570,31 @@ include 'includes/header.php';
     <h1 class="text-3xl font-bold text-gray-800 mb-6">Settings</h1>
 
     <!-- Settings Tab Navigation -->
+    <?php
+    // Build list of visible tabs for this user
+    $settingsTabs = [];
+    if (canView('settings_school.php'))          $settingsTabs[] = ['id' => 'school-schedule', 'label' => 'School &amp; Schedule'];
+    if (canView('settings_belt.php'))            $settingsTabs[] = ['id' => 'belt-testing',    'label' => 'Belt Testing'];
+    if (canView('settings_certs.php'))           $settingsTabs[] = ['id' => 'certificates',    'label' => 'Certificates'];
+    if (canView('settings_registration.php'))    $settingsTabs[] = ['id' => 'registration',    'label' => 'Registration'];
+    if (canView('settings_billing.php') && hasFinancialAccess())        $settingsTabs[] = ['id' => 'billing',        'label' => 'Billing'];
+    if (canView('settings_communications.php') && hasFinancialAccess()) $settingsTabs[] = ['id' => 'communications', 'label' => 'Communications'];
+    if (canView('settings_system.php'))          $settingsTabs[] = ['id' => 'system',          'label' => 'System'];
+    $firstVisibleTab = !empty($settingsTabs) ? $settingsTabs[0]['id'] : '';
+    ?>
     <div class="border-b border-gray-200 mb-6 overflow-x-auto">
         <nav class="flex gap-1 -mb-px min-w-max" id="settingsTabs">
-            <button type="button" data-tab="general" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-blue-500 text-blue-600 bg-blue-50">General</button>
-            <button type="button" data-tab="school-schedule" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">School &amp; Schedule</button>
-            <button type="button" data-tab="belt-testing" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">Belt Testing</button>
-            <button type="button" data-tab="certificates" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">Certificates</button>
-            <button type="button" data-tab="registration" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">Registration</button>
-            <button type="button" data-tab="billing" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">Billing</button>
-            <button type="button" data-tab="communications" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">Communications</button>
-            <button type="button" data-tab="system" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">System</button>
+            <?php foreach ($settingsTabs as $i => $tab): ?>
+            <button type="button" data-tab="<?php echo $tab['id']; ?>" class="settings-tab px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 <?php echo $i === 0 ? 'border-blue-500 text-blue-600 bg-blue-50' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'; ?>"><?php echo $tab['label']; ?></button>
+            <?php endforeach; ?>
         </nav>
     </div>
 
     <!-- Tab Content Panels -->
     <div id="settingsContent">
 
-    <!-- ═══ GENERAL TAB ═══ -->
-    <div class="settings-panel" data-panel="general">
-            <div class="bg-white rounded-lg shadow p-6 mb-6">
-                <h2 class="text-xl font-semibold text-gray-800 mb-4">Profile Information</h2>
-                <div class="space-y-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
-                        <input type="text" value="<?php echo $current_user['username']; ?>" disabled
-                               class="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-100">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
-                        <input type="text" value="<?php echo $current_user['full_name']; ?>" disabled
-                               class="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-100">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                        <input type="email" value="<?php echo $current_user['email']; ?>" disabled
-                               class="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-100">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Role</label>
-                        <input type="text" value="<?php echo ucfirst($current_user['role']); ?>" disabled
-                               class="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-100">
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Change Password -->
-            <div class="bg-white rounded-lg shadow p-6 mb-6">
-                <h2 class="text-xl font-semibold text-gray-800 mb-4">Change Password</h2>
-                <form method="POST" class="space-y-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Current Password</label>
-                        <input type="password" name="current_password" required
-                               class="w-full px-3 py-2 border border-gray-300 rounded-lg">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">New Password</label>
-                        <input type="password" name="new_password" required minlength="6"
-                               class="w-full px-3 py-2 border border-gray-300 rounded-lg">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Confirm New Password</label>
-                        <input type="password" name="confirm_password" required minlength="6"
-                               class="w-full px-3 py-2 border border-gray-300 rounded-lg">
-                    </div>
-                    <button type="submit" name="change_password" value="1"
-                            class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg">
-                        Update Password
-                    </button>
-                </form>
-            </div>
-    </div><!-- /general panel -->
-
     <!-- ═══ SCHOOL & SCHEDULE TAB ═══ -->
+    <?php if (canView('settings_school.php')): ?>
     <div class="settings-panel" data-panel="school-schedule" style="display:none;">
 
             <!-- Membership Settings -->
@@ -823,9 +820,83 @@ include 'includes/header.php';
                 }
                 </script>
             </div>
+            <!-- Timezone Settings -->
+            <?php if (is_super_admin()): ?>
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h2 class="text-xl font-semibold text-gray-800 mb-4">Timezone</h2>
+                <p class="text-sm text-gray-600 mb-4">Set the timezone for your school. All dates and times throughout the system will display in this timezone.</p>
+                <?php
+                    $currentTz = function_exists('get_school_timezone') ? get_school_timezone() : 'America/New_York';
+                    $commonTimezones = [
+                        'US & Canada' => [
+                            'America/New_York'    => 'Eastern Time (ET)',
+                            'America/Chicago'     => 'Central Time (CT)',
+                            'America/Denver'      => 'Mountain Time (MT)',
+                            'America/Los_Angeles' => 'Pacific Time (PT)',
+                            'America/Phoenix'     => 'Arizona (no DST)',
+                            'America/Anchorage'   => 'Alaska Time (AKT)',
+                            'Pacific/Honolulu'    => 'Hawaii Time (HST)',
+                        ],
+                        'Canada' => [
+                            'America/Toronto'   => 'Eastern (Toronto)',
+                            'America/Winnipeg'  => 'Central (Winnipeg)',
+                            'America/Edmonton'  => 'Mountain (Edmonton)',
+                            'America/Vancouver' => 'Pacific (Vancouver)',
+                            'America/Halifax'   => 'Atlantic (Halifax)',
+                            'America/St_Johns'  => 'Newfoundland',
+                        ],
+                        'Europe' => [
+                            'Europe/London' => 'London (GMT/BST)',
+                            'Europe/Paris'  => 'Paris / Berlin (CET)',
+                            'Europe/Berlin' => 'Berlin (CET)',
+                            'Europe/Moscow' => 'Moscow (MSK)',
+                        ],
+                        'Asia & Pacific' => [
+                            'Asia/Tokyo'      => 'Tokyo (JST)',
+                            'Asia/Shanghai'   => 'Shanghai (CST)',
+                            'Asia/Kolkata'    => 'India (IST)',
+                            'Asia/Dubai'      => 'Dubai (GST)',
+                            'Australia/Sydney'    => 'Sydney (AEST)',
+                            'Australia/Melbourne' => 'Melbourne (AEST)',
+                            'Pacific/Auckland'    => 'Auckland (NZST)',
+                        ],
+                    ];
+                ?>
+                <form method="POST" class="space-y-4">
+                    <?= csrf_field() ?>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">School Timezone</label>
+                        <select name="school_timezone"
+                                class="w-full md:w-1/2 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                            <?php foreach ($commonTimezones as $group => $zones): ?>
+                                <optgroup label="<?= htmlspecialchars($group) ?>">
+                                    <?php foreach ($zones as $tz => $label): ?>
+                                        <option value="<?= htmlspecialchars($tz) ?>" <?= $currentTz === $tz ? 'selected' : '' ?>>
+                                            <?= htmlspecialchars($label) ?> (<?= htmlspecialchars($tz) ?>)
+                                        </option>
+                                    <?php endforeach; ?>
+                                </optgroup>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                        <p class="text-sm text-gray-700">
+                            <span class="font-medium">Current timezone:</span> <?= htmlspecialchars($currentTz) ?><br>
+                            <span class="font-medium">Current time:</span> <?= date('l, M j, Y g:i A T') ?>
+                        </p>
+                    </div>
+                    <button type="submit" name="save_timezone" value="1"
+                            class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg">
+                        Save Timezone
+                    </button>
+                </form>
+            </div>
+            <?php endif; ?>
     </div><!-- /school-schedule panel -->
+    <?php endif; ?>
 
     <!-- ═══ BELT TESTING TAB ═══ -->
+    <?php if (canView('settings_belt.php')): ?>
     <div class="settings-panel" data-panel="belt-testing" style="display:none;">
 
             <!-- Belt Testing Cycle & Notifications -->
@@ -873,8 +944,10 @@ include 'includes/header.php';
                 </form>
             </div>
     </div><!-- /belt-testing panel -->
+    <?php endif; ?>
 
     <!-- ═══ CERTIFICATES TAB ═══ -->
+    <?php if (canView('settings_certs.php')): ?>
     <div class="settings-panel" data-panel="certificates" style="display:none;">
 
             <!-- Certificate Templates (Dual Config: Color Belt & Black Belt) -->
@@ -1277,8 +1350,10 @@ include 'includes/header.php';
             <?php endforeach; ?>
             </script>
     </div><!-- /certificates panel -->
+    <?php endif; ?>
 
     <!-- ═══ REGISTRATION TAB ═══ -->
+    <?php if (canView('settings_registration.php')): ?>
     <div class="settings-panel" data-panel="registration" style="display:none;">
 
             <!-- Registration Waiver -->
@@ -1321,6 +1396,76 @@ include 'includes/header.php';
                 </form>
             </div>
 
+            <!-- Communication Consent Waiver -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6 border-t-4 border-indigo-500">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Communication Consent Waiver</h2>
+                <p class="text-sm text-gray-600 mb-4">Configure the digital communication consent text shown during registration and on profile pages. This waiver collects consent for email and SMS communications in compliance with TCPA and CAN-SPAM regulations.</p>
+                <form method="POST" class="space-y-4">
+                    <?php echo csrf_field(); ?>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Consent Version</label>
+                        <input type="text" name="comm_consent_version"
+                               value="<?php echo htmlspecialchars(getSetting('comm_consent_version', '1.0')); ?>"
+                               placeholder="e.g. 1.0 or 2024-01-15"
+                               class="w-64 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 text-sm">
+                        <p class="text-xs text-gray-500 mt-1">When you change the consent text, update this version. Students/parents who consented to an older version will be shown the updated text on their profile page.</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Consent Text</label>
+                        <textarea name="comm_consent_content" rows="10"
+                                  class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 text-sm"
+                                  placeholder="Leave blank to use the default TCPA-compliant consent text"><?php echo htmlspecialchars(getSetting('comm_consent_content', '')); ?></textarea>
+                        <p class="text-xs text-gray-500 mt-1">Leave blank to use the built-in default text which includes all required TCPA/CAN-SPAM disclosures. If you customize this text, ensure it includes: message frequency disclosure, "Message and data rates may apply", opt-out instructions (Reply STOP for SMS), and a statement that consent is not required for enrollment.</p>
+                    </div>
+                    <div class="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                        <h4 class="text-sm font-semibold text-gray-700 mb-2">Default Consent Text Preview:</h4>
+                        <div class="text-xs text-gray-600 whitespace-pre-line"><?php
+                            require_once __DIR__ . '/includes/messaging.php';
+                            echo htmlspecialchars(get_comm_consent_text());
+                        ?></div>
+                    </div>
+                    <?php
+                    // Consent statistics
+                    try {
+                        $currentConsentVer = getSetting('comm_consent_version', '1.0');
+                        $studentConsentStats = $pdo->prepare("SELECT
+                            COUNT(*) as total,
+                            SUM(CASE WHEN comm_consent_email = 1 THEN 1 ELSE 0 END) as email_consented,
+                            SUM(CASE WHEN comm_consent_sms = 1 THEN 1 ELSE 0 END) as sms_consented,
+                            SUM(CASE WHEN comm_consent_version = ? THEN 1 ELSE 0 END) as current_ver
+                            FROM students WHERE (comm_consent_email = 1 OR comm_consent_sms = 1)");
+                        $studentConsentStats->execute([$currentConsentVer]);
+                        $scs = $studentConsentStats->fetch();
+
+                        $parentConsentStats = $pdo->prepare("SELECT
+                            COUNT(*) as total,
+                            SUM(CASE WHEN comm_consent_email = 1 THEN 1 ELSE 0 END) as email_consented,
+                            SUM(CASE WHEN comm_consent_sms = 1 THEN 1 ELSE 0 END) as sms_consented,
+                            SUM(CASE WHEN comm_consent_version = ? THEN 1 ELSE 0 END) as current_ver
+                            FROM parents WHERE (comm_consent_email = 1 OR comm_consent_sms = 1)");
+                        $parentConsentStats->execute([$currentConsentVer]);
+                        $pcs = $parentConsentStats->fetch();
+
+                        if (($scs && $scs['total'] > 0) || ($pcs && $pcs['total'] > 0)):
+                    ?>
+                    <div class="bg-indigo-50 border border-indigo-200 rounded-lg p-3 text-xs text-indigo-700">
+                        <strong>Consent Stats:</strong>
+                        <?php if ($scs && $scs['total'] > 0): ?>
+                            Students: <?php echo (int)$scs['email_consented']; ?> email, <?php echo (int)$scs['sms_consented']; ?> SMS consented (<?php echo (int)$scs['current_ver']; ?> on version <?php echo htmlspecialchars($currentConsentVer); ?>).
+                        <?php endif; ?>
+                        <?php if ($pcs && $pcs['total'] > 0): ?>
+                            Parents: <?php echo (int)$pcs['email_consented']; ?> email, <?php echo (int)$pcs['sms_consented']; ?> SMS consented (<?php echo (int)$pcs['current_ver']; ?> on version <?php echo htmlspecialchars($currentConsentVer); ?>).
+                        <?php endif; ?>
+                    </div>
+                    <?php endif; } catch (\PDOException $e) { /* consent columns may not exist yet */ } ?>
+                    <button type="submit" name="save_comm_consent" value="1"
+                            class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm">
+                        Save Communication Consent
+                    </button>
+                </form>
+            </div>
+
+            <?php if (hasFinancialAccess()): ?>
             <!-- Fees & Processing -->
             <div class="bg-white rounded-lg shadow p-6 mb-6">
                 <h2 class="text-xl font-semibold text-gray-800 mb-2">Fees &amp; Processing</h2>
@@ -1342,9 +1487,12 @@ include 'includes/header.php';
                     </button>
                 </form>
             </div>
+            <?php endif; ?>
     </div><!-- /registration panel -->
+    <?php endif; ?>
 
     <!-- ═══ BILLING TAB ═══ -->
+    <?php if (canView('settings_billing.php') && hasFinancialAccess()): ?>
     <div class="settings-panel" data-panel="billing" style="display:none;">
 
             <!-- Tax Statement Settings -->
@@ -1472,8 +1620,10 @@ include 'includes/header.php';
                 </form>
             </div>
     </div><!-- /billing panel -->
+    <?php endif; ?>
 
     <!-- ═══ COMMUNICATIONS TAB ═══ -->
+    <?php if (canView('settings_communications.php') && hasFinancialAccess()): ?>
     <div class="settings-panel" data-panel="communications" style="display:none;">
 
             <!-- Email (SMTP) Configuration -->
@@ -1482,6 +1632,7 @@ include 'includes/header.php';
                 <p class="text-sm text-gray-600 mb-4">Configure SMTP settings to send emails to students and staff</p>
 
                 <form method="POST">
+                    <?php echo csrf_field(); ?>
                     <div class="border-l-4 border-purple-500 pl-4 py-2 bg-purple-50 rounded-r-lg">
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
@@ -1541,11 +1692,21 @@ include 'includes/header.php';
                                     class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg text-sm">
                                 Save SMTP Settings
                             </button>
-                            <button type="submit" name="test_email" value="1"
-                                    class="bg-purple-100 hover:bg-purple-200 text-purple-700 px-4 py-2 rounded-lg text-sm">
-                                Send Test Email
-                            </button>
-                            <span class="text-xs text-gray-500">Test sends to your admin email</span>
+                            <?php
+                            $adminEmail = $current_user['email'] ?? '';
+                            if ($adminEmail): ?>
+                                <button type="submit" name="test_email" value="1"
+                                        class="bg-purple-100 hover:bg-purple-200 text-purple-700 px-4 py-2 rounded-lg text-sm">
+                                    Send Test Email
+                                </button>
+                                <span class="text-xs text-gray-500">Sends to <strong><?php echo htmlspecialchars($adminEmail); ?></strong></span>
+                            <?php else: ?>
+                                <button type="button" disabled
+                                        class="bg-gray-100 text-gray-400 px-4 py-2 rounded-lg text-sm cursor-not-allowed">
+                                    Send Test Email
+                                </button>
+                                <span class="text-xs text-red-500">⚠ No email on your admin account — set it in the <a href="settings.php#general" class="underline text-red-600" onclick="if(typeof switchTab==='function')switchTab('general');">General tab</a> first</span>
+                            <?php endif; ?>
                         </div>
                     </div>
                 </form>
@@ -1557,6 +1718,7 @@ include 'includes/header.php';
                 <p class="text-sm text-gray-600 mb-4">Configure Twilio to send text messages to students and staff</p>
 
                 <form method="POST">
+                    <?php echo csrf_field(); ?>
                     <div class="border-l-4 border-red-500 pl-4 py-2 bg-red-50 rounded-r-lg">
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
@@ -1600,12 +1762,174 @@ include 'includes/header.php';
                         <p class="text-xs text-gray-500 mt-3">
                             Get your credentials from <a href="https://console.twilio.com/" target="_blank" class="text-red-600 underline">Twilio Console</a>
                         </p>
+                        <?php
+                        $webhookBaseUrl = getSetting('app_base_url', '');
+                        if ($webhookBaseUrl === '') {
+                            $wScheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+                            $wHost   = $_SERVER['HTTP_HOST'] ?? 'yourdomain.com';
+                            $wPath   = dirname($_SERVER['SCRIPT_NAME'] ?? '');
+                            $webhookBaseUrl = $wScheme . '://' . $wHost . rtrim($wPath, '/');
+                        }
+                        $webhookUrl = rtrim($webhookBaseUrl, '/') . '/twilio_sms_webhook.php';
+                        ?>
+                        <div class="mt-4 pt-3 border-t border-red-200">
+                            <p class="text-xs font-semibold text-gray-700 mb-1">SMS Webhook URL (for STOP/START handling):</p>
+                            <div class="flex items-center gap-2">
+                                <code class="text-xs bg-gray-100 px-2 py-1 rounded break-all flex-1"><?= htmlspecialchars($webhookUrl) ?></code>
+                                <button type="button" onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',2000)})"
+                                        class="text-xs bg-gray-200 hover:bg-gray-300 px-2 py-1 rounded whitespace-nowrap">Copy</button>
+                            </div>
+                            <p class="text-xs text-gray-400 mt-1">
+                                Paste this URL into your Twilio phone number's <strong>Messaging &rarr; "A message comes in"</strong> webhook field.
+                                This enables automatic STOP/START/HELP handling for SMS opt-outs.
+                            </p>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <!-- Notification Templates -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Notification Templates</h2>
+                <p class="text-sm text-gray-600 mb-4">
+                    Customize the automated messages sent to students and parents.
+                    Leave any field blank to use the default text.
+                    Use the placeholders shown below each template &mdash; they will be replaced with actual values when the message is sent.
+                </p>
+
+                <form method="POST" class="space-y-3">
+                    <?php echo csrf_field(); ?>
+                    <?php
+                    if (!function_exists('get_notification_template_definitions')) {
+                        require_once __DIR__ . '/includes/messaging.php';
+                    }
+                    $tplDefs = get_notification_template_definitions();
+                    $tplIndex = 0;
+                    foreach ($tplDefs as $tplKey => $tplDef):
+                        $tplIndex++;
+                        $subjectSettingKey = "notif_tpl_{$tplKey}_subject";
+                        $bodySettingKey    = "notif_tpl_{$tplKey}_body";
+                        $customSubject = getSetting($subjectSettingKey, '');
+                        $customBody    = getSetting($bodySettingKey, '');
+                        $channelColor  = $tplDef['channel'] === 'sms' ? 'red' : 'purple';
+                        $channelLabel  = strtoupper($tplDef['channel']);
+                        $isCustomized  = ($customSubject !== '' || $customBody !== '');
+                    ?>
+                    <div class="border border-gray-200 rounded-lg overflow-hidden">
+                        <!-- Accordion Header -->
+                        <button type="button"
+                                onclick="var b=this.parentElement.querySelector('.tpl-body');b.style.display=b.style.display==='none'?'':'none';this.querySelector('.tpl-chevron').classList.toggle('rotate-180');"
+                                class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition text-left">
+                            <div class="flex items-center gap-3">
+                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-<?php echo $channelColor; ?>-100 text-<?php echo $channelColor; ?>-700">
+                                    <?php echo $channelLabel; ?>
+                                </span>
+                                <span class="text-sm font-medium text-gray-800">
+                                    <?php echo htmlspecialchars($tplDef['label']); ?>
+                                </span>
+                                <?php if ($isCustomized): ?>
+                                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700">Customized</span>
+                                <?php endif; ?>
+                            </div>
+                            <svg class="tpl-chevron w-5 h-5 text-gray-400 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                            </svg>
+                        </button>
+
+                        <!-- Accordion Body -->
+                        <div class="tpl-body px-4 py-4 border-t border-gray-200 space-y-3" style="display:none;">
+                            <p class="text-xs text-gray-500 italic">
+                                <?php echo htmlspecialchars($tplDef['description']); ?>
+                            </p>
+
+                            <?php if ($tplDef['channel'] === 'email'): ?>
+                            <!-- Subject (email only) -->
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Subject</label>
+                                <input type="text"
+                                       name="<?php echo $subjectSettingKey; ?>"
+                                       value="<?php echo htmlspecialchars($customSubject); ?>"
+                                       placeholder="<?php echo htmlspecialchars($tplDef['default_subject']); ?>"
+                                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-purple-500 text-sm">
+                            </div>
+                            <?php endif; ?>
+
+                            <!-- Body -->
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">
+                                    <?php echo $tplDef['channel'] === 'sms' ? 'Message Text' : 'Message Body (HTML)'; ?>
+                                </label>
+                                <textarea name="<?php echo $bodySettingKey; ?>"
+                                          rows="<?php echo $tplDef['channel'] === 'sms' ? '3' : '6'; ?>"
+                                          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-purple-500 text-sm font-mono"
+                                          placeholder="Leave blank to use default"
+                                ><?php echo htmlspecialchars($customBody); ?></textarea>
+                                <?php if ($tplDef['channel'] === 'email'): ?>
+                                    <p class="text-xs text-gray-400 mt-1">
+                                        HTML formatting is supported. The school header, footer, and styling are added automatically.
+                                    </p>
+                                <?php else: ?>
+                                    <p class="text-xs text-gray-400 mt-1">Plain text only. Max 1600 characters.</p>
+                                <?php endif; ?>
+                            </div>
+
+                            <!-- Available Placeholders -->
+                            <div class="bg-blue-50 rounded-lg p-3">
+                                <p class="text-xs font-semibold text-gray-700 mb-1.5">Available Placeholders:</p>
+                                <div class="flex flex-wrap gap-1.5">
+                                    <?php foreach ($tplDef['placeholders'] as $ph => $phDesc): ?>
+                                        <span class="inline-flex items-center gap-1 text-xs bg-white border border-blue-200 rounded px-2 py-1"
+                                              title="<?php echo htmlspecialchars($phDesc); ?>">
+                                            <code class="text-purple-600 font-semibold"><?php echo htmlspecialchars($ph); ?></code>
+                                            <span class="text-gray-400">&ndash;</span>
+                                            <span class="text-gray-500"><?php echo htmlspecialchars($phDesc); ?></span>
+                                        </span>
+                                    <?php endforeach; ?>
+                                </div>
+                            </div>
+
+                            <!-- Default Preview -->
+                            <details class="text-xs">
+                                <summary class="cursor-pointer text-blue-600 hover:text-blue-800 font-medium">
+                                    View Default Template
+                                </summary>
+                                <div class="mt-2 bg-gray-50 border border-gray-200 rounded p-3 space-y-2">
+                                    <?php if ($tplDef['channel'] === 'email' && $tplDef['default_subject']): ?>
+                                        <div>
+                                            <span class="font-semibold text-gray-600">Subject:</span>
+                                            <span class="text-gray-700"><?php echo htmlspecialchars($tplDef['default_subject']); ?></span>
+                                        </div>
+                                    <?php endif; ?>
+                                    <div>
+                                        <span class="font-semibold text-gray-600">Body:</span>
+                                        <pre class="mt-1 text-gray-600 whitespace-pre-wrap break-words text-xs bg-white p-2 rounded border border-gray-100"><?php echo htmlspecialchars($tplDef['default_body']); ?></pre>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <?php if ($isCustomized): ?>
+                                <button type="button"
+                                        onclick="if(confirm('Reset this template to default? Your custom text will be cleared.')){var p=this.closest('.tpl-body');var s=p.querySelector('input[name=&quot;<?php echo $subjectSettingKey; ?>&quot;]');if(s)s.value='';p.querySelector('textarea[name=&quot;<?php echo $bodySettingKey; ?>&quot;]').value='';}"
+                                        class="text-xs text-red-600 hover:text-red-800 font-medium">
+                                    &#x21bb; Reset to Default
+                                </button>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+
+                    <div class="pt-4">
+                        <button type="submit" name="save_notification_templates" value="1"
+                                class="bg-green-600 hover:bg-green-700 text-white px-6 py-2.5 rounded-lg text-sm font-medium">
+                            Save All Templates
+                        </button>
                     </div>
                 </form>
             </div>
     </div><!-- /communications panel -->
+    <?php endif; ?>
 
     <!-- ═══ SYSTEM TAB ═══ -->
+    <?php if (canView('settings_system.php')): ?>
     <div class="settings-panel" data-panel="system" style="display:none;">
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div>
@@ -1826,6 +2150,7 @@ include 'includes/header.php';
             </div>
     </div><!-- /grid inside system -->
     </div><!-- /system panel -->
+    <?php endif; ?>
 
     </div><!-- /settingsContent -->
 </div><!-- /container -->
@@ -1866,8 +2191,8 @@ include 'includes/header.php';
     });
 
     // Determine initial tab: server-set (after POST) > URL hash > localStorage > default
-    var validTabs = ['general','school-schedule','belt-testing','certificates','registration','billing','communications','system'];
-    var initialTab = 'general';
+    var validTabs = [<?php echo implode(',', array_map(function($t) { return "'" . $t['id'] . "'"; }, $settingsTabs)); ?>];
+    var initialTab = '<?= $firstVisibleTab ?>';
     <?php if (!empty($activeTabAfterPost)): ?>
     initialTab = '<?= $activeTabAfterPost ?>';
     <?php else: ?>

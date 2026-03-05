@@ -15,6 +15,7 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/theme.php';
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/includes/payment_gateway.php';
+require_once __DIR__ . '/includes/parent_auth.php';
 
 auth_start_session();
 
@@ -71,6 +72,9 @@ $errors          = [];
 $message         = '';
 $waiver_content  = getSetting('waiver_content', '');
 $waiver_version  = getSetting('waiver_version', '1.0');
+require_once __DIR__ . '/includes/messaging.php';
+$comm_consent_text    = get_comm_consent_text();
+$comm_consent_version = get_comm_consent_version();
 $plansStmt = $pdo->prepare("SELECT * FROM membership_plans WHERE status = 'active' AND (is_grandfathered = 0 OR is_grandfathered IS NULL) AND school_id = ? ORDER BY price ASC");
 $plansStmt->execute([$registration_school_id]);
 $plans = $plansStmt->fetchAll();
@@ -83,12 +87,18 @@ if ($activeGw === 'stripe') {
 }
 
 $form = [
-    'username'   => '',
-    'first_name' => '',
-    'last_name'  => '',
-    'email'      => '',
-    'phone'      => '',
-    'plan_id'    => '',
+    'username'         => '',
+    'first_name'       => '',
+    'last_name'        => '',
+    'email'            => '',
+    'phone'            => '',
+    'date_of_birth'    => '',
+    'plan_id'          => '',
+    'parent_first_name' => '',
+    'parent_last_name'  => '',
+    'parent_email'      => '',
+    'parent_phone'      => '',
+    'parent_dob'        => '',
 ];
 
 // =====================================================================
@@ -97,12 +107,18 @@ $form = [
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $step == 1) {
     verify_csrf();
 
-    $form['username']   = trim($_POST['username']   ?? '');
-    $form['first_name'] = trim($_POST['first_name'] ?? '');
-    $form['last_name']  = trim($_POST['last_name']  ?? '');
-    $form['email']      = trim($_POST['email']      ?? '');
-    $form['phone']      = trim($_POST['phone']      ?? '');
-    $form['plan_id']    = $_POST['plan_id']          ?? '';
+    $form['username']         = trim($_POST['username']   ?? '');
+    $form['first_name']       = trim($_POST['first_name'] ?? '');
+    $form['last_name']        = trim($_POST['last_name']  ?? '');
+    $form['email']            = trim($_POST['email']      ?? '');
+    $form['phone']            = trim($_POST['phone']      ?? '');
+    $form['date_of_birth']    = trim($_POST['date_of_birth'] ?? '');
+    $form['plan_id']          = $_POST['plan_id']          ?? '';
+    $form['parent_first_name'] = trim($_POST['parent_first_name'] ?? '');
+    $form['parent_last_name']  = trim($_POST['parent_last_name']  ?? '');
+    $form['parent_email']      = trim($_POST['parent_email']      ?? '');
+    $form['parent_phone']      = trim($_POST['parent_phone']      ?? '');
+    $form['parent_dob']        = trim($_POST['parent_dob']        ?? '');
     $password           = $_POST['password']         ?? '';
     $password_confirm   = $_POST['password_confirm'] ?? '';
 
@@ -116,8 +132,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $step == 1) {
     if ($form['first_name'] === '') $errors[] = 'First name is required.';
     if ($form['last_name'] === '')  $errors[] = 'Last name is required.';
 
-    if ($form['email'] !== '' && !filter_var($form['email'], FILTER_VALIDATE_EMAIL)) {
+    if ($form['email'] === '') {
+        $errors[] = 'Email is required.';
+    } elseif (!filter_var($form['email'], FILTER_VALIDATE_EMAIL)) {
         $errors[] = 'Please enter a valid email address.';
+    }
+
+    if ($form['phone'] === '') {
+        $errors[] = 'Phone number is required.';
+    }
+
+    // ── Date of birth & age check ──
+    $isMinor = false;
+    if ($form['date_of_birth'] === '') {
+        $errors[] = 'Date of birth is required.';
+    } else {
+        $dob = \DateTime::createFromFormat('Y-m-d', $form['date_of_birth']);
+        if (!$dob) {
+            $errors[] = 'Please enter a valid date of birth.';
+        } else {
+            $today = new \DateTime();
+            $age = $dob->diff($today)->y;
+            if ($dob > $today) {
+                $errors[] = 'Date of birth cannot be in the future.';
+            } elseif ($age < 18) {
+                $isMinor = true;
+            }
+        }
+    }
+
+    // ── Parent/Guardian validation (required for minors) ──
+    if ($isMinor) {
+        if ($form['parent_first_name'] === '') $errors[] = 'Parent/guardian first name is required for students under 18.';
+        if ($form['parent_last_name'] === '')  $errors[] = 'Parent/guardian last name is required for students under 18.';
+        if ($form['parent_email'] === '') {
+            $errors[] = 'Parent/guardian email is required for students under 18.';
+        } elseif (!filter_var($form['parent_email'], FILTER_VALIDATE_EMAIL)) {
+            $errors[] = 'Please enter a valid parent/guardian email address.';
+        } elseif (strtolower($form['parent_email']) === strtolower($form['email'])) {
+            $errors[] = 'Parent/guardian email must be different from the student email.';
+        }
+        if ($form['parent_phone'] === '') $errors[] = 'Parent/guardian phone number is required for students under 18.';
+        if ($form['parent_dob'] === '') {
+            $errors[] = 'Parent/guardian date of birth is required for students under 18.';
+        } else {
+            $parentDob = \DateTime::createFromFormat('Y-m-d', $form['parent_dob']);
+            if (!$parentDob) {
+                $errors[] = 'Please enter a valid parent/guardian date of birth.';
+            } else {
+                $parentAge = $parentDob->diff(new \DateTime())->y;
+                if ($parentAge < 18) {
+                    $errors[] = 'Parent/guardian must be at least 18 years old.';
+                }
+            }
+        }
     }
 
     $pwError = validate_password($password);
@@ -149,6 +217,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $step == 1) {
         }
     }
 
+    // ── Parent email check (for minors) ──
+    $existingParentId = null;
+    if (empty($errors) && $isMinor && $form['parent_email'] !== '') {
+        $stmt = $pdo->prepare('SELECT id, is_parent, first_name, last_name FROM students WHERE email = :e AND school_id = :sid LIMIT 1');
+        $stmt->execute([':e' => $form['parent_email'], ':sid' => $registration_school_id]);
+        $existingParent = $stmt->fetch();
+        if ($existingParent) {
+            if ((int)($existingParent['is_parent'] ?? 0) === 1) {
+                // Reuse existing parent account
+                $existingParentId = (int) $existingParent['id'];
+            } else {
+                $errors[] = 'An account with the parent/guardian email already exists but is not a parent account. Please use a different email or contact the studio.';
+            }
+        }
+    }
+
     // ── Create the account ──
     if (empty($errors)) {
         $hash = password_hash($password, PASSWORD_DEFAULT);
@@ -163,6 +247,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $step == 1) {
             ':ph' => $form['phone'] ?: null,
             ':jd' => date('Y-m-d'),
         ];
+
+        // Date of birth
+        if ($form['date_of_birth'] !== '' && in_array('date_of_birth', $colNames, true)) {
+            $insertCols[]          = 'date_of_birth';
+            $insertVals[]          = ':dob';
+            $insertParams[':dob']  = $form['date_of_birth'];
+        }
 
         if ($hasUsername) {
             $insertCols[]          = 'username';
@@ -194,6 +285,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $step == 1) {
             }
         }
 
+        // Communication consent (email / SMS)
+        $consentNow = date('Y-m-d H:i:s');
+        $consentIp  = $_SERVER['REMOTE_ADDR'] ?? '';
+        if (!empty($_POST['comm_consent_email']) && in_array('comm_consent_email', $colNames, true)) {
+            $insertCols[] = 'comm_consent_email';    $insertVals[] = ':cce';  $insertParams[':cce'] = 1;
+            $insertCols[] = 'comm_consent_email_at'; $insertVals[] = ':ccea'; $insertParams[':ccea'] = $consentNow;
+        }
+        if (!empty($_POST['comm_consent_sms']) && in_array('comm_consent_sms', $colNames, true)) {
+            $insertCols[] = 'comm_consent_sms';    $insertVals[] = ':ccs';  $insertParams[':ccs'] = 1;
+            $insertCols[] = 'comm_consent_sms_at'; $insertVals[] = ':ccsa'; $insertParams[':ccsa'] = $consentNow;
+        }
+        if ((!empty($_POST['comm_consent_email']) || !empty($_POST['comm_consent_sms'])) && in_array('comm_consent_version', $colNames, true)) {
+            $insertCols[] = 'comm_consent_version'; $insertVals[] = ':ccv';  $insertParams[':ccv'] = $comm_consent_version;
+            $insertCols[] = 'comm_consent_ip';      $insertVals[] = ':ccip'; $insertParams[':ccip'] = $consentIp;
+        }
+
         $colList = implode(', ', $insertCols);
         $valList = implode(', ', $insertVals);
 
@@ -207,6 +314,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $step == 1) {
 
         login_student($student);
 
+        // ── Parent account creation for minors ──
+        $parentId = null;
+        if ($isMinor) {
+            if ($existingParentId) {
+                // Reuse existing parent account
+                $parentId = $existingParentId;
+            } else {
+                // Create a new parent account
+                $parentUsername = 'parent_' . strtolower(preg_replace('/[^a-zA-Z0-9]/', '', $form['parent_first_name'])) . '_' . time();
+                $parentHash    = password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT); // random password — parent uses "Forgot Password"
+
+                $pCols   = ['school_id', 'first_name', 'last_name', 'email', 'phone', 'join_date', 'is_parent'];
+                $pVals   = [':psid', ':pfn', ':pln', ':pem', ':pph', ':pjd', ':pip'];
+                $pParams = [
+                    ':psid' => $registration_school_id,
+                    ':pfn'  => $form['parent_first_name'],
+                    ':pln'  => $form['parent_last_name'],
+                    ':pem'  => $form['parent_email'],
+                    ':pph'  => $form['parent_phone'],
+                    ':pjd'  => date('Y-m-d'),
+                    ':pip'  => 1,
+                ];
+
+                if ($form['parent_dob'] !== '' && in_array('date_of_birth', $colNames, true)) {
+                    $pCols[]          = 'date_of_birth';
+                    $pVals[]          = ':pdob';
+                    $pParams[':pdob'] = $form['parent_dob'];
+                }
+
+                if ($hasUsername) {
+                    $pCols[]         = 'username';
+                    $pVals[]         = ':pu';
+                    $pParams[':pu']  = $parentUsername;
+                }
+
+                $pCols[]         = $passwordCol;
+                $pVals[]         = ':ph2';
+                $pParams[':ph2'] = $parentHash;
+
+                $pColList = implode(', ', $pCols);
+                $pValList = implode(', ', $pVals);
+
+                $pInsert = $pdo->prepare("INSERT INTO students ({$pColList}) VALUES ({$pValList})");
+                $pInsert->execute($pParams);
+                $parentId = (int) $pdo->lastInsertId();
+            }
+
+            // Link student to parent
+            link_student_to_parent($parentId, (int)$newId, 'parent');
+
+            // Store parent name in session for Step 2 & 3 display
+            $_SESSION['registration_parent_id']   = $parentId;
+            $_SESSION['registration_parent_name']  = trim($form['parent_first_name'] . ' ' . $form['parent_last_name']);
+            $_SESSION['registration_parent_email'] = $form['parent_email'];
+        }
+
         // Plan selected? → Go to payment step
         if (!empty($form['plan_id'])) {
             $_SESSION['registration_student_id'] = (int) $newId;
@@ -215,7 +378,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $step == 1) {
             exit;
         }
 
-        // No plan → straight to portal
+        // No plan → straight to portal (or success page if minor with parent created)
+        if ($isMinor) {
+            $_SESSION['registration_success_parent_name']  = trim($form['parent_first_name'] . ' ' . $form['parent_last_name']);
+            $_SESSION['registration_success_parent_email'] = $form['parent_email'];
+            header('Location: register.php?step=3' . $schoolParam);
+            exit;
+        }
         header('Location: student_portal.php');
         exit;
     }
@@ -237,6 +406,13 @@ if ($step == 2) {
 
     $regStudentId = (int) $_SESSION['registration_student_id'];
     $regPlanId    = (int) $_SESSION['registration_plan_id'];
+    $regParentId  = !empty($_SESSION['registration_parent_id']) ? (int) $_SESSION['registration_parent_id'] : null;
+    $isMinorFlow  = !empty($regParentId);
+    $chargeTargetId = $isMinorFlow ? $regParentId : $regStudentId;
+
+    // Load parent name for display
+    $regParentName  = $_SESSION['registration_parent_name'] ?? '';
+    $regParentEmail = $_SESSION['registration_parent_email'] ?? '';
 
     $stmt = $pdo->prepare("SELECT * FROM membership_plans WHERE id = ? AND school_id = ?");
     $stmt->execute([$regPlanId, $registration_school_id]);
@@ -276,22 +452,30 @@ if ($step == 2) {
         $chargeAmount = $feeBreakdown['total'];
 
         if ($chargeAmount > 0 && $activeGw !== 'none' && !empty($activeGw)) {
-            // Save the card first (Stripe)
+            // Save the card first (Stripe) — saved to parent account for minors
             $stripePmId = trim($_POST['stripe_pm_id'] ?? '');
             if ($activeGw === 'stripe' && $stripePmId !== '') {
-                $saveResult = save_card_from_token($regStudentId, $stripePmId, 'Registration Card');
+                $cardLabel = $isMinorFlow ? 'Registration Card (parent)' : 'Registration Card';
+                $saveResult = save_card_from_token($chargeTargetId, $stripePmId, $cardLabel);
                 if (!$saveResult['success']) {
                     $payment_error = $saveResult['error'] ?? 'Failed to save payment method.';
                 }
+                // For minors, sync the parent's new card down to the child
+                if ($isMinorFlow && $payment_error === '') {
+                    sync_parent_payment_methods_to_child($regParentId, $regStudentId);
+                }
             }
 
-            // Charge the student
+            // Charge the account (parent for minors, student for adults)
             if ($payment_error === '') {
                 $desc = 'Membership enrollment: ' . $selected_plan['name'];
+                if ($isMinorFlow) {
+                    $desc .= ' (charged to parent: ' . $regParentName . ')';
+                }
                 if ($feeBreakdown['service_fee'] > 0) {
                     $desc .= ' (incl. service fee)';
                 }
-                $chargeResult = charge_student($regStudentId, $chargeAmount, $desc);
+                $chargeResult = charge_student($chargeTargetId, $chargeAmount, $desc);
                 if (!$chargeResult['success']) {
                     $payment_error = $chargeResult['error'] ?? 'Payment failed. Please try again.';
                 }
@@ -336,6 +520,9 @@ if ($step == 2) {
             // Record payment (if amount > 0)
             if ($chargeAmount > 0) {
                 $notes = 'Initial membership enrollment';
+                if ($isMinorFlow) {
+                    $notes .= ' | Charged via parent account: ' . $regParentName;
+                }
                 if ($feeBreakdown['discount_amount'] > 0) {
                     $notes .= ' | Discount: -$' . number_format($feeBreakdown['discount_amount'], 2) . ' (' . $feeBreakdown['discount_code'] . ')';
                 }
@@ -345,6 +532,7 @@ if ($step == 2) {
                 if ($regFee > 0) {
                     $notes .= ' | Reg fee: $' . number_format($regFee, 2);
                 }
+                $regReceiptNum = generateReceiptNumber();
                 $pStmt = $pdo->prepare("
                     INSERT INTO payments (school_id, student_id, payment_type, reference_id, amount, payment_method, payment_date, receipt_number, notes)
                     VALUES (?, ?, 'membership', ?, ?, 'credit_card', CURDATE(), ?, ?)
@@ -354,8 +542,19 @@ if ($step == 2) {
                     $regStudentId,
                     $membershipId,
                     $chargeAmount,
-                    generateReceiptNumber(),
+                    $regReceiptNum,
                     $notes,
+                ]);
+
+                // Send payment receipt email
+                send_payment_receipt_email([
+                    'student_id'     => $regStudentId,
+                    'amount'         => $chargeAmount,
+                    'payment_type'   => 'membership',
+                    'description'    => 'Membership enrollment: ' . $selected_plan['name'],
+                    'receipt_number' => $regReceiptNum,
+                    'transaction_id' => $chargeResult['transaction_id'] ?? null,
+                    'payment_method' => 'credit_card',
                 ]);
             }
 
@@ -370,8 +569,20 @@ if ($step == 2) {
                 );
             }
 
+            // Preserve parent info for success page
+            if ($isMinorFlow) {
+                $_SESSION['registration_success_parent_name']  = $regParentName;
+                $_SESSION['registration_success_parent_email'] = $regParentEmail;
+            }
+
             // Clean up session
-            unset($_SESSION['registration_student_id'], $_SESSION['registration_plan_id']);
+            unset(
+                $_SESSION['registration_student_id'],
+                $_SESSION['registration_plan_id'],
+                $_SESSION['registration_parent_id'],
+                $_SESSION['registration_parent_name'],
+                $_SESSION['registration_parent_email']
+            );
 
             header('Location: register.php?step=3' . $schoolParam);
             exit;
@@ -381,8 +592,26 @@ if ($step == 2) {
     // ── Skip payment POST (creates account without membership) ──
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['skip_payment'])) {
         verify_csrf();
-        unset($_SESSION['registration_student_id'], $_SESSION['registration_plan_id']);
-        header('Location: student_portal.php');
+
+        // For minors, preserve parent info for success page
+        if ($isMinorFlow) {
+            $_SESSION['registration_success_parent_name']  = $regParentName;
+            $_SESSION['registration_success_parent_email'] = $regParentEmail;
+        }
+
+        unset(
+            $_SESSION['registration_student_id'],
+            $_SESSION['registration_plan_id'],
+            $_SESSION['registration_parent_id'],
+            $_SESSION['registration_parent_name'],
+            $_SESSION['registration_parent_email']
+        );
+
+        if ($isMinorFlow) {
+            header('Location: register.php?step=3' . $schoolParam);
+        } else {
+            header('Location: student_portal.php');
+        }
         exit;
     }
 }
@@ -534,17 +763,25 @@ elseif ($step == 1): ?>
                 <!-- Email & Phone -->
                 <div class="form-row">
                     <div class="form-group">
-                        <label for="email">Email</label>
+                        <label for="email">Email *</label>
                         <input type="email" id="email" name="email"
                                value="<?= htmlspecialchars($form['email']) ?>"
-                               placeholder="Optional">
+                               placeholder="Email address" required>
                     </div>
                     <div class="form-group">
-                        <label for="phone">Phone</label>
+                        <label for="phone">Phone *</label>
                         <input type="text" id="phone" name="phone"
                                value="<?= htmlspecialchars($form['phone']) ?>"
-                               placeholder="Optional">
+                               placeholder="Phone number" required>
                     </div>
+                </div>
+
+                <!-- Date of Birth -->
+                <div class="form-group">
+                    <label for="date_of_birth">Date of Birth *</label>
+                    <input type="date" id="date_of_birth" name="date_of_birth"
+                           value="<?= htmlspecialchars($form['date_of_birth']) ?>"
+                           required max="<?= date('Y-m-d') ?>">
                 </div>
 
                 <!-- Password -->
@@ -564,18 +801,89 @@ elseif ($step == 1): ?>
                     At least 8 characters with uppercase, lowercase, and a number.
                 </p>
 
+                <!-- Parent/Guardian Section (shown for minors via JS) -->
+                <div id="parent-fields" style="display:none; margin-top:1rem; padding:1rem; border:1px solid rgba(255,255,255,.15); border-radius:10px; background:rgba(255,255,255,.04);">
+                    <div style="margin-bottom:.75rem;">
+                        <strong style="font-size:.95rem; color:var(--primary-color, #64b5f6);">Parent / Guardian Information</strong>
+                        <p style="font-size:.8rem; color:#9ca3af; margin-top:.25rem;">
+                            Required for students under 18. The parent/guardian assumes responsibility for agreements and payments.
+                        </p>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="parent_first_name">Parent First Name *</label>
+                            <input type="text" id="parent_first_name" name="parent_first_name"
+                                   value="<?= htmlspecialchars($form['parent_first_name']) ?>"
+                                   placeholder="Parent first name">
+                        </div>
+                        <div class="form-group">
+                            <label for="parent_last_name">Parent Last Name *</label>
+                            <input type="text" id="parent_last_name" name="parent_last_name"
+                                   value="<?= htmlspecialchars($form['parent_last_name']) ?>"
+                                   placeholder="Parent last name">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="parent_email">Parent Email *</label>
+                            <input type="email" id="parent_email" name="parent_email"
+                                   value="<?= htmlspecialchars($form['parent_email']) ?>"
+                                   placeholder="Parent email address">
+                        </div>
+                        <div class="form-group">
+                            <label for="parent_phone">Parent Phone *</label>
+                            <input type="text" id="parent_phone" name="parent_phone"
+                                   value="<?= htmlspecialchars($form['parent_phone']) ?>"
+                                   placeholder="Parent phone number">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="parent_dob">Parent Date of Birth *</label>
+                        <input type="date" id="parent_dob" name="parent_dob"
+                               value="<?= htmlspecialchars($form['parent_dob']) ?>"
+                               max="<?= date('Y-m-d') ?>">
+                        <p style="font-size:.75rem; color:#9ca3af; margin-top:.25rem;">
+                            Parent/guardian must be at least 18 years old.
+                        </p>
+                    </div>
+                </div>
+
                 <?php // ── Waiver Section ── ?>
                 <?php if ($waiver_content !== ''): ?>
                 <div class="waiver-section">
                     <label>Waiver of Liability *</label>
                     <div class="waiver-box"><?= nl2br(htmlspecialchars($waiver_content)) ?></div>
-                    <label class="waiver-agree">
+                    <label class="waiver-agree" id="waiver-agree-label">
                         <input type="checkbox" name="waiver_agree" value="1"
                                <?= !empty($_POST['waiver_agree']) ? 'checked' : '' ?>>
-                        I have read and agree to the waiver of liability
+                        <span id="waiver-agree-text">I have read and agree to the waiver of liability</span>
                     </label>
                 </div>
                 <?php endif; ?>
+
+                <?php // ── Communication Consent ── ?>
+                <div class="waiver-section" style="margin-top:1rem;">
+                    <label>Digital Communication Consent</label>
+                    <div class="waiver-box"><?= nl2br(htmlspecialchars($comm_consent_text)) ?></div>
+                    <div style="margin-top:.5rem;">
+                        <label class="waiver-agree" style="display:block; margin-bottom:.35rem;">
+                            <input type="checkbox" name="comm_consent_email" value="1"
+                                   <?= !empty($_POST['comm_consent_email']) ? 'checked' : '' ?>>
+                            I consent to receive <strong>email</strong> communications
+                        </label>
+                        <label class="waiver-agree" style="display:block;">
+                            <input type="checkbox" name="comm_consent_sms" value="1"
+                                   <?= !empty($_POST['comm_consent_sms']) ? 'checked' : '' ?>>
+                            I consent to receive <strong>SMS/text message</strong> communications
+                        </label>
+                    </div>
+                    <p style="font-size:.75rem; color:#6b7280; margin-top:.35rem;">
+                        Consent is optional and not required for enrollment. You can update your preferences at any time from your profile page.
+                    </p>
+                </div>
 
                 <?php // ── Plan Selection ── ?>
                 <?php if (!empty($plans)): ?>
@@ -649,6 +957,55 @@ elseif ($step == 1): ?>
                     btn.textContent = this.value ? 'Continue to Payment' : 'Create Account';
                 });
             });
+
+            // ── Age-based parent/guardian toggle ──
+            (function() {
+                var dobInput     = document.getElementById('date_of_birth');
+                var parentFields = document.getElementById('parent-fields');
+                var waiverText   = document.getElementById('waiver-agree-text');
+                var defaultWaiverText = 'I have read and agree to the waiver of liability';
+                var parentWaiverText  = 'I, the parent/legal guardian, have read and agree to the waiver of liability on behalf of the student';
+
+                if (!dobInput || !parentFields) return;
+
+                function checkAge() {
+                    var val = dobInput.value;
+                    if (!val) {
+                        parentFields.style.display = 'none';
+                        toggleParentRequired(false);
+                        if (waiverText) waiverText.textContent = defaultWaiverText;
+                        return;
+                    }
+
+                    var parts = val.split('-');
+                    var dob = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+                    var today = new Date();
+                    var age = today.getFullYear() - dob.getFullYear();
+                    var m = today.getMonth() - dob.getMonth();
+                    if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
+
+                    var isMinor = age < 18;
+                    parentFields.style.display = isMinor ? 'block' : 'none';
+                    toggleParentRequired(isMinor);
+
+                    if (waiverText) {
+                        waiverText.textContent = isMinor ? parentWaiverText : defaultWaiverText;
+                    }
+                }
+
+                function toggleParentRequired(required) {
+                    var inputs = parentFields.querySelectorAll('input');
+                    for (var i = 0; i < inputs.length; i++) {
+                        inputs[i].required = required;
+                    }
+                }
+
+                dobInput.addEventListener('change', checkAge);
+                dobInput.addEventListener('input', checkAge);
+
+                // Check on page load (if DOB was pre-filled from form error re-render)
+                checkAge();
+            })();
             </script>
 
 <?php // =============================================================
@@ -660,6 +1017,13 @@ elseif ($step == 2 && $selected_plan): ?>
             $chargeAmount = $feeBreakdown['total'];
             $isMonthly    = $proration['is_monthly'] ?? false;
             ?>
+
+            <?php if ($isMinorFlow && $regParentName): ?>
+            <div style="background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.25);padding:10px 14px;border-radius:8px;margin-bottom:1rem;font-size:.875rem;color:#93c5fd;">
+                <strong>Parent/Guardian Payment:</strong> Payment will be processed through the account of
+                <strong><?= htmlspecialchars($regParentName) ?></strong> (<?= htmlspecialchars($regParentEmail) ?>).
+            </div>
+            <?php endif; ?>
 
             <div class="payment-summary-card">
                 <h3>Plan Summary</h3>
@@ -702,6 +1066,14 @@ elseif ($step == 2 && $selected_plan): ?>
             </div>
 
             <?php if ($activeGw !== 'none' && !empty($activeGw) && $chargeAmount > 0): ?>
+                <!-- Wallet Pay (Apple Pay / Google Pay) -->
+                <div id="wallet-pay-container" style="display:none;"></div>
+                <div id="wallet-pay-divider" style="display:none;" class="flex items-center gap-3 my-4" style="display:flex;align-items:center;gap:.75rem;margin:1rem 0;">
+                    <div style="flex:1;height:1px;background:var(--border-color,#ccc);"></div>
+                    <span style="font-size:.85rem;color:#888;">or pay with card</span>
+                    <div style="flex:1;height:1px;background:var(--border-color,#ccc);"></div>
+                </div>
+
                 <!-- Payment form -->
                 <form method="POST" action="register.php?step=2<?= $schoolParam ?>" id="payment-form" class="login-form">
                     <?= csrf_field() ?>
@@ -733,6 +1105,7 @@ elseif ($step == 2 && $selected_plan): ?>
                 </form>
 
                 <?php if ($stripePk): ?>
+                <script src="assets/js/wallet-pay.js"></script>
                 <script>
                 (function() {
                     const stripe = Stripe('<?= htmlspecialchars($stripePk) ?>');
@@ -845,6 +1218,18 @@ elseif ($step == 2 && $selected_plan): ?>
                     function row(label, val) {
                         return '<div class="payment-row"><span>' + label + '</span><span>' + val + '</span></div>';
                     }
+
+                    // Initialize Wallet Pay (Apple Pay / Google Pay)
+                    initWalletPay(stripe, {
+                        amount:      <?= (int) round($chargeAmount * 100) ?>,
+                        label:       <?= json_encode($selected_plan['name'] ?? 'Registration') ?>,
+                        containerId: 'wallet-pay-container',
+                        dividerId:   'wallet-pay-divider',
+                        onToken: function(pm) {
+                            document.getElementById('stripe_pm_id').value = pm.id;
+                            form.submit();
+                        }
+                    });
                 })();
                 </script>
                 <?php endif; ?>
@@ -881,10 +1266,26 @@ elseif ($step == 2 && $selected_plan): ?>
       // =============================================================
 elseif ($step == 3): ?>
 
+            <?php
+            $successParentName  = $_SESSION['registration_success_parent_name'] ?? '';
+            $successParentEmail = $_SESSION['registration_success_parent_email'] ?? '';
+            unset($_SESSION['registration_success_parent_name'], $_SESSION['registration_success_parent_email']);
+            ?>
+
             <div class="success-message">
                 <div class="success-icon">&#10004;</div>
                 <h2>Registration Complete!</h2>
-                <p>Your account has been created and your membership is now active. Welcome to <?= htmlspecialchars($theme['studio_name']) ?>!</p>
+                <p>Your account has been created<?= $successParentName ? '' : ' and your membership is now active' ?>. Welcome to <?= htmlspecialchars($theme['studio_name']) ?>!</p>
+
+                <?php if ($successParentName): ?>
+                <div style="background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.25);padding:12px 16px;border-radius:8px;margin:1rem 0;font-size:.875rem;color:#93c5fd;text-align:left;">
+                    <strong>Parent/Guardian Account Created</strong><br>
+                    A parent account has been created for <strong><?= htmlspecialchars($successParentName) ?></strong>
+                    (<?= htmlspecialchars($successParentEmail) ?>).<br>
+                    The parent can log in by using the "Forgot Password" link with their email to set a password.
+                </div>
+                <?php endif; ?>
+
                 <a href="student_portal.php" class="btn btn-primary btn-block">Go to Student Portal</a>
             </div>
 

@@ -1,0 +1,56 @@
+name: martial_arts_app
+description: Martial Arts School Management mobile app
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State Management
+  flutter_bloc: ^9.1.1
+  equatable: ^2.0.5
+
+  # Navigation
+  go_router: ^14.2.0
+
+  # Networking
+  dio: ^5.4.3
+  connectivity_plus: ^7.0.0
+
+  # Storage
+  flutter_secure_storage: ^10.0.0
+  shared_preferences: ^2.2.3
+
+  # Firebase
+  firebase_core: ^4.4.0
+  firebase_messaging: ^16.1.1
+  flutter_local_notifications: ^20.1.0
+
+  # UI
+  cached_network_image: ^3.3.1
+  shimmer: ^3.0.0
+  intl: ^0.20.2
+  google_fonts: ^8.0.2
+
+  # Utilities
+  json_annotation: ^4.9.0
+  get_it: ^9.2.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.4.9
+  json_serializable: ^6.8.0
+  bloc_test: ^10.0.0
+  mocktail: ^1.0.3
+
+flutter:
+  uses-material-design: true
+
+  # Fonts loaded at runtime via google_fonts package (no bundled assets needed)
+  # To use: GoogleFonts.poppins() or GoogleFonts.poppinsTextTheme()

@@ -225,6 +225,26 @@ function charge_via_stripe(string $gatewayPmId, float $amount, string $descripti
     $student = $stmt->fetch();
     $customerId = $student['stripe_customer_id'] ?? '';
 
+    // If this student has no Stripe customer, the PM may be a shared/synced card
+    // from a family member — find the original owner's Stripe customer
+    if (!$customerId) {
+        $pmOwnerStmt = $pdo->prepare("
+            SELECT s.stripe_customer_id
+            FROM payment_methods pm2
+            JOIN students s ON s.id = pm2.student_id
+            WHERE pm2.gateway_payment_method_id = ?
+              AND s.stripe_customer_id IS NOT NULL
+              AND s.stripe_customer_id != ''
+            LIMIT 1
+        ");
+        $pmOwnerStmt->execute([$gatewayPmId]);
+        $pmOwner = $pmOwnerStmt->fetch();
+        if ($pmOwner) {
+            $customerId = $pmOwner['stripe_customer_id'];
+            error_log("[STRIPE] Using linked family member's Stripe customer for student #{$pm['student_id']}, PM: {$gatewayPmId}");
+        }
+    }
+
     if (!$customerId) {
         return ['success' => false, 'transaction_id' => null, 'error' => 'Student has no Stripe customer ID. Please re-add the card.'];
     }
@@ -424,6 +444,82 @@ function charge_via_square(string $gatewayCardId, float $amount, string $descrip
 }
 
 // ---------------------------------------------------------------------------
+// Wallet token charge (Apple Pay / Google Pay one-time token)
+// ---------------------------------------------------------------------------
+
+/**
+ * Charge a one-time wallet PaymentMethod token (pm_xxx from Payment Request Button).
+ *
+ * Unlike charge_student() which uses a stored card, this takes a fresh pm_xxx
+ * from Apple Pay / Google Pay, attaches it to the student's Stripe Customer,
+ * and creates a confirmed PaymentIntent in one step.
+ *
+ * @param int    $studentId   Student to charge
+ * @param string $pmToken     Stripe PaymentMethod ID (pm_xxx) from wallet
+ * @param float  $amount      Amount in dollars
+ * @param string $description Charge description
+ * @return array ['success' => bool, 'transaction_id' => ?string, 'error' => ?string]
+ */
+function charge_wallet_token(int $studentId, string $pmToken, float $amount, string $description): array
+{
+    $secretKey = get_stripe_secret_key();
+    if (!$secretKey) {
+        return ['success' => false, 'transaction_id' => null, 'error' => 'Stripe is not configured.'];
+    }
+
+    // Get or create the Stripe customer
+    $customerId = stripe_get_or_create_customer($studentId);
+    if (!$customerId) {
+        return ['success' => false, 'transaction_id' => null, 'error' => 'Failed to create Stripe customer.'];
+    }
+
+    // Attach the wallet PaymentMethod to the customer
+    $attachResp = gateway_http('POST', "https://api.stripe.com/v1/payment_methods/{$pmToken}/attach", [
+        'Authorization: Bearer ' . $secretKey,
+        'Content-Type: application/x-www-form-urlencoded',
+    ], [
+        'customer' => $customerId,
+    ]);
+
+    if ($attachResp['status'] !== 200) {
+        $errMsg = $attachResp['body']['error']['message'] ?? 'Failed to attach wallet payment method.';
+        error_log("[STRIPE WALLET] Attach failed: " . json_encode($attachResp['body']));
+        return ['success' => false, 'transaction_id' => null, 'error' => $errMsg];
+    }
+
+    // Create and confirm a PaymentIntent
+    $piResp = gateway_http('POST', 'https://api.stripe.com/v1/payment_intents', [
+        'Authorization: Bearer ' . $secretKey,
+        'Content-Type: application/x-www-form-urlencoded',
+    ], [
+        'amount'               => (int) round($amount * 100),
+        'currency'             => 'usd',
+        'customer'             => $customerId,
+        'payment_method'       => $pmToken,
+        'confirm'              => 'true',
+        'description'          => $description,
+        'metadata[student_id]' => $studentId,
+        'metadata[source]'     => 'wallet_pay',
+    ]);
+
+    if ($piResp['status'] === 200 && ($piResp['body']['status'] ?? '') === 'succeeded') {
+        return [
+            'success'        => true,
+            'transaction_id' => $piResp['body']['id'],
+            'error'          => null,
+        ];
+    }
+
+    $status = $piResp['body']['status'] ?? 'unknown';
+    $errMsg = $piResp['body']['error']['message']
+           ?? $piResp['body']['last_payment_error']['message']
+           ?? "Wallet payment failed (status: $status)";
+
+    error_log("[STRIPE WALLET] PaymentIntent failed: " . json_encode($piResp['body']));
+    return ['success' => false, 'transaction_id' => null, 'error' => $errMsg];
+}
+
+// ---------------------------------------------------------------------------
 // Unified charge function
 // ---------------------------------------------------------------------------
 
@@ -497,6 +593,25 @@ function charge_student(int $studentId, float $amount, string $description, ?int
         $pmStmt->execute([$studentId]);
     }
     $pm = $pmStmt->fetch();
+
+    // If student has no card, try their parent's card (parent_students junction)
+    if (!$pm && !$paymentMethodId) {
+        try {
+            require_once __DIR__ . '/parent_auth.php';
+            $parentAccounts = get_student_parents($studentId);
+            foreach ($parentAccounts as $parentAcct) {
+                $ppmStmt = $pdo->prepare("SELECT * FROM payment_methods WHERE student_id = ? AND is_default = 1 LIMIT 1");
+                $ppmStmt->execute([$parentAcct['id']]);
+                $pm = $ppmStmt->fetch();
+                if ($pm) {
+                    error_log("[PAYMENT] Using parent #{$parentAcct['id']} ({$parentAcct['first_name']} {$parentAcct['last_name']}) card for student #{$studentId}");
+                    break;
+                }
+            }
+        } catch (\Throwable $e) {
+            error_log("[PAYMENT] Parent card fallback failed for student #{$studentId}: " . $e->getMessage());
+        }
+    }
 
     if (!$pm) {
         // Refund credit since we can't complete the charge
@@ -730,6 +845,19 @@ function save_card_from_token(int $studentId, string $paymentMethodId, string $l
         $isDefault,
     ]);
 
+    // Auto-sync: if this student is a parent, copy card to all linked children
+    try {
+        require_once __DIR__ . '/parent_auth.php';
+        $children = get_parent_children($studentId);
+        if (!empty($children)) {
+            foreach ($children as $child) {
+                sync_parent_payment_methods_to_child($studentId, (int)$child['id']);
+            }
+        }
+    } catch (\Throwable $e) {
+        error_log("[PAYMENT] Auto-sync to children failed for parent #{$studentId}: " . $e->getMessage());
+    }
+
     return ['success' => true, 'error' => null];
 }
 
@@ -835,7 +963,7 @@ function save_parent_card_from_token(int $parentId, string $paymentMethodId, str
 
     $ins = $pdo->prepare(
         'INSERT INTO parent_payment_methods (school_id, parent_id, label, card_brand, last_four, exp_month, exp_year, encrypted_token, gateway_payment_method_id, is_default)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
     $ins->execute([
         current_school_id(),
@@ -849,6 +977,46 @@ function save_parent_card_from_token(int $parentId, string $paymentMethodId, str
         $paymentMethodId,
         $isDefault,
     ]);
+
+    // Auto-sync: resolve legacy parent → student-as-parent, then sync to children
+    try {
+        require_once __DIR__ . '/parent_auth.php';
+        if ($parentInfo) {
+            $mStmt = $pdo->prepare("
+                SELECT id FROM students
+                WHERE is_parent = 1 AND status = 'active'
+                  AND ((first_name = ? AND last_name = ?) OR (email IS NOT NULL AND email != '' AND email = ?))
+                " . school_where() . " LIMIT 1
+            ");
+            $mParams = [$parentInfo['first_name'], $parentInfo['last_name'], $parentInfo['email'] ?? ''];
+            school_param($mParams);
+            $mStmt->execute($mParams);
+            $studentParentId = $mStmt->fetchColumn();
+
+            if ($studentParentId) {
+                // Mirror card to student-as-parent's payment_methods (duplicate check)
+                $existCheck = $pdo->prepare("SELECT COUNT(*) FROM payment_methods WHERE student_id = ? AND card_brand = ? AND last_four = ?");
+                $existCheck->execute([(int)$studentParentId, $cardBrand, $lastFour]);
+                if ((int)$existCheck->fetchColumn() === 0) {
+                    $countStmt2 = $pdo->prepare("SELECT COUNT(*) FROM payment_methods WHERE student_id = ?");
+                    $countStmt2->execute([(int)$studentParentId]);
+                    $isDefault2 = ((int)$countStmt2->fetchColumn() === 0) ? 1 : 0;
+                    $ins2 = $pdo->prepare(
+                        'INSERT INTO payment_methods (student_id, label, card_brand, last_four, exp_month, exp_year, encrypted_token, gateway_payment_method_id, is_default)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                    );
+                    $ins2->execute([(int)$studentParentId, $label, $cardBrand, $lastFour, $expMonth, $expYear, $encryptedToken, $paymentMethodId, $isDefault2]);
+                }
+                // Now sync to all children
+                $children = get_parent_children((int)$studentParentId);
+                foreach ($children as $child) {
+                    sync_parent_payment_methods_to_child((int)$studentParentId, (int)$child['id']);
+                }
+            }
+        }
+    } catch (\Throwable $e) {
+        error_log("[PAYMENT] Legacy parent auto-sync failed for parent #{$parentId}: " . $e->getMessage());
+    }
 
     return ['success' => true, 'error' => null];
 }
@@ -1233,6 +1401,167 @@ function get_student_default_payment(int $studentId): ?array
         }
     } catch (\PDOException $e) {}
     return null;
+}
+
+/**
+ * Get the default payment method for a parent.
+ *
+ * For student-as-parent: looks up payment_methods (same as get_student_default_payment).
+ * For legacy parents:     looks up parent_payment_methods first, falls back to
+ *                         the child's payment_methods if nothing found.
+ *
+ * @param int   $parentId   The effective parent ID
+ * @param int[] $childIds   Optional child IDs to try as fallback
+ * @return array|null       ['last_four','brand','exp'] or null
+ */
+function get_parent_default_payment(int $parentId, array $childIds = []): ?array
+{
+    $isStudentParent = (!empty($_SESSION['user_type']) && $_SESSION['user_type'] === 'student' && !empty($_SESSION['is_parent']));
+
+    // Student-as-parent: parent IS a student, so look in payment_methods directly
+    if ($isStudentParent) {
+        return get_student_default_payment($parentId);
+    }
+
+    // Legacy parent: look in parent_payment_methods first
+    $pdo = get_db();
+    try {
+        $params = [$parentId];
+        school_param($params);
+        $stmt = $pdo->prepare("SELECT card_brand, last_four, exp_month, exp_year FROM parent_payment_methods WHERE parent_id = ? AND is_default = 1" . school_where() . " LIMIT 1");
+        $stmt->execute($params);
+        $pm = $stmt->fetch();
+        if ($pm) {
+            return [
+                'last_four' => $pm['last_four'],
+                'brand'     => $pm['card_brand'] ?? 'Card',
+                'exp'       => ($pm['exp_month'] ? str_pad($pm['exp_month'], 2, '0', STR_PAD_LEFT) . '/' . $pm['exp_year'] : ''),
+            ];
+        }
+    } catch (\PDOException $e) {}
+
+    // Fallback: try children's payment methods
+    foreach ($childIds as $childId) {
+        $result = get_student_default_payment((int)$childId);
+        if ($result) return $result;
+    }
+
+    return null;
+}
+
+/**
+ * Charge a parent's default payment method.
+ *
+ * For student-as-parent: delegates to charge_student() directly (parent IS a student).
+ * For legacy parents: uses parent_payment_methods to find the card, then charges via Stripe.
+ *
+ * @param int    $parentId     The effective parent ID
+ * @param float  $amount       Amount in dollars
+ * @param string $description  Charge description
+ * @param int[]  $childIds     Optional child IDs to try as fallback for payment methods
+ * @return array Same shape as charge_student() return value
+ */
+function charge_parent(int $parentId, float $amount, string $description, array $childIds = []): array
+{
+    $isStudentParent = (!empty($_SESSION['user_type']) && $_SESSION['user_type'] === 'student' && !empty($_SESSION['is_parent']));
+
+    // Student-as-parent: parent IS a student, delegate to charge_student
+    if ($isStudentParent) {
+        return charge_student($parentId, $amount, $description);
+    }
+
+    // Legacy parent: look for a card in parent_payment_methods
+    $pdo = get_db();
+    $gateway = get_active_gateway();
+    $originalAmount = round($amount, 2);
+
+    if ($gateway === 'none' || !is_gateway_ready()) {
+        return ['success' => false, 'transaction_id' => null, 'error' => 'No payment gateway configured.',
+                'credit_used' => 0, 'amount_charged' => 0, 'total_amount' => $originalAmount];
+    }
+
+    // Try parent_payment_methods
+    try {
+        $params = [$parentId];
+        school_param($params);
+        $stmt = $pdo->prepare("SELECT * FROM parent_payment_methods WHERE parent_id = ? AND is_default = 1" . school_where() . " LIMIT 1");
+        $stmt->execute($params);
+        $pm = $stmt->fetch();
+    } catch (\PDOException $e) {
+        $pm = null;
+    }
+
+    // Fallback to children's payment methods
+    if (!$pm && !empty($childIds)) {
+        foreach ($childIds as $childId) {
+            $childId = (int)$childId;
+            return charge_student($childId, $amount, $description);
+        }
+    }
+
+    if (!$pm) {
+        return ['success' => false, 'transaction_id' => null, 'error' => 'No payment method on file. Please add a card first.',
+                'credit_used' => 0, 'amount_charged' => 0, 'total_amount' => $originalAmount];
+    }
+
+    $gatewayPmId = $pm['gateway_payment_method_id'] ?? '';
+    if (empty($gatewayPmId)) {
+        return ['success' => false, 'transaction_id' => null, 'error' => 'This card was saved before gateway integration. Please re-add the card.',
+                'credit_used' => 0, 'amount_charged' => 0, 'total_amount' => $originalAmount];
+    }
+
+    // Charge via Stripe using the parent's card (we need a customer ID)
+    if ($gateway === 'stripe') {
+        $secretKey = get_stripe_secret_key();
+        // Search for the Stripe customer by the PM
+        $pmResp = gateway_http('GET', "https://api.stripe.com/v1/payment_methods/{$gatewayPmId}", [
+            'Authorization: Bearer ' . $secretKey,
+        ]);
+        $customerId = $pmResp['body']['customer'] ?? null;
+
+        if (!$customerId) {
+            return ['success' => false, 'transaction_id' => null, 'error' => 'Card is not linked to a Stripe customer. Please re-add the card.',
+                    'credit_used' => 0, 'amount_charged' => 0, 'total_amount' => $originalAmount];
+        }
+
+        $piResp = gateway_http('POST', 'https://api.stripe.com/v1/payment_intents', [
+            'Authorization: Bearer ' . $secretKey,
+            'Content-Type: application/x-www-form-urlencoded',
+        ], [
+            'amount'               => (int) round($amount * 100),
+            'currency'             => 'usd',
+            'customer'             => $customerId,
+            'payment_method'       => $gatewayPmId,
+            'off_session'          => 'true',
+            'confirm'              => 'true',
+            'description'          => $description,
+            'metadata[parent_id]'  => $parentId,
+            'metadata[last_four]'  => $pm['last_four'],
+        ]);
+
+        if ($piResp['status'] === 200 && ($piResp['body']['status'] ?? '') === 'succeeded') {
+            return [
+                'success'        => true,
+                'transaction_id' => $piResp['body']['id'],
+                'error'          => null,
+                'credit_used'    => 0,
+                'amount_charged' => $originalAmount,
+                'total_amount'   => $originalAmount,
+            ];
+        }
+
+        $status = $piResp['body']['status'] ?? 'unknown';
+        $errMsg = $piResp['body']['error']['message']
+               ?? $piResp['body']['last_payment_error']['message']
+               ?? "Payment failed (status: $status)";
+
+        error_log("[STRIPE PARENT] PaymentIntent failed: " . json_encode($piResp['body']));
+        return ['success' => false, 'transaction_id' => null, 'error' => $errMsg,
+                'credit_used' => 0, 'amount_charged' => 0, 'total_amount' => $originalAmount];
+    }
+
+    return ['success' => false, 'transaction_id' => null, 'error' => 'Unsupported gateway for parent payments.',
+            'credit_used' => 0, 'amount_charged' => 0, 'total_amount' => $originalAmount];
 }
 
 // ---------------------------------------------------------------------------

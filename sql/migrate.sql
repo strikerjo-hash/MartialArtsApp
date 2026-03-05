@@ -190,6 +190,7 @@ INSERT IGNORE INTO settings (setting_key, setting_value) VALUES
 -- 12. Afterschool program support: fixed-term plans with start/end dates.
 --     Students enrolling mid-program pay a prorated cost.
 ALTER TABLE membership_plans ADD COLUMN IF NOT EXISTS is_afterschool TINYINT(1) NOT NULL DEFAULT 0;
+ALTER TABLE membership_plans ADD COLUMN IF NOT EXISTS is_camp TINYINT(1) NOT NULL DEFAULT 0;
 ALTER TABLE membership_plans ADD COLUMN IF NOT EXISTS program_start_date DATE DEFAULT NULL;
 ALTER TABLE membership_plans ADD COLUMN IF NOT EXISTS program_end_date DATE DEFAULT NULL;
 

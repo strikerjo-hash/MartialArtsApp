@@ -187,6 +187,14 @@ include 'includes/student_header.php';
             </div>
             <div class="p-6">
                 <?php if ($gw === 'stripe' && $gwReady && $stripePk): ?>
+                    <!-- Wallet Pay (Apple Pay / Google Pay) -->
+                    <div id="wallet-pay-container" style="display:none;"></div>
+                    <div id="wallet-pay-divider" style="display:none;" class="flex items-center gap-3 my-4">
+                        <div class="flex-1 h-px bg-gray-200"></div>
+                        <span class="text-sm text-gray-400">or pay with card</span>
+                        <div class="flex-1 h-px bg-gray-200"></div>
+                    </div>
+
                     <!-- Stripe Elements form -->
                     <form id="stripe-form" method="POST" class="space-y-4">
                         <?= csrf_field() ?>
@@ -275,8 +283,9 @@ include 'includes/student_header.php';
 </div>
 
 <?php if ($gw === 'stripe' && $gwReady && $stripePk): ?>
-<!-- Stripe.js -->
+<!-- Stripe.js + Wallet Pay -->
 <script src="https://js.stripe.com/v3/"></script>
+<script src="assets/js/wallet-pay.js"></script>
 <script>
 (function() {
     const stripe = Stripe('<?= htmlspecialchars($stripePk) ?>');
@@ -333,6 +342,18 @@ include 'includes/student_header.php';
         // Set the token and submit the form
         document.getElementById('stripe_pm_id').value = paymentMethod.id;
         form.submit();
+    });
+
+    // Initialize Wallet Pay (Apple Pay / Google Pay)
+    initWalletPay(stripe, {
+        amount:      0, // Card-saving — no charge
+        label:       'Add Payment Method',
+        containerId: 'wallet-pay-container',
+        dividerId:   'wallet-pay-divider',
+        onToken: function(paymentMethod) {
+            document.getElementById('stripe_pm_id').value = paymentMethod.id;
+            form.submit();
+        }
     });
 })();
 </script>

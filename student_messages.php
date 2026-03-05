@@ -16,7 +16,8 @@ if ((!isset($_SESSION['is_student']) && !(isset($_SESSION['user_type']) && $_SES
 }
 require_student_payment_clear();
 
-$studentId = $_SESSION['student_id'];
+$studentId = (int) $_SESSION['student_id'];
+$schoolId  = (int) ($_SESSION['school_id'] ?? 1);
 
 // ── AJAX: Mark message as read ──
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'mark_read' && $_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -73,18 +74,41 @@ foreach ($msgs as $m) {
     if ($m['inapp_status'] === 'delivered') $unreadCount++;
 }
 
+require_once __DIR__ . '/includes/conversation_helpers.php';
+$convUnread = get_unread_conversation_count($schoolId ?? ($_SESSION['school_id'] ?? 1), 'student', $studentId);
+
 include 'includes/student_header.php';
 ?>
 
-<div class="container mx-auto px-4 py-8">
+<div class="container mx-auto px-4 py-6">
+    <!-- Tab Navigation -->
+    <div class="mb-6">
+        <div class="flex border-b border-gray-200">
+            <a href="student_messages.php"
+               class="px-6 py-3 text-sm font-medium text-blue-600 border-b-2 border-blue-500 transition-colors relative">
+                Announcements
+                <?php if ($unreadCount > 0): ?>
+                    <span class="ml-1.5 inline-flex items-center justify-center px-2 py-0.5 text-xs font-bold text-white bg-red-500 rounded-full"><?= $unreadCount ?></span>
+                <?php endif; ?>
+            </a>
+            <a href="student_conversations.php"
+               class="px-6 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300 border-b-2 border-transparent transition-colors relative">
+                Conversations
+                <?php if ($convUnread > 0): ?>
+                    <span class="ml-1.5 inline-flex items-center justify-center px-2 py-0.5 text-xs font-bold text-red-600 bg-red-100 rounded-full"><?= $convUnread ?></span>
+                <?php endif; ?>
+            </a>
+        </div>
+    </div>
+
     <div class="mb-6 flex items-center justify-between">
         <div>
-            <h1 class="text-2xl font-bold text-gray-800">Messages</h1>
+            <h1 class="text-2xl font-bold text-gray-800">Announcements</h1>
             <p class="text-gray-600 mt-1">
                 <?php if ($unreadCount > 0): ?>
-                    You have <strong class="text-blue-600"><?= $unreadCount ?></strong> unread message<?= $unreadCount !== 1 ? 's' : '' ?>
+                    You have <strong class="text-blue-600"><?= $unreadCount ?></strong> unread announcement<?= $unreadCount !== 1 ? 's' : '' ?>
                 <?php else: ?>
-                    All messages read
+                    All announcements read
                 <?php endif; ?>
             </p>
         </div>

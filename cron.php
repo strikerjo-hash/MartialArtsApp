@@ -2,10 +2,13 @@
 /**
  * cron.php — Membership Renewal & Monthly Billing Processing
  *
- * Processes three things:
+ * Processes these tasks:
  *   1. Expire stale pending plan changes (> 7 days old)
  *   2. Monthly installment billing for plans with billing_frequency = 'monthly'
  *   3. Auto-renewing memberships that have reached their end date
+ *   4. Absence warning emails
+ *   5. Log retention cleanup
+ *   6. Auto-deactivate students with no payment in 30+ days (active membership + past due)
  *
  * Can be triggered two ways:
  *   1. Via cron job:   php /path/to/cron.php
@@ -77,6 +80,7 @@ $totalResults = [
     'total_processed' => 0,
 ];
 $totalAbsenceResults = ['checked' => 0, 'warned' => 0, 'emails_sent' => 0, 'emails_failed' => 0];
+$totalDeactivated = 0;
 
 foreach ($_schools as $_school) {
     $_SESSION['active_school_id'] = $_school['id'];
@@ -102,6 +106,21 @@ try {
 $totalExpiredChanges += $expiredChanges;
 
 // =====================================================================
+// STEP 1b: Auto-resume memberships whose hold period has ended
+// =====================================================================
+try {
+    $holdParams = [];
+    $holdSql = "UPDATE memberships SET status = 'active', hold_start_date = NULL, hold_end_date = NULL, hold_reason = NULL
+                WHERE status = 'on_hold' AND hold_end_date IS NOT NULL AND hold_end_date <= CURDATE()" . school_where();
+    school_param($holdParams);
+    $holdResumeStmt = $pdo->prepare($holdSql);
+    $holdResumeStmt->execute($holdParams);
+    $holdResumed = $holdResumeStmt->rowCount();
+} catch (PDOException $e) {
+    $holdResumed = 0;
+}
+
+// =====================================================================
 // STEP 2: Monthly installment billing
 // =====================================================================
 $monthlyResults = [
@@ -119,7 +138,7 @@ try {
     $params = [];
     $monthlyDueSql = "
         SELECT m.*, mp.name AS plan_name, mp.duration_months, mp.price,
-               mp.billing_frequency, mp.is_afterschool, mp.program_start_date, mp.program_end_date,
+               mp.billing_frequency, mp.is_afterschool, mp.is_camp, mp.program_start_date, mp.program_end_date,
                s.first_name, s.last_name, s.email
         FROM memberships m
         JOIN membership_plans mp ON m.plan_id = mp.id
@@ -149,13 +168,14 @@ $monthlyLogStmt = $pdo->prepare("
 ");
 
 foreach ($monthlyDue as $mm) {
-    // Skip afterschool plans that have passed their program end date
-    if (!empty($mm['is_afterschool']) && !empty($mm['program_end_date']) && date('Y-m-d') > $mm['program_end_date']) {
+    // Skip afterschool/camp plans that have passed their program end date
+    $isFixedTermPlan = (!empty($mm['is_afterschool']) || !empty($mm['is_camp']));
+    if ($isFixedTermPlan && !empty($mm['program_end_date']) && date('Y-m-d') > $mm['program_end_date']) {
         continue;
     }
 
-    // Afterschool plans: compute monthly rate from program dates
-    if (!empty($mm['is_afterschool']) && $mm['program_start_date'] && $mm['program_end_date']) {
+    // Fixed-term plans (afterschool/camp): compute monthly rate from program dates
+    if ($isFixedTermPlan && $mm['program_start_date'] && $mm['program_end_date']) {
         $programDays = max(1, (strtotime($mm['program_end_date']) - strtotime($mm['program_start_date'])) / 86400);
         $programMonths = max(1, round($programDays / 30.44, 4));
         $monthly_amount = round($mm['price'] / $programMonths, 2);
@@ -196,6 +216,20 @@ foreach ($monthlyDue as $mm) {
             $pdo->prepare("UPDATE students SET payment_lockout_override = 0 WHERE id = ?" . school_where())
                 ->execute([$mm['student_id'], current_school_id()]);
 
+            // Auto-reactivate if student was deactivated for payment reasons
+            try {
+                $reactivateCheck = $pdo->prepare("SELECT status, deactivation_reason FROM students WHERE id = ?" . school_where());
+                $reactivateCheck->execute([$mm['student_id'], current_school_id()]);
+                $stuRow = $reactivateCheck->fetch();
+                if ($stuRow && $stuRow['status'] === 'inactive' && $stuRow['deactivation_reason'] === 'payment') {
+                    $pdo->prepare("UPDATE students SET status = 'active', inactive_since = NULL, deactivation_reason = NULL WHERE id = ?" . school_where())
+                        ->execute([$mm['student_id'], current_school_id()]);
+                    if (function_exists('app_log')) {
+                        app_log('info', "Auto-reactivated student {$mm['student_id']} ({$mm['first_name']} {$mm['last_name']}) after successful payment", ['category' => 'reactivation']);
+                    }
+                }
+            } catch (\Throwable $e) { /* don't crash billing on reactivation error */ }
+
             // Record payment(s)
             try {
                 if ($amountCharged > 0) {
@@ -227,6 +261,17 @@ foreach ($monthlyDue as $mm) {
                     ]);
                 }
             } catch (PDOException $e) {}
+
+            // Send payment receipt email
+            send_payment_receipt_email([
+                'student_id'     => (int) $mm['student_id'],
+                'amount'         => $chargeTotal,
+                'payment_type'   => 'membership',
+                'description'    => 'Monthly installment ' . $installment_num . '/' . $mm['duration_months'] . ' for ' . $mm['plan_name'],
+                'receipt_number' => $receiptNum ?? '',
+                'transaction_id' => $chargeResult['transaction_id'] ?? null,
+                'payment_method' => $amountCharged > 0 ? 'credit_card' : 'account_credit',
+            ]);
 
             $monthlyLogStmt->execute([
                 current_school_id(), $mm['id'], $mm['student_id'], 'renewed',
@@ -263,17 +308,15 @@ foreach ($monthlyDue as $mm) {
             $pdo->prepare("UPDATE students SET payment_lockout_override = 0 WHERE id = ?" . school_where())
                 ->execute([$mm['student_id'], current_school_id()]);
 
-            // Send payment failure email notification
-            if (is_email_configured() && getSetting('payment_failure_email_enabled', '1') === '1' && !empty($mm['email'])) {
-                $studentName = htmlspecialchars(trim($mm['first_name'] . ' ' . $mm['last_name']));
-                $failBody = "<h2>Payment Failed</h2>"
-                    . "<p>Dear {$studentName},</p>"
-                    . "<p>We were unable to process your monthly payment of <strong>\$" . number_format($monthly_amount, 2)
-                    . "</strong> for your <strong>" . htmlspecialchars($mm['plan_name']) . "</strong> membership.</p>"
-                    . "<p>Please update your payment method as soon as possible to avoid any interruption to your membership.</p>"
-                    . "<p>If you have questions, please contact the studio.</p>"
-                    . "<p>Thank you,<br>" . htmlspecialchars(getSiteName()) . "</p>";
-                send_email($mm['email'], 'Payment Failed - Action Required', $failBody);
+            // Send payment failure email notification (requires email consent)
+            if (is_email_configured() && getSetting('payment_failure_email_enabled', '1') === '1' && !empty($mm['email']) && has_comm_consent((int)$mm['student_id'], 'email')) {
+                $tpl = get_notification_template('payment_failed_monthly', [
+                    '{student_name}' => htmlspecialchars(trim($mm['first_name'] . ' ' . $mm['last_name'])),
+                    '{amount}'       => '$' . number_format($monthly_amount, 2),
+                    '{plan_name}'    => htmlspecialchars($mm['plan_name']),
+                    '{school_name}'  => htmlspecialchars(getSiteName()),
+                ]);
+                send_email($mm['email'], $tpl['subject'], $tpl['body'], ['type' => 'student', 'id' => $mm['student_id']]);
             }
         }
     } else {
@@ -300,7 +343,8 @@ $dueSql = "
     WHERE m.status = 'active'
       AND m.end_date <= CURDATE()
       AND (mp.billing_frequency = 'upfront' OR mp.billing_frequency IS NULL)
-      AND (mp.is_afterschool = 0 OR mp.is_afterschool IS NULL)" . school_where('m') . "
+      AND (mp.is_afterschool = 0 OR mp.is_afterschool IS NULL)
+      AND (mp.is_camp = 0 OR mp.is_camp IS NULL)" . school_where('m') . "
     ORDER BY m.end_date ASC";
 school_param($params);
 $dueStmt = $pdo->prepare($dueSql);
@@ -371,6 +415,20 @@ foreach ($due as $m) {
             $pdo->prepare("UPDATE students SET payment_lockout_override = 0 WHERE id = ?" . school_where())
                 ->execute([$m['student_id'], current_school_id()]);
 
+            // Auto-reactivate if student was deactivated for payment reasons
+            try {
+                $reactivateCheck2 = $pdo->prepare("SELECT status, deactivation_reason FROM students WHERE id = ?" . school_where());
+                $reactivateCheck2->execute([$m['student_id'], current_school_id()]);
+                $stuRow2 = $reactivateCheck2->fetch();
+                if ($stuRow2 && $stuRow2['status'] === 'inactive' && $stuRow2['deactivation_reason'] === 'payment') {
+                    $pdo->prepare("UPDATE students SET status = 'active', inactive_since = NULL, deactivation_reason = NULL WHERE id = ?" . school_where())
+                        ->execute([$m['student_id'], current_school_id()]);
+                    if (function_exists('app_log')) {
+                        app_log('info', "Auto-reactivated student {$m['student_id']} after successful renewal payment", ['category' => 'reactivation']);
+                    }
+                }
+            } catch (\Throwable $e) { /* don't crash billing on reactivation error */ }
+
             // Record the card payment (if any)
             try {
                 if ($amountCharged > 0) {
@@ -407,6 +465,17 @@ foreach ($due as $m) {
                 // Payment record failed but membership was renewed
             }
 
+            // Send payment receipt email
+            send_payment_receipt_email([
+                'student_id'     => (int) $m['student_id'],
+                'amount'         => $renewalChargeTotal,
+                'payment_type'   => 'membership',
+                'description'    => 'Auto-renewal for ' . $m['plan_name'],
+                'receipt_number' => $receiptNum ?? '',
+                'transaction_id' => $chargeResult['transaction_id'] ?? null,
+                'payment_method' => $amountCharged > 0 ? 'credit_card' : 'account_credit',
+            ]);
+
             $renewNote = 'Auto-renewed via payment gateway ($' . number_format($m['price'], 2) . ' + $' . number_format($renewalServiceFee, 2) . ' fee).';
             if ($creditUsed > 0) {
                 $renewNote .= ' Credit used: $' . number_format($creditUsed, 2) . '.';
@@ -434,16 +503,15 @@ foreach ($due as $m) {
             ]);
             $results['payment_failed']++;
 
-            // Send renewal failure email notification
-            if (is_email_configured() && getSetting('payment_failure_email_enabled', '1') === '1' && !empty($m['email'])) {
-                $studentName = htmlspecialchars(trim($m['first_name'] . ' ' . $m['last_name']));
-                $failBody = "<h2>Membership Renewal Payment Failed</h2>"
-                    . "<p>Dear {$studentName},</p>"
-                    . "<p>We were unable to process your renewal payment of <strong>\$" . number_format((float)$renewalChargeTotal, 2)
-                    . "</strong> for your <strong>" . htmlspecialchars($m['plan_name']) . "</strong> membership.</p>"
-                    . "<p>Your membership has been set to expired. Please update your payment method and contact the studio to reactivate your membership.</p>"
-                    . "<p>Thank you,<br>" . htmlspecialchars(getSiteName()) . "</p>";
-                send_email($m['email'], 'Membership Expired - Payment Failed', $failBody);
+            // Send renewal failure email notification (requires email consent)
+            if (is_email_configured() && getSetting('payment_failure_email_enabled', '1') === '1' && !empty($m['email']) && has_comm_consent((int)$m['student_id'], 'email')) {
+                $tpl = get_notification_template('membership_expired', [
+                    '{student_name}' => htmlspecialchars(trim($m['first_name'] . ' ' . $m['last_name'])),
+                    '{amount}'       => '$' . number_format((float)$renewalChargeTotal, 2),
+                    '{plan_name}'    => htmlspecialchars($m['plan_name']),
+                    '{school_name}'  => htmlspecialchars(getSiteName()),
+                ]);
+                send_email($m['email'], $tpl['subject'], $tpl['body'], ['type' => 'student', 'id' => $m['student_id']]);
             }
         }
     } else {
@@ -467,6 +535,89 @@ try {
 } catch (\Exception $e) {
     // Don't let absence check errors crash the cron
 }
+
+// =====================================================================
+// STEP 4b: Auto-deactivate students with no payment in 30+ days
+// =====================================================================
+// Finds active students who have a membership but whose last completed
+// payment is older than 30 days (or who have never made a payment).
+// Sets status = 'inactive' and records inactive_since date.
+$deactivated = 0;
+try {
+    // First, capture which students will be deactivated (for cascade)
+    $selectParams = [];
+    $delinqSelectSql = "
+        SELECT s.id FROM students s
+        WHERE s.status = 'active'
+          AND s.id IN (
+              SELECT m.student_id
+              FROM memberships m
+              WHERE m.status = 'active'
+                AND m.payment_status IN ('declined', 'pending')
+                AND m.end_date >= CURDATE()
+                " . school_where('m') . "
+          )
+          AND s.id NOT IN (
+              SELECT p.student_id
+              FROM payments p
+              WHERE p.status = 'completed'
+                AND p.payment_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+          )
+          AND s.payment_lockout_override = 0" . school_where('s');
+    school_param($selectParams);
+    school_param($selectParams);
+    $selectStmt = $pdo->prepare($delinqSelectSql);
+    $selectStmt->execute($selectParams);
+    $delinquentIds = $selectStmt->fetchAll(PDO::FETCH_COLUMN);
+
+    if (!empty($delinquentIds)) {
+        $params = [];
+        $delinqSql = "
+            UPDATE students s
+            SET s.status = 'inactive', s.inactive_since = CURDATE()
+            WHERE s.status = 'active'
+              AND s.id IN (
+                  SELECT m.student_id
+                  FROM memberships m
+                  WHERE m.status = 'active'
+                    AND m.payment_status IN ('declined', 'pending')
+                    AND m.end_date >= CURDATE()
+                    " . school_where('m') . "
+              )
+              AND s.id NOT IN (
+                  SELECT p.student_id
+                  FROM payments p
+                  WHERE p.status = 'completed'
+                    AND p.payment_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+              )
+              AND s.payment_lockout_override = 0" . school_where('s');
+        school_param($params);
+        school_param($params); // second school_where for s alias
+        $stmt = $pdo->prepare($delinqSql);
+        $stmt->execute($params);
+        $deactivated = $stmt->rowCount();
+
+        // Run deactivation cascade for each affected student
+        foreach ($delinquentIds as $delinqId) {
+            deactivate_student_cascade((int)$delinqId, 'payment');
+        }
+    }
+
+    // Log each deactivated student for audit trail
+    if ($deactivated > 0 && function_exists('app_log')) {
+        app_log('info', "Auto-deactivated {$deactivated} student(s) with no payment in 30+ days", [
+            'category' => 'delinquency',
+            'school_id' => current_school_id(),
+            'count' => $deactivated,
+        ]);
+    }
+} catch (\Throwable $e) {
+    // Don't crash cron on delinquency check errors
+    if (function_exists('app_log')) {
+        app_log('error', 'Auto-deactivation failed: ' . $e->getMessage(), ['category' => 'delinquency']);
+    }
+}
+$totalDeactivated += $deactivated;
 
     // Accumulate per-school results into totals
     $totalMonthlyResults['billed']        += $monthlyResults['billed'];
@@ -538,6 +689,9 @@ if ($totalAbsenceResults['checked'] > 0 || $totalAbsenceResults['warned'] > 0) {
     $summary .= " Absence check: {$totalAbsenceResults['checked']} students checked, "
         . "{$totalAbsenceResults['warned']} warned, "
         . "{$totalAbsenceResults['emails_sent']} email(s) sent.";
+}
+if ($totalDeactivated > 0) {
+    $summary .= " Delinquency: {$totalDeactivated} student(s) marked inactive (no payment in 30+ days).";
 }
 $totalLogsCleaned = $logRetentionResults['audit_deleted'] + $logRetentionResults['app_deleted'];
 if ($totalLogsCleaned > 0) {

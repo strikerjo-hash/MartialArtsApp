@@ -32,9 +32,9 @@ $pmOwnerCol = $isStudentParent ? 'student_id' : 'parent_id';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_method'])) {
     verify_csrf();
     $methodId = (int)($_POST['method_id'] ?? 0);
-    $params = [$methodId, $parentId];
-    school_param($params);
-    $pdo->prepare("DELETE FROM {$pmTable} WHERE id = ? AND {$pmOwnerCol} = ?" . school_where())->execute($params);
+    // payment_methods / parent_payment_methods have no school_id — scoped by owner ID only
+    $pdo->prepare("DELETE FROM {$pmTable} WHERE id = ? AND {$pmOwnerCol} = ?")
+        ->execute([$methodId, $parentId]);
     $message = showAlert('Payment method removed.', 'success');
 }
 
@@ -42,12 +42,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_method'])) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_default'])) {
     verify_csrf();
     $methodId = (int)($_POST['method_id'] ?? 0);
-    $params = [$parentId];
-    school_param($params);
-    $pdo->prepare("UPDATE {$pmTable} SET is_default = 0 WHERE {$pmOwnerCol} = ?" . school_where())->execute($params);
-    $params = [$methodId, $parentId];
-    school_param($params);
-    $pdo->prepare("UPDATE {$pmTable} SET is_default = 1 WHERE id = ? AND {$pmOwnerCol} = ?" . school_where())->execute($params);
+    // payment_methods / parent_payment_methods have no school_id — scoped by owner ID only
+    $pdo->prepare("UPDATE {$pmTable} SET is_default = 0 WHERE {$pmOwnerCol} = ?")
+        ->execute([$parentId]);
+    $pdo->prepare("UPDATE {$pmTable} SET is_default = 1 WHERE id = ? AND {$pmOwnerCol} = ?")
+        ->execute([$methodId, $parentId]);
     $message = showAlert('Default payment method updated.', 'success');
 }
 
@@ -80,10 +79,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_method'])) {
 }
 
 // ---------- Load existing methods ----------
-$params = [$parentId];
-school_param($params);
-$methods = $pdo->prepare("SELECT * FROM {$pmTable} WHERE {$pmOwnerCol} = ?" . school_where() . " ORDER BY is_default DESC, created_at DESC");
-$methods->execute($params);
+// payment_methods / parent_payment_methods have no school_id — scoped by owner ID only
+$methods = $pdo->prepare("SELECT * FROM {$pmTable} WHERE {$pmOwnerCol} = ? ORDER BY is_default DESC, created_at DESC");
+$methods->execute([$parentId]);
 $methods = $methods->fetchAll();
 
 // Gateway info for frontend
@@ -195,6 +193,14 @@ include 'includes/parent_header.php';
                 </div>
                 <div class="p-6">
                     <?php if ($gw === 'stripe' && $gwReady && $stripePk): ?>
+                        <!-- Wallet Pay (Apple Pay / Google Pay) -->
+                        <div id="wallet-pay-container" style="display:none;"></div>
+                        <div id="wallet-pay-divider" style="display:none;" class="flex items-center gap-3 my-4">
+                            <div class="flex-1 h-px bg-gray-200"></div>
+                            <span class="text-sm text-gray-400">or pay with card</span>
+                            <div class="flex-1 h-px bg-gray-200"></div>
+                        </div>
+
                         <!-- Stripe Elements form -->
                         <form id="stripe-form" method="POST" class="space-y-4">
                             <?= csrf_field() ?>
@@ -343,8 +349,9 @@ include 'includes/parent_header.php';
 </div>
 
 <?php if ($gw === 'stripe' && $gwReady && $stripePk): ?>
-<!-- Stripe.js -->
+<!-- Stripe.js + Wallet Pay -->
 <script src="https://js.stripe.com/v3/"></script>
+<script src="assets/js/wallet-pay.js"></script>
 <script>
 (function() {
     const stripe = Stripe('<?= htmlspecialchars($stripePk) ?>');
@@ -401,6 +408,18 @@ include 'includes/parent_header.php';
         // Set the token and submit the form
         document.getElementById('stripe_pm_id').value = paymentMethod.id;
         form.submit();
+    });
+
+    // Initialize Wallet Pay (Apple Pay / Google Pay)
+    initWalletPay(stripe, {
+        amount:      0,
+        label:       'Add Payment Method',
+        containerId: 'wallet-pay-container',
+        dividerId:   'wallet-pay-divider',
+        onToken: function(paymentMethod) {
+            document.getElementById('stripe_pm_id').value = paymentMethod.id;
+            form.submit();
+        }
     });
 })();
 </script>

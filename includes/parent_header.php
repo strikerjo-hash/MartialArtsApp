@@ -39,7 +39,7 @@ $_isChildPage = in_array(basename($_SERVER['PHP_SELF']), [
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?php echo htmlspecialchars($siteName); ?> - Family Portal</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="assets/css/tailwind.css">
     <style>
         .active-nav { background-color: <?php echo $theme['primary']; ?>; color: white; }
         .nav-link { color: <?php echo $theme['primary']; ?>; }
@@ -96,16 +96,16 @@ $_isChildPage = in_array(basename($_SERVER['PHP_SELF']), [
 </head>
 <body class="bg-gray-50">
     <header class="bg-white shadow-sm" style="border-bottom: 3px solid <?php echo $theme['primary']; ?>;">
-        <div class="container mx-auto px-4 py-4 flex justify-between items-center">
-            <div class="flex items-center gap-3">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center gap-2 min-w-0">
+            <div class="flex items-center gap-2 min-w-0 flex-1">
                 <?php if ($logoPath): ?>
-                    <img src="<?php echo htmlspecialchars($logoPath); ?>" alt="Logo" class="max-h-9 object-contain">
+                    <img src="<?php echo htmlspecialchars($logoPath); ?>" alt="Logo" class="max-h-9 object-contain flex-shrink-0">
                 <?php else: ?>
-                    <span class="text-2xl">🥋</span>
+                    <span class="text-2xl flex-shrink-0">🥋</span>
                 <?php endif; ?>
-                <div>
-                    <h1 class="text-xl font-bold text-gray-800"><?php echo htmlspecialchars($siteName); ?></h1>
-                    <p class="text-sm text-gray-600">Family Portal &mdash; <?php echo htmlspecialchars($parentDisplayName); ?></p>
+                <div class="min-w-0">
+                    <h1 class="text-base sm:text-xl font-bold text-gray-800 truncate"><?php echo htmlspecialchars($siteName); ?></h1>
+                    <p class="text-xs sm:text-sm text-gray-600 truncate">Family Portal &mdash; <?php echo htmlspecialchars($parentDisplayName); ?></p>
                 </div>
             </div>
 
@@ -139,7 +139,7 @@ $_isChildPage = in_array(basename($_SERVER['PHP_SELF']), [
                 <a href="parent_payment.php" class="nav-link <?php echo basename($_SERVER['PHP_SELF']) == 'parent_payment.php' ? 'nav-link-active' : ''; ?>">
                     Payment
                 </a>
-                <a href="parent_transactions.php" class="nav-link <?php echo basename($_SERVER['PHP_SELF']) == 'parent_transactions.php' ? 'nav-link-active' : ''; ?>">
+                <a href="parent_transactions.php" class="nav-link <?php echo in_array(basename($_SERVER['PHP_SELF']), ['parent_transactions.php', 'parent_tax_statement.php']) ? 'nav-link-active' : ''; ?>">
                     Transactions
                 </a>
                 <a href="parent_profile.php" class="nav-link <?php echo basename($_SERVER['PHP_SELF']) == 'parent_profile.php' ? 'nav-link-active' : ''; ?>">
@@ -150,28 +150,37 @@ $_isChildPage = in_array(basename($_SERVER['PHP_SELF']), [
                 </a>
             </nav>
 
-            <a href="parent_logout.php" class="text-white px-4 py-2 rounded-lg text-sm transition-colors" style="background-color: <?php echo $theme['primary']; ?>;" onmouseover="this.style.backgroundColor='<?php echo $primaryHover; ?>'" onmouseout="this.style.backgroundColor='<?php echo $theme['primary']; ?>'">
+            <?php if (!empty($_SESSION['_impersonating'])): ?>
+            <a href="admin_impersonate.php?stop=1" class="flex-shrink-0 text-white px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm transition-colors whitespace-nowrap bg-red-600 hover:bg-red-700">
+                &larr; Return to Admin
+            </a>
+            <?php else: ?>
+            <a href="parent_logout.php" class="flex-shrink-0 text-white px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm transition-colors whitespace-nowrap" style="background-color: <?php echo $theme['primary']; ?>;" onmouseover="this.style.backgroundColor='<?php echo $primaryHover; ?>'" onmouseout="this.style.backgroundColor='<?php echo $theme['primary']; ?>'">
                 Logout
             </a>
+            <?php endif; ?>
         </div>
 
         <!-- Mobile Navigation -->
         <nav class="md:hidden border-t border-gray-200 px-4 py-2">
-            <div class="flex space-x-2 mb-1">
-                <a href="parent_portal.php" class="flex-1 text-center py-2 text-sm <?php echo basename($_SERVER['PHP_SELF']) == 'parent_portal.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+            <div class="flex space-x-1 overflow-x-auto -mx-4 px-4 mb-1" style="-webkit-overflow-scrolling: touch;">
+                <a href="parent_portal.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'parent_portal.php' ? 'mobile-active' : 'text-gray-700'; ?>">
                     Dashboard
                 </a>
-                <a href="parent_events.php" class="flex-1 text-center py-2 text-sm <?php echo in_array(basename($_SERVER['PHP_SELF']), ['parent_events.php', 'parent_event_payment.php']) ? 'mobile-active' : 'text-gray-700'; ?>">
+                <a href="parent_events.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo in_array(basename($_SERVER['PHP_SELF']), ['parent_events.php', 'parent_event_payment.php']) ? 'mobile-active' : 'text-gray-700'; ?>">
                     Events
                 </a>
-                <a href="parent_payment.php" class="flex-1 text-center py-2 text-sm <?php echo basename($_SERVER['PHP_SELF']) == 'parent_payment.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+                <a href="parent_payment.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'parent_payment.php' ? 'mobile-active' : 'text-gray-700'; ?>">
                     Payment
                 </a>
-                <a href="parent_transactions.php" class="flex-1 text-center py-2 text-sm <?php echo basename($_SERVER['PHP_SELF']) == 'parent_transactions.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+                <a href="parent_transactions.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo in_array(basename($_SERVER['PHP_SELF']), ['parent_transactions.php', 'parent_tax_statement.php']) ? 'mobile-active' : 'text-gray-700'; ?>">
                     Transactions
                 </a>
-                <a href="parent_profile.php" class="flex-1 text-center py-2 text-sm <?php echo basename($_SERVER['PHP_SELF']) == 'parent_profile.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+                <a href="parent_profile.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'parent_profile.php' ? 'mobile-active' : 'text-gray-700'; ?>">
                     Profile
+                </a>
+                <a href="parent_training_wizard.php" class="flex-shrink-0 text-center py-2 px-2.5 text-xs rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'parent_training_wizard.php' ? 'mobile-active' : 'text-gray-700'; ?>">
+                    Guide
                 </a>
             </div>
             <?php if (!empty($_navChildren)): ?>
@@ -186,3 +195,13 @@ $_isChildPage = in_array(basename($_SERVER['PHP_SELF']), [
             <?php endif; ?>
         </nav>
     </header>
+<?php if (!empty($_SESSION['_impersonating'])): ?>
+    <div style="background:linear-gradient(90deg,#dc2626,#b91c1c);color:#fff;padding:10px 16px;text-align:center;font-size:14px;font-weight:600;position:sticky;top:0;z-index:9999;box-shadow:0 2px 8px rgba(0,0,0,.2);">
+        &#128065; Viewing as <strong><?php echo htmlspecialchars($_SESSION['_impersonating_name'] ?? 'Parent'); ?></strong>
+        <span style="margin-left:8px;font-weight:400;opacity:.9;">(Admin Preview Mode)</span>
+        <a href="admin_impersonate.php?stop=1"
+           style="margin-left:16px;background:#fff;color:#dc2626;padding:5px 18px;border-radius:6px;text-decoration:none;font-weight:600;font-size:13px;display:inline-block;">
+            &larr; Return to Admin
+        </a>
+    </div>
+<?php endif; ?>

@@ -177,21 +177,20 @@ function check_and_send_absence_warnings(): array
         $emailSent = 0;
         $sentAt = null;
 
-        // Send warning email
-        if (is_email_configured() && !empty($s['email'])) {
+        // Send warning email (requires email consent)
+        if (is_email_configured() && !empty($s['email']) && has_comm_consent((int)$s['id'], 'email')) {
             $name = trim($s['first_name'] . ' ' . $s['last_name']);
             $siteName = function_exists('getSiteName') ? getSiteName() : 'Our Studio';
-            $body = "<h2>Attendance Warning</h2>"
-                . "<p>Dear " . htmlspecialchars($name) . ",</p>"
-                . "<p>You have accumulated <strong>{$netAbsences}</strong> unexcused absence(s) "
-                . "during the current belt testing cycle "
-                . "(" . date('M j, Y', strtotime($cycle['start'])) . " &ndash; " . date('M j, Y', strtotime($cycle['end'])) . ").</p>"
-                . "<p>Our attendance policy requires no more than <strong>" . ($threshold - 1) . "</strong> absences per cycle. "
-                . "If you miss any more classes you will need to make up classes to maintain your testing eligibility.</p>"
-                . "<p>Please contact the studio to schedule make-up sessions as soon as possible.</p>"
-                . "<p>Thank you,<br>" . htmlspecialchars($siteName) . "</p>";
+            $tpl = get_notification_template('attendance_warning', [
+                '{student_name}'  => htmlspecialchars($name),
+                '{absence_count}' => (string) $netAbsences,
+                '{cycle_start}'   => date('M j, Y', strtotime($cycle['start'])),
+                '{cycle_end}'     => date('M j, Y', strtotime($cycle['end'])),
+                '{max_absences}'  => (string) ($threshold - 1),
+                '{school_name}'   => htmlspecialchars($siteName),
+            ]);
 
-            $emailResult = send_email($s['email'], 'Attendance Warning - Make-Up Classes Required', $body);
+            $emailResult = send_email($s['email'], $tpl['subject'], $tpl['body'], ['type' => 'student', 'id' => $s['id']]);
             if ($emailResult['success']) {
                 $emailSent = 1;
                 $sentAt = date('Y-m-d H:i:s');

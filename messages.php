@@ -12,6 +12,7 @@
 
 require_once 'config.php';
 requireLogin();
+if (!canView('messages.php')) { accessDenied(); }
 require_once __DIR__ . '/includes/messaging.php';
 
 // ── AJAX: Preview recipient count ──
@@ -163,8 +164,36 @@ include 'includes/header.php';
 <div class="container mx-auto px-4 py-8">
     <?php echo $message; ?>
 
+    <!-- Tab Navigation: Broadcasts | Conversations -->
+    <?php
+    $_msgConvUnread = 0;
+    try {
+        require_once __DIR__ . '/includes/conversation_helpers.php';
+        $_msgConvUnread = get_unread_conversation_count(
+            (int)(current_school_id() ?: ($_SESSION['school_id'] ?? 1)),
+            'admin',
+            (int)($_SESSION['user_id'] ?? 0)
+        );
+    } catch (\Throwable $e) {}
+    ?>
+    <div class="mb-6">
+        <div class="flex border-b border-gray-200">
+            <a href="messages.php"
+               class="px-6 py-3 text-sm font-medium text-blue-600 border-b-2 border-blue-500 transition-colors">
+                Broadcasts
+            </a>
+            <a href="admin_conversations.php"
+               class="px-6 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300 border-b-2 border-transparent transition-colors relative">
+                Conversations
+                <?php if ($_msgConvUnread > 0): ?>
+                    <span class="ml-1.5 inline-flex items-center justify-center px-2 py-0.5 text-xs font-bold text-white bg-red-500 rounded-full"><?= $_msgConvUnread ?></span>
+                <?php endif; ?>
+            </a>
+        </div>
+    </div>
+
     <div class="flex justify-between items-center mb-6">
-        <h1 class="text-3xl font-bold text-gray-800">Messages</h1>
+        <h1 class="text-3xl font-bold text-gray-800">Broadcast Messages</h1>
     </div>
 
     <!-- ============================================================= -->

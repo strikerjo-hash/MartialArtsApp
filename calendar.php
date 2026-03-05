@@ -8,6 +8,7 @@
 
 require_once 'config.php';
 requireLogin();
+if (!canView('calendar.php')) { accessDenied(); }
 
 // Determine which month to display
 $year  = isset($_GET['year'])  ? (int) $_GET['year']  : (int) date('Y');

@@ -535,6 +535,26 @@ img {
     background: var(--primary-color);
 }
 
+/* Verification Code Input */
+.verification-code-input {
+    font-size: 2rem !important;
+    letter-spacing: .75rem;
+    text-align: center;
+    font-weight: 700;
+    font-family: 'Courier New', Courier, monospace;
+    padding: .75rem 1rem !important;
+}
+
+/* Form Hint */
+.form-hint {
+    font-size: .85rem;
+    color: var(--text-color);
+    opacity: .7;
+    margin-bottom: 1.25rem;
+    line-height: 1.5;
+    text-align: center;
+}
+
 /* Waiver Box */
 .waiver-section {
     margin-top: .5rem;

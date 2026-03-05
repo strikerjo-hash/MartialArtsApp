@@ -24,3 +24,6 @@ libs/php-svg-lib/
 libs/html5-php/
 composer.lock
 composer.phar
+
+# Tailwind standalone CLI binary (40MB — download via build script)
+tailwindcss.exe

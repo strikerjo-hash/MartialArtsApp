@@ -219,17 +219,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 } else {
                     $newFilename = 'belt_doc_' . time() . '_' . mt_rand(1000, 9999) . '.' . $fileExt;
                     if (move_uploaded_file($_FILES['document_file']['tmp_name'], $beltDocDir . $newFilename)) {
+                        $firstBeltId = null;
+                        $beltIds = isset($_POST['resource_belt_ids']) ? (array)$_POST['resource_belt_ids'] : [];
+                        if (empty($beltIds) && !empty($_POST['resource_belt_id'])) {
+                            $beltIds = [$_POST['resource_belt_id']];
+                        }
+                        $firstBeltId = $beltIds[0] ?? null;
+                        $styleId = $_POST['resource_style_id'];
+
                         $stmt = $pdo->prepare("INSERT INTO belt_resources (belt_id, style_id, resource_type, title, description, file_path, sort_order)
                                                VALUES (?, ?, 'document', ?, ?, ?, ?)");
                         $stmt->execute([
-                            $_POST['resource_belt_id'],
-                            $_POST['resource_style_id'],
+                            $firstBeltId,
+                            $styleId,
                             sanitizeInput($_POST['resource_title']),
                             sanitizeInput($_POST['resource_description'] ?? ''),
                             $beltDocDir . $newFilename,
                             (int)($_POST['resource_sort_order'] ?? 0)
                         ]);
-                        $message = showAlert('Document uploaded successfully!', 'success');
+                        $resourceId = $pdo->lastInsertId();
+
+                        // Insert into junction table for each selected belt
+                        $jStmt = $pdo->prepare("INSERT IGNORE INTO belt_resource_belts (resource_id, belt_id, style_id) VALUES (?, ?, ?)");
+                        foreach ($beltIds as $bid) {
+                            $jStmt->execute([$resourceId, (int)$bid, (int)$styleId]);
+                        }
+
+                        $beltCount = count($beltIds);
+                        $message = showAlert("Document uploaded and assigned to {$beltCount} belt(s)!", 'success');
                     } else {
                         $message = showAlert('File upload failed.', 'error');
                     }
@@ -244,17 +261,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             if (empty($videoUrl)) {
                 $message = showAlert('Please provide a video URL.', 'error');
             } else {
+                $beltIds = isset($_POST['resource_belt_ids']) ? (array)$_POST['resource_belt_ids'] : [];
+                if (empty($beltIds) && !empty($_POST['resource_belt_id'])) {
+                    $beltIds = [$_POST['resource_belt_id']];
+                }
+                $firstBeltId = $beltIds[0] ?? null;
+                $styleId = $_POST['resource_style_id'];
+
                 $stmt = $pdo->prepare("INSERT INTO belt_resources (belt_id, style_id, resource_type, title, description, video_url, sort_order)
                                        VALUES (?, ?, 'video', ?, ?, ?, ?)");
                 $stmt->execute([
-                    $_POST['resource_belt_id'],
-                    $_POST['resource_style_id'],
+                    $firstBeltId,
+                    $styleId,
                     sanitizeInput($_POST['resource_title']),
                     sanitizeInput($_POST['resource_description'] ?? ''),
                     $videoUrl,
                     (int)($_POST['resource_sort_order'] ?? 0)
                 ]);
-                $message = showAlert('Video link added successfully!', 'success');
+                $resourceId = $pdo->lastInsertId();
+
+                // Insert into junction table for each selected belt
+                $jStmt = $pdo->prepare("INSERT IGNORE INTO belt_resource_belts (resource_id, belt_id, style_id) VALUES (?, ?, ?)");
+                foreach ($beltIds as $bid) {
+                    $jStmt->execute([$resourceId, (int)$bid, (int)$styleId]);
+                }
+
+                $beltCount = count($beltIds);
+                $message = showAlert("Video link added and assigned to {$beltCount} belt(s)!", 'success');
             }
             break;
 
@@ -267,6 +300,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 if ($resource['resource_type'] === 'document' && $resource['file_path'] && file_exists($resource['file_path'])) {
                     @unlink($resource['file_path']);
                 }
+                $pdo->prepare("DELETE FROM belt_resource_belts WHERE resource_id = ?")->execute([$_POST['resource_id']]);
                 $pdo->prepare("DELETE FROM belt_resources WHERE id = ?")->execute([$_POST['resource_id']]);
                 $message = showAlert('Resource deleted successfully!', 'success');
             }
@@ -291,21 +325,32 @@ foreach ($styles as $style) {
     $allBeltsByStyle[$style['id']] = $belts->fetchAll();
 }
 
-// Pre-load resource counts per belt
+// Pre-load resource counts per belt (via junction table)
 $resourceCounts = [];
 try {
-    $rcStmt = $pdo->query("SELECT belt_id, COUNT(*) as cnt FROM belt_resources GROUP BY belt_id");
+    $rcStmt = $pdo->query("SELECT brb.belt_id, COUNT(DISTINCT brb.resource_id) as cnt FROM belt_resource_belts brb GROUP BY brb.belt_id");
     foreach ($rcStmt->fetchAll() as $rc) {
         $resourceCounts[$rc['belt_id']] = (int)$rc['cnt'];
     }
 } catch (\PDOException $e) {}
 
-// Pre-load all resources grouped by belt for JS
+// Pre-load all resources grouped by belt for JS (via junction table)
 $allResourcesByBelt = [];
 try {
-    $resStmt = $pdo->query("SELECT * FROM belt_resources ORDER BY sort_order ASC, created_at DESC LIMIT 1000");
+    $resStmt = $pdo->query("
+        SELECT br.*, GROUP_CONCAT(DISTINCT brb.belt_id ORDER BY brb.belt_id) as belt_ids
+        FROM belt_resources br
+        LEFT JOIN belt_resource_belts brb ON br.id = brb.resource_id
+        GROUP BY br.id
+        ORDER BY br.sort_order ASC, br.created_at DESC
+        LIMIT 1000
+    ");
     foreach ($resStmt->fetchAll() as $res) {
-        $allResourcesByBelt[$res['belt_id']][] = $res;
+        // Each resource may belong to multiple belts — add it to each belt's list
+        $beltIdList = $res['belt_ids'] ? explode(',', $res['belt_ids']) : ($res['belt_id'] ? [$res['belt_id']] : []);
+        foreach ($beltIdList as $bid) {
+            $allResourcesByBelt[(int)$bid][] = $res;
+        }
     }
 } catch (\PDOException $e) {}
 
@@ -846,12 +891,7 @@ include 'includes/header.php';
             <input type="hidden" name="action" value="promote">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Student *</label>
-                <select name="student_id" required class="w-full px-3 py-2 border border-gray-300 rounded-lg">
-                    <option value="">Select student...</option>
-                    <?php foreach ($students as $student): ?>
-                        <option value="<?php echo $student['id']; ?>"><?php echo $student['first_name'] . ' ' . $student['last_name']; ?></option>
-                    <?php endforeach; ?>
-                </select>
+                <div id="belt-student-picker"></div>
             </div>
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Martial Art Style *</label>
@@ -1092,7 +1132,6 @@ include 'includes/header.php';
             <form method="POST" enctype="multipart/form-data" class="space-y-3">
                 <?= csrf_field() ?>
                 <input type="hidden" name="action" value="add_document">
-                <input type="hidden" name="resource_belt_id" id="doc_belt_id">
                 <input type="hidden" name="resource_style_id" id="doc_style_id">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div>
@@ -1104,6 +1143,13 @@ include 'includes/header.php';
                         <input type="file" name="document_file" required accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif"
                                class="w-full text-sm text-gray-600 file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:text-sm file:bg-purple-50 file:text-purple-700">
                     </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Assign to Belts *</label>
+                    <div id="doc_belt_checkboxes" class="flex flex-wrap gap-2 p-2 border border-gray-200 rounded-lg bg-gray-50 max-h-40 overflow-y-auto">
+                        <span class="text-gray-400 text-sm">Loading belts...</span>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1">Select one or more belts to assign this document to.</p>
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
@@ -1124,7 +1170,6 @@ include 'includes/header.php';
             <form method="POST" class="space-y-3">
                 <?= csrf_field() ?>
                 <input type="hidden" name="action" value="add_video">
-                <input type="hidden" name="resource_belt_id" id="vid_belt_id">
                 <input type="hidden" name="resource_style_id" id="vid_style_id">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div>
@@ -1135,6 +1180,13 @@ include 'includes/header.php';
                         <label class="block text-sm font-medium text-gray-700 mb-1">Video URL *</label>
                         <input type="url" name="video_url" required placeholder="https://youtube.com/watch?v=..." class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
                     </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Assign to Belts *</label>
+                    <div id="vid_belt_checkboxes" class="flex flex-wrap gap-2 p-2 border border-gray-200 rounded-lg bg-gray-50 max-h-40 overflow-y-auto">
+                        <span class="text-gray-400 text-sm">Loading belts...</span>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1">Select one or more belts to assign this video to.</p>
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
@@ -1260,10 +1312,32 @@ function confirmDelete(msg) {
 
 function openResources(beltId, styleId, beltName, styleName) {
     document.getElementById('res_belt_label').textContent = beltName + ' (' + styleName + ')';
-    document.getElementById('doc_belt_id').value = beltId;
     document.getElementById('doc_style_id').value = styleId;
-    document.getElementById('vid_belt_id').value = beltId;
     document.getElementById('vid_style_id').value = styleId;
+
+    // Build belt checkboxes for document and video forms
+    const styleBelts = beltsByStyle[styleId] || [];
+    ['doc_belt_checkboxes', 'vid_belt_checkboxes'].forEach(containerId => {
+        const container = document.getElementById(containerId);
+        const prefix = containerId.startsWith('doc') ? 'doc' : 'vid';
+        if (styleBelts.length === 0) {
+            container.innerHTML = '<span class="text-gray-400 text-sm">No belts in this style.</span>';
+            return;
+        }
+        let cbHtml = '';
+        styleBelts.forEach(belt => {
+            const checked = (parseInt(belt.id) === parseInt(beltId)) ? 'checked' : '';
+            cbHtml += `<label class="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-200 bg-white text-sm cursor-pointer hover:bg-purple-50">
+                <input type="checkbox" name="resource_belt_ids[]" value="${belt.id}" ${checked} class="rounded text-purple-600">
+                <span>${escapeHtml(belt.name)}</span>
+            </label>`;
+        });
+        container.innerHTML = cbHtml;
+    });
+
+    // Build a belt lookup for showing belt names on resources
+    const beltLookup = {};
+    styleBelts.forEach(b => { beltLookup[b.id] = b.name; });
 
     // Build resources list
     const list = document.getElementById('resources_list');
@@ -1275,18 +1349,30 @@ function openResources(beltId, styleId, beltName, styleName) {
         let html = '<div class="space-y-2">';
         resources.forEach(res => {
             const icon = res.resource_type === 'document' ? '&#128196;' : '&#127909;';
-            const typeLabel = res.resource_type === 'document' ? 'Document' : 'Video';
             const typeBadge = res.resource_type === 'document'
                 ? '<span class="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">Document</span>'
                 : '<span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">Video</span>';
+
+            // Show all assigned belt badges
+            let beltBadges = '';
+            if (res.belt_ids) {
+                const ids = String(res.belt_ids).split(',');
+                if (ids.length > 1) {
+                    beltBadges = ids.map(id => {
+                        const name = beltLookup[id] || ('Belt #' + id);
+                        return '<span class="text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full">' + escapeHtml(name) + '</span>';
+                    }).join(' ');
+                }
+            }
 
             html += `<div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
                 <div class="flex items-center gap-3">
                     <span class="text-xl">${icon}</span>
                     <div>
                         <p class="font-medium text-gray-800 text-sm">${escapeHtml(res.title)}</p>
-                        <div class="flex items-center gap-2 mt-0.5">
+                        <div class="flex items-center gap-2 mt-0.5 flex-wrap">
                             ${typeBadge}
+                            ${beltBadges}
                             ${res.description ? '<span class="text-xs text-gray-500">' + escapeHtml(res.description) + '</span>' : ''}
                         </div>
                     </div>
@@ -1380,6 +1466,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 bbInput.value = '';
             }
         }
+    });
+});
+</script>
+
+<script src="assets/js/student-picker.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    StudentPicker.init({
+        container: '#belt-student-picker',
+        inputName: 'student_id',
+        placeholder: 'Type student name to search\u2026',
+        data: <?= json_encode(array_map(function($s) { return ['id' => $s['id'], 'name' => trim($s['first_name'] . ' ' . $s['last_name'])]; }, $students)) ?>
     });
 });
 </script>

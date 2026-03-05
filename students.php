@@ -2,6 +2,7 @@
 require_once 'config.php';
 require_once __DIR__ . '/includes/parent_auth.php';
 requireLogin();
+if (!canView('students.php')) { accessDenied(); }
 
 $message = '';
 
@@ -55,6 +56,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // Change student account status (active / inactive / suspended)
+    if (isset($_POST['change_status'])) {
+        $statusStudentId = (int)($_POST['student_id'] ?? 0);
+        $newStatus = $_POST['new_status'] ?? '';
+        if ($statusStudentId && in_array($newStatus, ['active', 'inactive', 'suspended'])) {
+            $statusParams = [$newStatus, $statusStudentId];
+            school_param($statusParams);
+            $pdo->prepare("UPDATE students SET status = ? WHERE id = ?" . school_where())
+                ->execute($statusParams);
+
+            // Also update inactive_since and run cascade
+            if ($newStatus === 'inactive' || $newStatus === 'suspended') {
+                $inactParams = [date('Y-m-d'), $statusStudentId];
+                school_param($inactParams);
+                $pdo->prepare("UPDATE students SET inactive_since = ? WHERE id = ?" . school_where())
+                    ->execute($inactParams);
+                deactivate_student_cascade($statusStudentId, 'manual');
+            } elseif ($newStatus === 'active') {
+                $actParams = [$statusStudentId];
+                school_param($actParams);
+                $pdo->prepare("UPDATE students SET inactive_since = NULL WHERE id = ?" . school_where())
+                    ->execute($actParams);
+                reactivate_student($statusStudentId);
+            }
+
+            $statusLabel = ucfirst($newStatus);
+            $message = showAlert("Student account marked as {$statusLabel}.", 'success');
+        }
+    }
+
     if (isset($_POST['action'])) {
         switch ($_POST['action']) {
             case 'add':
@@ -98,6 +129,23 @@ $status_filter = $_GET['status'] ?? '';
 $membership_filter = $_GET['membership'] ?? '';
 $payment_filter = $_GET['payment'] ?? '';
 $activity_filter = $_GET['activity'] ?? '';
+$sort_col = $_GET['sort'] ?? '';
+$sort_dir = strtolower($_GET['order'] ?? '') === 'asc' ? 'ASC' : 'DESC';
+
+// Allowed sort columns (whitelist to prevent SQL injection)
+$allowed_sorts = [
+    'name'        => 's.last_name',
+    'email'       => 's.email',
+    'belt'        => 'belt_info.belt_name',
+    'join_date'   => 's.join_date',
+    'status'      => 's.status',
+    'attended'    => 'last_att.last_attendance_date',
+    'membership'  => 'm.membership_status',
+    'plan'        => 'm.plan_name',
+    'payment'     => 'm.payment_status',
+    'activity'    => 's.activity_status',
+    'created'     => 's.created_at',
+];
 
 $query = "
     SELECT s.*,
@@ -164,7 +212,28 @@ if ($activity_filter) {
     $query .= " AND s.activity_status = :activity";
 }
 
-$query .= " ORDER BY s.created_at DESC LIMIT 500";
+// Sort — use whitelisted column or default to created_at DESC
+if ($sort_col && isset($allowed_sorts[$sort_col])) {
+    $sqlSort = $allowed_sorts[$sort_col];
+    // For name sort, add first_name as secondary sort
+    if ($sort_col === 'name') {
+        $query .= " ORDER BY {$sqlSort} {$sort_dir}, s.first_name {$sort_dir}";
+    } elseif (in_array($sort_col, ['attended', 'belt', 'membership', 'plan', 'payment'])) {
+        // NULL values: push to end regardless of sort direction
+        $nullDir = $sort_dir === 'ASC' ? 'LAST' : 'FIRST';
+        // MySQL doesn't have NULLS FIRST/LAST — use IS NULL trick
+        if ($sort_dir === 'ASC') {
+            $query .= " ORDER BY {$sqlSort} IS NULL ASC, {$sqlSort} {$sort_dir}";
+        } else {
+            $query .= " ORDER BY {$sqlSort} IS NULL ASC, {$sqlSort} {$sort_dir}";
+        }
+    } else {
+        $query .= " ORDER BY {$sqlSort} {$sort_dir}";
+    }
+} else {
+    $query .= " ORDER BY s.created_at DESC";
+}
+$query .= " LIMIT 500";
 
 $stmt = $pdo->prepare($query);
 if ($search) {
@@ -183,15 +252,28 @@ $stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT);
 $stmt->execute();
 $students = $stmt->fetchAll();
 
-// Build lookup of students who have parent capabilities (is_parent=1)
+// Build lookup of students who have parent capabilities (is_parent=1) with child count
 $studentsWithParent = [];
+$parentChildCounts = [];
 try {
     $spParams = [];
     school_param($spParams);
-    $spStmt = $pdo->prepare("SELECT id, username FROM students WHERE is_parent = 1" . school_where());
+    $spStmt = $pdo->prepare("
+        SELECT s.id, s.username, COUNT(ps.student_id) as child_count,
+               GROUP_CONCAT(CONCAT(cs.first_name, ' ', cs.last_name) ORDER BY cs.first_name SEPARATOR ', ') as children_names
+        FROM students s
+        LEFT JOIN parent_students ps ON ps.parent_id = s.id
+        LEFT JOIN students cs ON cs.id = ps.student_id
+        WHERE s.is_parent = 1" . school_where("s") . "
+        GROUP BY s.id, s.username
+    ");
     $spStmt->execute($spParams);
     foreach ($spStmt->fetchAll() as $sp) {
         $studentsWithParent[$sp['id']] = $sp['username'];
+        $parentChildCounts[$sp['id']] = [
+            'count' => (int)$sp['child_count'],
+            'names' => $sp['children_names'] ?? ''
+        ];
     }
 } catch (\PDOException $e) {}
 
@@ -244,6 +326,9 @@ include 'includes/header.php';
                 <option value="inactive" <?php echo $activity_filter === 'inactive' ? 'selected' : ''; ?>>Inactive (Not Attending)</option>
             </select>
 
+            <input type="hidden" name="sort" value="<?= htmlspecialchars($sort_col) ?>">
+            <input type="hidden" name="order" value="<?= htmlspecialchars(strtolower($sort_dir)) ?>">
+
             <button type="submit" class="bg-gray-600 hover:bg-gray-700 text-white px-6 py-2 rounded-lg">
                 Filter
             </button>
@@ -254,18 +339,55 @@ include 'includes/header.php';
     </div>
     
     <!-- Students Table -->
+    <?php
+    // Build sort URL helper — preserves all current filters
+    function sortUrl(string $col, string $currentSort, string $currentDir): string {
+        $params = $_GET;
+        $params['sort'] = $col;
+        // Toggle direction if already sorting by this column
+        $params['order'] = ($currentSort === $col && $currentDir === 'ASC') ? 'desc' : 'asc';
+        return 'students.php?' . http_build_query($params);
+    }
+    function sortIcon(string $col, string $currentSort, string $currentDir): string {
+        if ($currentSort !== $col) {
+            return '<svg class="w-3 h-3 ml-1 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/></svg>';
+        }
+        if ($currentDir === 'ASC') {
+            return '<svg class="w-3 h-3 ml-1 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/></svg>';
+        }
+        return '<svg class="w-3 h-3 ml-1 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>';
+    }
+    $thClass = 'px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50';
+    $thSortClass = $thClass . ' cursor-pointer hover:bg-gray-100 hover:text-gray-700 select-none transition-colors';
+    ?>
     <div class="bg-white rounded-lg shadow overflow-hidden">
+        <div class="overflow-auto" style="max-height: calc(100vh - 280px); min-height: 300px;">
         <table class="min-w-full">
-            <thead class="bg-gray-50">
+            <thead class="bg-gray-50 sticky top-0 z-10 shadow-sm">
                 <tr>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Contact</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Current Belt</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Join Date</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Attended</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Membership</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                    <th class="<?= $thSortClass ?>">
+                        <a href="<?= sortUrl('name', $sort_col, $sort_dir) ?>" class="flex items-center gap-0.5 no-underline text-inherit">Name <?= sortIcon('name', $sort_col, $sort_dir) ?></a>
+                    </th>
+                    <th class="<?= $thClass ?>">User ID</th>
+                    <th class="<?= $thSortClass ?>">
+                        <a href="<?= sortUrl('email', $sort_col, $sort_dir) ?>" class="flex items-center gap-0.5 no-underline text-inherit">Contact <?= sortIcon('email', $sort_col, $sort_dir) ?></a>
+                    </th>
+                    <th class="<?= $thSortClass ?>">
+                        <a href="<?= sortUrl('belt', $sort_col, $sort_dir) ?>" class="flex items-center gap-0.5 no-underline text-inherit">Current Belt <?= sortIcon('belt', $sort_col, $sort_dir) ?></a>
+                    </th>
+                    <th class="<?= $thSortClass ?>">
+                        <a href="<?= sortUrl('join_date', $sort_col, $sort_dir) ?>" class="flex items-center gap-0.5 no-underline text-inherit">Join Date <?= sortIcon('join_date', $sort_col, $sort_dir) ?></a>
+                    </th>
+                    <th class="<?= $thSortClass ?>">
+                        <a href="<?= sortUrl('status', $sort_col, $sort_dir) ?>" class="flex items-center gap-0.5 no-underline text-inherit">Status <?= sortIcon('status', $sort_col, $sort_dir) ?></a>
+                    </th>
+                    <th class="<?= $thSortClass ?>">
+                        <a href="<?= sortUrl('attended', $sort_col, $sort_dir) ?>" class="flex items-center gap-0.5 no-underline text-inherit">Last Attended <?= sortIcon('attended', $sort_col, $sort_dir) ?></a>
+                    </th>
+                    <th class="<?= $thSortClass ?>">
+                        <a href="<?= sortUrl('membership', $sort_col, $sort_dir) ?>" class="flex items-center gap-0.5 no-underline text-inherit">Membership <?= sortIcon('membership', $sort_col, $sort_dir) ?></a>
+                    </th>
+                    <th class="<?= $thClass ?>">Actions</th>
                 </tr>
             </thead>
             <tbody class="bg-white divide-y divide-gray-200">
@@ -281,9 +403,16 @@ include 'includes/header.php';
                                 <div class="ml-4">
                                     <div class="text-sm font-medium text-gray-900">
                                         <?php echo $student['first_name'] . ' ' . $student['last_name']; ?>
+                                        <?php if (isset($studentsWithParent[$student['id']])): ?>
+                                            <span class="ml-1 px-1.5 py-0.5 text-xs font-medium rounded bg-purple-100 text-purple-700">Parent</span>
+                                        <?php endif; ?>
                                     </div>
                                 </div>
                             </div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm text-gray-600 font-mono"><?= htmlspecialchars($student['username'] ?? '') ?></div>
+                            <div class="text-xs text-gray-400">#<?= $student['id'] ?></div>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap">
                             <div class="text-sm text-gray-900"><?php echo $student['email'] ?: 'N/A'; ?></div>
@@ -380,46 +509,87 @@ include 'includes/header.php';
                             <?php endif; ?>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                            <a href="student_detail.php?id=<?php echo $student['id']; ?>"
-                               class="text-blue-600 hover:text-blue-900 mr-3">View</a>
-                            <a href="student_edit.php?id=<?php echo $student['id']; ?>"
-                               class="text-green-600 hover:text-green-900 mr-3">Edit</a>
-                            <?php if (isset($studentsWithParent[$student['id']])): ?>
-                                <span class="text-green-600 mr-3 cursor-default" title="Parent account enabled">✓ Parent</span>
-                            <?php else: ?>
-                                <form method="POST" class="inline" onsubmit="return confirm('Enable parent capabilities for this student?')">
-                                    <?= csrf_field() ?>
-                                    <input type="hidden" name="promote_to_parent" value="1">
-                                    <input type="hidden" name="student_id" value="<?php echo $student['id']; ?>">
-                                    <button type="submit" class="text-purple-600 hover:text-purple-900 mr-3" title="Enable parent capabilities">Make Parent</button>
-                                </form>
-                            <?php endif; ?>
-                            <?php
-                            $isActivityInactive = ($student['activity_status'] ?? 'active') === 'inactive';
-                            $toggleLabel = $isActivityInactive ? 'Mark Active' : 'Mark Inactive';
-                            $toggleColor = $isActivityInactive ? 'text-green-600 hover:text-green-900' : 'text-yellow-600 hover:text-yellow-900';
-                            $toggleConfirm = $isActivityInactive
-                                ? 'Mark this student as actively attending?'
-                                : 'Mark this student as inactive (not attending)?';
-                            ?>
-                            <form method="POST" class="inline" onsubmit="return confirm('<?php echo $toggleConfirm; ?>')">
-                                <?= csrf_field() ?>
-                                <input type="hidden" name="toggle_activity" value="1">
-                                <input type="hidden" name="student_id" value="<?php echo $student['id']; ?>">
-                                <button type="submit" class="<?php echo $toggleColor; ?> mr-3" title="<?php echo $toggleLabel; ?>"><?php echo $toggleLabel; ?></button>
-                            </form>
-                            <form method="POST" class="inline" onsubmit="return confirmDelete('Are you sure you want to delete this student?')">
-                                <?= csrf_field() ?>
-                                <input type="hidden" name="action" value="delete">
-                                <input type="hidden" name="student_id" value="<?php echo $student['id']; ?>">
-                                <button type="submit" class="text-red-600 hover:text-red-900">Delete</button>
-                            </form>
+                            <div class="flex items-center gap-2">
+                                <a href="student_detail.php?id=<?php echo $student['id']; ?>"
+                                   class="text-blue-600 hover:text-blue-900">View</a>
+                                <a href="student_edit.php?id=<?php echo $student['id']; ?>"
+                                   class="text-green-600 hover:text-green-900">Edit</a>
+                                <!-- More Actions Dropdown -->
+                                <div class="relative" x-data="{ open: false }">
+                                    <button onclick="toggleStudentMenu(this)" class="text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded px-1.5 py-0.5 text-xs font-bold" title="More actions">&#8943;</button>
+                                    <div class="student-action-menu hidden absolute right-0 mt-1 w-44 bg-white rounded-lg shadow-lg border z-30 py-1">
+                                        <?php
+                                        $isActivityInactive = ($student['activity_status'] ?? 'active') === 'inactive';
+                                        $toggleLabel = $isActivityInactive ? 'Mark Attending' : 'Mark Not Attending';
+                                        $toggleConfirm = $isActivityInactive
+                                            ? 'Mark this student as actively attending?'
+                                            : 'Mark this student as inactive (not attending)?';
+                                        ?>
+                                        <form method="POST" onsubmit="return confirm('<?php echo $toggleConfirm; ?>')">
+                                            <?= csrf_field() ?>
+                                            <input type="hidden" name="toggle_activity" value="1">
+                                            <input type="hidden" name="student_id" value="<?php echo $student['id']; ?>">
+                                            <button type="submit" class="w-full text-left px-3 py-1.5 text-sm <?= $isActivityInactive ? 'text-green-700 hover:bg-green-50' : 'text-yellow-700 hover:bg-yellow-50' ?>"><?= $toggleLabel ?></button>
+                                        </form>
+                                        <?php if (isset($studentsWithParent[$student['id']])): ?>
+                                            <?php $childInfo = $parentChildCounts[$student['id']] ?? ['count' => 0, 'names' => '']; ?>
+                                            <a href="student_detail.php?id=<?= $student['id'] ?>#linked-children"
+                                               class="block w-full text-left px-3 py-1.5 text-sm text-purple-700 hover:bg-purple-50"
+                                               title="<?= htmlspecialchars($childInfo['names'] ?: 'No students linked yet') ?>">
+                                                👶 View Linked Students (<?= $childInfo['count'] ?>)
+                                            </a>
+                                        <?php else: ?>
+                                        <form method="POST" onsubmit="return confirm('Enable parent capabilities for this student?')">
+                                            <?= csrf_field() ?>
+                                            <input type="hidden" name="promote_to_parent" value="1">
+                                            <input type="hidden" name="student_id" value="<?php echo $student['id']; ?>">
+                                            <button type="submit" class="w-full text-left px-3 py-1.5 text-sm text-purple-700 hover:bg-purple-50">Make Parent</button>
+                                        </form>
+                                        <?php endif; ?>
+                                        <div class="border-t my-1"></div>
+                                        <?php
+                                        $currentStatus = $student['status'] ?? 'active';
+                                        if ($currentStatus === 'active'): ?>
+                                            <form method="POST" onsubmit="return confirm('Deactivate this student account? They will not be able to log in.')">
+                                                <?= csrf_field() ?>
+                                                <input type="hidden" name="change_status" value="1">
+                                                <input type="hidden" name="student_id" value="<?= $student['id'] ?>">
+                                                <input type="hidden" name="new_status" value="inactive">
+                                                <button type="submit" class="w-full text-left px-3 py-1.5 text-sm text-orange-700 hover:bg-orange-50">Deactivate Account</button>
+                                            </form>
+                                            <form method="POST" onsubmit="return confirm('Suspend this student account?')">
+                                                <?= csrf_field() ?>
+                                                <input type="hidden" name="change_status" value="1">
+                                                <input type="hidden" name="student_id" value="<?= $student['id'] ?>">
+                                                <input type="hidden" name="new_status" value="suspended">
+                                                <button type="submit" class="w-full text-left px-3 py-1.5 text-sm text-red-700 hover:bg-red-50">Suspend Account</button>
+                                            </form>
+                                        <?php elseif ($currentStatus === 'inactive' || $currentStatus === 'suspended'): ?>
+                                            <form method="POST" onsubmit="return confirm('Reactivate this student account?')">
+                                                <?= csrf_field() ?>
+                                                <input type="hidden" name="change_status" value="1">
+                                                <input type="hidden" name="student_id" value="<?= $student['id'] ?>">
+                                                <input type="hidden" name="new_status" value="active">
+                                                <button type="submit" class="w-full text-left px-3 py-1.5 text-sm text-green-700 hover:bg-green-50">Reactivate Account</button>
+                                            </form>
+                                        <?php endif; ?>
+                                        <div class="border-t my-1"></div>
+                                        <form method="POST" onsubmit="return confirmDelete('Are you sure you want to delete this student? This cannot be undone.')">
+                                            <?= csrf_field() ?>
+                                            <input type="hidden" name="action" value="delete">
+                                            <input type="hidden" name="student_id" value="<?php echo $student['id']; ?>">
+                                            <button type="submit" class="w-full text-left px-3 py-1.5 text-sm text-red-700 hover:bg-red-50">Delete Student</button>
+                                        </form>
+                                    </div>
+                                </div>
+                            </div>
                         </td>
                     </tr>
                 <?php endforeach; ?>
             </tbody>
         </table>
-        
+        </div><!-- /overflow-x-auto -->
+
         <?php if (empty($students)): ?>
             <div class="text-center py-12 text-gray-500">
                 <p class="text-lg">No students found</p>
@@ -537,5 +707,25 @@ include 'includes/header.php';
         </form>
     </div>
 </div>
+
+<script>
+// Student action dropdown menu
+function toggleStudentMenu(btn) {
+    // Close all other open menus first
+    document.querySelectorAll('.student-action-menu').forEach(function(m) {
+        if (m !== btn.nextElementSibling) m.classList.add('hidden');
+    });
+    btn.nextElementSibling.classList.toggle('hidden');
+}
+
+// Close dropdown menus when clicking outside
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.relative')) {
+        document.querySelectorAll('.student-action-menu').forEach(function(m) {
+            m.classList.add('hidden');
+        });
+    }
+});
+</script>
 
 <?php include 'includes/footer.php'; ?>

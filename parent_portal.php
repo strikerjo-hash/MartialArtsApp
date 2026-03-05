@@ -20,14 +20,24 @@ $pdo = get_db();
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf();
 
-    // Link existing student by username or email
+    // Link existing student — accepts student_id (from picker) or student_identifier (legacy text input)
     if (isset($_POST['link_student'])) {
+        $studentId = (int)($_POST['student_id'] ?? 0);
         $identifier = trim($_POST['student_identifier'] ?? '');
         $relationship = $_POST['relationship'] ?? 'parent';
 
-        if ($identifier === '') {
-            $message = showAlert('Please enter a student username or email.', 'error');
-        } else {
+        $foundStudent = null;
+
+        if ($studentId > 0) {
+            // Picker mode: student_id submitted directly
+            $findParams = [$studentId];
+            $findSql = "SELECT id, first_name, last_name FROM students WHERE id = ? AND status = 'active'" . school_where();
+            school_param($findParams);
+            $findStmt = $pdo->prepare($findSql);
+            $findStmt->execute($findParams);
+            $foundStudent = $findStmt->fetch();
+        } elseif ($identifier !== '') {
+            // Legacy text input: search by username or email
             $findSql = "SELECT id, first_name, last_name FROM students WHERE (username = :u1 OR email = :u2) AND status = 'active'";
             if (!is_viewing_all_schools()) {
                 $findSql .= ' AND school_id = :school_id';
@@ -41,17 +51,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $findStmt->execute();
             $foundStudent = $findStmt->fetch();
+        }
 
-            if (!$foundStudent) {
-                $message = showAlert('No active student found with that username or email.', 'error');
+        if (!$foundStudent) {
+            $message = showAlert('No active student found. Please select a student from the list.', 'error');
+        } else {
+            $linked = link_student_to_parent($parentId, $foundStudent['id'], $relationship);
+            if ($linked) {
+                $childName = htmlspecialchars($foundStudent['first_name'] . ' ' . $foundStudent['last_name']);
+                $message = showAlert('Successfully linked ' . $childName . ' to your account! Your payment methods have been shared with their account.', 'success');
             } else {
-                $linked = link_student_to_parent($parentId, $foundStudent['id'], $relationship);
-                if ($linked) {
-                    $childName = htmlspecialchars($foundStudent['first_name'] . ' ' . $foundStudent['last_name']);
-                    $message = showAlert('Successfully linked ' . $childName . ' to your account! Your payment methods have been shared with their account.', 'success');
-                } else {
-                    $message = showAlert('This student is already linked to your account.', 'error');
-                }
+                $message = showAlert('This student is already linked to your account.', 'error');
             }
         }
     }
@@ -68,6 +78,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // Fetch children
 $children = get_parent_children($parentId);
+
+// Fetch pending plan changes for all children (keyed by student_id)
+$childPendingPlans = [];
+$childIds_temp = array_column($children, 'id');
+if (!empty($childIds_temp)) {
+    try {
+        $ppPh = implode(',', array_fill(0, count($childIds_temp), '?'));
+        $ppParams = $childIds_temp;
+        $ppSql = "SELECT pc.student_id, mp.name as plan_name, mp.price as plan_price, mp.duration_months,
+                         mp.billing_frequency, pc.requested_by, u.full_name as requested_by_name, pc.expires_at, pc.id as change_id,
+                         pc.proration_type, pc.proration_amount, pc.proration_credit, pc.notes
+                  FROM pending_plan_changes pc
+                  JOIN membership_plans mp ON pc.new_plan_id = mp.id
+                  LEFT JOIN users u ON pc.requested_by = u.id
+                  WHERE pc.student_id IN ({$ppPh}) AND pc.status = 'pending' AND pc.expires_at > NOW()" . school_where('pc') . "
+                  ORDER BY pc.created_at DESC";
+        school_param($ppParams);
+        $ppStmt = $pdo->prepare($ppSql);
+        $ppStmt->execute($ppParams);
+        foreach ($ppStmt->fetchAll() as $pp) {
+            if (!isset($childPendingPlans[(int)$pp['student_id']])) {
+                $childPendingPlans[(int)$pp['student_id']] = $pp;
+            }
+        }
+    } catch (PDOException $e) {}
+}
 
 // Fetch upcoming events for all children
 $childIds = array_column($children, 'id');
@@ -164,6 +200,27 @@ include 'includes/parent_header.php';
                                         <span>Valid until: <strong><?= formatDate($child['membership_end']) ?></strong></span>
                                     </div>
                                 <?php endif; ?>
+                                <?php if (isset($childPendingPlans[(int)$child['id']])): ?>
+                                    <?php $cpPending = $childPendingPlans[(int)$child['id']]; ?>
+                                    <div class="flex items-center text-sm text-orange-600">
+                                        <span class="mr-2">&#128232;</span>
+                                        <span>Change proposed: <strong><?= htmlspecialchars($cpPending['plan_name']) ?></strong>
+                                            <span class="inline-block ml-1 px-1.5 py-0.5 text-xs font-semibold rounded-full bg-orange-100 text-orange-700">Pending</span>
+                                        </span>
+                                    </div>
+                                <?php endif; ?>
+                            <?php elseif (isset($childPendingPlans[(int)$child['id']])): ?>
+                                <?php $cpPending = $childPendingPlans[(int)$child['id']]; ?>
+                                <div class="flex items-center text-sm text-orange-600">
+                                    <span class="mr-2">📋</span>
+                                    <span>Proposed Plan: <strong><?= htmlspecialchars($cpPending['plan_name']) ?></strong>
+                                        <span class="inline-block ml-1 px-1.5 py-0.5 text-xs font-semibold rounded-full bg-orange-100 text-orange-700">Pending Approval</span>
+                                    </span>
+                                </div>
+                                <div class="flex items-center text-sm text-gray-500">
+                                    <span class="mr-2">&#128336;</span>
+                                    <span>Expires: <?= date('M j, Y', strtotime($cpPending['expires_at'])) ?></span>
+                                </div>
                             <?php else: ?>
                                 <div class="flex items-center text-sm text-gray-500">
                                     <span class="mr-2">📋</span>
@@ -281,7 +338,7 @@ include 'includes/parent_header.php';
         </div>
 
         <p class="text-sm text-gray-600 mb-4">
-            Enter your child's student username or email to link them to your family account.
+            Search for your child's name to link them to your family account.
             The student must already have an account registered at the studio.
         </p>
 
@@ -290,10 +347,8 @@ include 'includes/parent_header.php';
             <input type="hidden" name="link_student" value="1">
 
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Student Username or Email *</label>
-                <input type="text" name="student_identifier" required
-                       placeholder="e.g., john_doe or john@email.com"
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Find Student *</label>
+                <div id="parent-link-picker"></div>
             </div>
 
             <div>
@@ -320,4 +375,21 @@ include 'includes/parent_header.php';
     </div>
 </div>
 
+<script src="assets/js/student-picker.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    StudentPicker.init({
+        container: '#parent-link-picker',
+        inputName: 'student_id',
+        placeholder: 'Type student name to search\u2026',
+        ajaxUrl: 'ajax_student_search.php',
+        ajaxParams: { context: 'unlinked:<?= $parentId ?>' },
+        renderOption: function(s) {
+            var html = '<div class="sp-option-name">' + s.name + '</div>';
+            if (s.email) html += '<div class="sp-option-sub">' + s.email + '</div>';
+            return html;
+        }
+    });
+});
+</script>
 <?php include 'includes/student_footer.php'; ?>

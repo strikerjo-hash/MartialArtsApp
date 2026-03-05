@@ -63,6 +63,12 @@ if (function_exists('getSetting')) {
 // Check if waiver was previously accepted
 $waiver_already_accepted = !empty($student['waiver_accepted_at']);
 
+// Communication consent
+require_once __DIR__ . '/includes/messaging.php';
+$comm_consent_text    = get_comm_consent_text();
+$comm_consent_version = get_comm_consent_version();
+$comm_consent_already_given = !empty($student['comm_consent_email']) || !empty($student['comm_consent_sms']);
+
 // ---------- Handle form submission ----------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf();
@@ -173,6 +179,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
+        // Communication consent (email / SMS)
+        if (!$comm_consent_already_given) {
+            $consentNow = date('Y-m-d H:i:s');
+            $consentIp  = $_SERVER['REMOTE_ADDR'] ?? '';
+            if (!empty($_POST['comm_consent_email']) && in_array('comm_consent_email', $colNames, true)) {
+                $updateFields[] = 'comm_consent_email = ?';    $updateParams[] = 1;
+                $updateFields[] = 'comm_consent_email_at = ?'; $updateParams[] = $consentNow;
+            }
+            if (!empty($_POST['comm_consent_sms']) && in_array('comm_consent_sms', $colNames, true)) {
+                $updateFields[] = 'comm_consent_sms = ?';    $updateParams[] = 1;
+                $updateFields[] = 'comm_consent_sms_at = ?'; $updateParams[] = $consentNow;
+            }
+            if ((!empty($_POST['comm_consent_email']) || !empty($_POST['comm_consent_sms'])) && in_array('comm_consent_version', $colNames, true)) {
+                $updateFields[] = 'comm_consent_version = ?'; $updateParams[] = $comm_consent_version;
+                $updateFields[] = 'comm_consent_ip = ?';      $updateParams[] = $consentIp;
+            }
+        }
+
         // Clear incomplete flag
         $updateFields[] = 'registration_incomplete = 0';
 
@@ -206,7 +230,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <?php endif; ?>
     <style><?= theme_css_vars() ?></style>
     <link rel="stylesheet" href="assets/css/style.css">
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="assets/css/tailwind.css">
     <style>
         .form-card { max-width: 640px; margin: 0 auto; }
         .field-group { margin-bottom: 1.25rem; }
@@ -399,6 +423,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                <?= !empty($_POST['waiver_agree']) ? 'checked' : '' ?>>
                         <span class="text-sm font-medium text-gray-700">I have read and agree to the waiver above <span class="required-star">*</span></span>
                     </label>
+                </div>
+                <?php endif; ?>
+
+                <!-- Communication Consent (if not previously given) -->
+                <?php if (!$comm_consent_already_given): ?>
+                <div class="border-t border-gray-200 p-6">
+                    <div class="flex items-center gap-3 mb-4">
+                        <div class="w-8 h-8 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center font-bold text-sm">
+                            <?php
+                                $stepNum = 1;
+                                if (!empty($_SESSION['must_change_password'])) $stepNum++;
+                                if ($waiver_content !== '' && !$waiver_already_accepted) $stepNum++;
+                                $stepNum++;
+                                echo $stepNum;
+                            ?>
+                        </div>
+                        <h2 class="text-lg font-bold text-gray-800">Digital Communication Consent</h2>
+                        <span class="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full font-medium">Optional</span>
+                    </div>
+
+                    <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 max-h-48 overflow-y-auto mb-4 text-sm text-gray-700 leading-relaxed">
+                        <?= nl2br(htmlspecialchars($comm_consent_text)) ?>
+                    </div>
+
+                    <div class="space-y-2">
+                        <label class="flex items-center gap-3 cursor-pointer">
+                            <input type="checkbox" name="comm_consent_email" value="1" class="w-5 h-5 text-indigo-600 rounded"
+                                   <?= !empty($_POST['comm_consent_email']) ? 'checked' : '' ?>>
+                            <span class="text-sm font-medium text-gray-700">I consent to receive <strong>email</strong> communications</span>
+                        </label>
+                        <label class="flex items-center gap-3 cursor-pointer">
+                            <input type="checkbox" name="comm_consent_sms" value="1" class="w-5 h-5 text-indigo-600 rounded"
+                                   <?= !empty($_POST['comm_consent_sms']) ? 'checked' : '' ?>>
+                            <span class="text-sm font-medium text-gray-700">I consent to receive <strong>SMS/text message</strong> communications</span>
+                        </label>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">Consent is optional and not required for enrollment. You can update your preferences at any time from your profile page.</p>
                 </div>
                 <?php endif; ?>
 

@@ -79,7 +79,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $_POST['status'],
                     $_POST['room_id'] ?: null
                 ]);
-                $message = showAlert('Class created successfully!', 'success');
+
+                // Copy to other schools if requested
+                $copyResults = '';
+                if (!empty($_POST['copy_to_schools']) && is_super_admin()) {
+                    require_once __DIR__ . '/includes/program_copy_helpers.php';
+                    $newClassId = (int)$pdo->lastInsertId();
+                    $copyCount = 0;
+                    foreach ($_POST['copy_to_schools'] as $targetSchoolId) {
+                        if (copy_class_to_school($newClassId, (int)$targetSchoolId)) {
+                            $copyCount++;
+                        }
+                    }
+                    if ($copyCount > 0) {
+                        $copyResults = " Also copied to $copyCount other school(s).";
+                    }
+                }
+
+                $message = showAlert('Class created successfully!' . $copyResults, 'success');
                 break;
 
             case 'enroll':
@@ -159,6 +176,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             case 'unenroll':
                 $pdo->prepare("UPDATE class_enrollments SET status = 'dropped' WHERE id = ?")->execute([$_POST['enrollment_id']]);
                 $message = showAlert('Student unenrolled successfully!', 'success');
+                break;
+
+            case 'bulk_unenroll':
+                $enrollmentIds = $_POST['enrollment_ids'] ?? [];
+                if (!empty($enrollmentIds) && is_array($enrollmentIds)) {
+                    $placeholders = implode(',', array_fill(0, count($enrollmentIds), '?'));
+                    $params = array_map('intval', $enrollmentIds);
+                    // Only unenroll enrollments belonging to this school
+                    $params[] = current_school_id();
+                    $stmt = $pdo->prepare("
+                        UPDATE class_enrollments SET status = 'dropped'
+                        WHERE id IN ({$placeholders}) AND school_id = ?
+                    ");
+                    $stmt->execute($params);
+                    $count = $stmt->rowCount();
+                    $message = showAlert("{$count} student(s) unenrolled successfully!", 'success');
+                } else {
+                    $message = showAlert('No students selected for unenrollment.', 'error');
+                }
                 break;
 
             case 'edit':
@@ -254,9 +290,9 @@ $classes = $stmt->fetchAll();
 // Get martial arts styles
 $styles = $pdo->query("SELECT * FROM martial_arts_styles ORDER BY name")->fetchAll();
 
-// Get instructors
+// Get instructors (via user_schools junction for multi-school support)
 $instructorParams = [];
-$instructorStmt = $pdo->prepare("SELECT id, full_name FROM users WHERE role IN ('admin', 'super_admin', 'instructor')" . school_where() . " ORDER BY full_name");
+$instructorStmt = $pdo->prepare("SELECT DISTINCT u.id, u.full_name FROM users u INNER JOIN user_schools us ON u.id = us.user_id WHERE u.role IN ('admin', 'super_admin', 'instructor')" . school_where('us') . " ORDER BY u.full_name");
 school_param($instructorParams);
 $instructorStmt->execute($instructorParams);
 $instructors = $instructorStmt->fetchAll();
@@ -824,6 +860,25 @@ include 'includes/header.php';
                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"></textarea>
             </div>
 
+            <?php if (is_super_admin() && count(get_all_schools()) > 1): ?>
+            <div class="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="enableCopyClass" onchange="document.getElementById('copyClassSchools').classList.toggle('hidden', !this.checked)" class="w-4 h-4 text-blue-600 rounded">
+                    <span class="text-sm font-medium text-gray-700">Also create in other schools</span>
+                </label>
+                <div id="copyClassSchools" class="hidden mt-2 ml-6 space-y-1">
+                    <p class="text-xs text-gray-500 mb-1">Instructor and Room will be cleared in copied classes.</p>
+                    <?php foreach (get_all_schools() as $_cs): ?>
+                        <?php if ((int)$_cs['id'] !== (int)current_school_id()): ?>
+                        <label class="flex items-center gap-2 text-sm text-gray-600">
+                            <input type="checkbox" name="copy_to_schools[]" value="<?= $_cs['id'] ?>" class="rounded">
+                            <?= htmlspecialchars($_cs['name']) ?>
+                        </label>
+                        <?php endif; ?>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+            <?php endif; ?>
             <div class="flex justify-end space-x-3 pt-4">
                 <button type="button" onclick="document.getElementById('addModal').classList.add('hidden')"
                         class="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">
@@ -989,19 +1044,7 @@ include 'includes/header.php';
 
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Select Student *</label>
-                <select name="student_id" id="enroll_student_select" required onchange="checkEnrollmentEligibility(this.value)"
-                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
-                    <option value="">Choose a student...</option>
-                    <?php foreach ($students as $student): ?>
-                        <option value="<?php echo $student['id']; ?>"
-                                data-has-membership="<?php echo $student['mem_status'] === 'active' ? '1' : '0'; ?>"
-                                data-classes-per-week="<?php echo $student['classes_per_week'] ?? 0; ?>"
-                                data-current-enrollments="<?php echo $student['current_enrollments']; ?>">
-                            <?php echo $student['first_name'] . ' ' . $student['last_name']; ?>
-                            <?php if ($student['mem_status'] !== 'active'): ?> (No Membership)<?php endif; ?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
+                <div id="enroll-student-picker"></div>
             </div>
 
             <!-- Enrollment eligibility warning -->
@@ -1042,12 +1085,30 @@ include 'includes/header.php';
             <button onclick="document.getElementById('rosterModal').classList.add('hidden')"
                     class="text-gray-600 hover:text-gray-800">&#10005;</button>
         </div>
+
+        <!-- Bulk unenroll toolbar (hidden until checkboxes are checked) -->
+        <div id="bulkUnenrollBar" class="hidden mb-3 p-3 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between">
+            <span class="text-sm text-red-700"><strong id="bulkCount">0</strong> student(s) selected</span>
+            <button type="button" onclick="bulkUnenroll()"
+                    class="bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-1.5 rounded-lg font-medium">
+                Unenroll Selected
+            </button>
+        </div>
+
         <div id="rosterContent" class="space-y-2">
             <p class="text-gray-500 text-center py-8">Loading...</p>
         </div>
     </div>
 </div>
 
+<!-- Hidden form for bulk unenroll submission -->
+<form id="bulkUnenrollForm" method="POST" class="hidden">
+    <input type="hidden" name="csrf_token" value="<?= csrf_token() ?>">
+    <input type="hidden" name="action" value="bulk_unenroll">
+    <div id="bulkUnenrollInputs"></div>
+</form>
+
+<script src="assets/js/student-picker.js"></script>
 <script>
 const csrfToken = <?php echo json_encode(csrf_token()); ?>;
 
@@ -1058,14 +1119,45 @@ const studentData = <?php echo json_encode(array_map(function($s) {
         'name' => $s['first_name'] . ' ' . $s['last_name'],
         'has_membership' => $s['mem_status'] === 'active',
         'classes_per_week' => (int)($s['classes_per_week'] ?? 0),
-        'current_enrollments' => (int)$s['current_enrollments']
+        'current_enrollments' => (int)$s['current_enrollments'],
+        'email' => $s['email'] ?? ''
     ];
 }, $students)); ?>;
+
+var enrollPicker = null;
+
+document.addEventListener('DOMContentLoaded', function() {
+    enrollPicker = StudentPicker.init({
+        container: '#enroll-student-picker',
+        inputName: 'student_id',
+        placeholder: 'Type student name to search\u2026',
+        data: studentData.map(function(s) {
+            return {
+                id: s.id,
+                name: s.name,
+                email: s.email || '',
+                extra: s.has_membership ? '' : 'No Membership'
+            };
+        }),
+        onSelect: function(student) {
+            if (student) {
+                checkEnrollmentEligibility(student.id);
+            } else {
+                document.getElementById('enrollmentWarning').classList.add('hidden');
+            }
+        },
+        renderOption: function(s) {
+            var html = '<div class="sp-option-name">' + s.name + '</div>';
+            if (s.extra) html += '<div class="sp-option-sub" style="color:#ef4444">' + s.extra + '</div>';
+            return html;
+        }
+    });
+});
 
 function enrollStudent(classId, className) {
     document.getElementById('enroll_class_id').value = classId;
     document.getElementById('enroll_class_name').textContent = className;
-    document.getElementById('enroll_student_select').value = '';
+    if (enrollPicker) enrollPicker.clear();
     document.getElementById('enrollmentWarning').classList.add('hidden');
     document.getElementById('enrollModal').classList.remove('hidden');
 }
@@ -1132,18 +1224,28 @@ function viewEnrolled(classId, className) {
     document.getElementById('roster_class_name').textContent = className;
     const content = document.getElementById('rosterContent');
     const enrolled = rosterData[classId] || [];
+    document.getElementById('bulkUnenrollBar').classList.add('hidden');
 
     if (enrolled.length === 0) {
         content.innerHTML = '<p class="text-gray-500 text-center py-8">No students enrolled in this class.</p>';
     } else {
-        let html = '<div class="space-y-2">';
+        let html = '<div class="flex items-center justify-between mb-2 px-1">'
+            + '<label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">'
+            + '<input type="checkbox" id="selectAllRoster" onchange="toggleSelectAll(this)" class="rounded border-gray-300 text-blue-600">'
+            + '<span>Select All (' + enrolled.length + ')</span>'
+            + '</label>'
+            + '<span class="text-xs text-gray-400">' + enrolled.length + ' enrolled</span>'
+            + '</div>';
+        html += '<div class="space-y-2 max-h-96 overflow-y-auto">';
         enrolled.forEach(function(s) {
-            html += '<div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">'
-                + '<div>'
+            html += '<div class="flex items-center p-3 bg-gray-50 rounded-lg">'
+                + '<input type="checkbox" class="roster-cb rounded border-gray-300 text-blue-600 mr-3" '
+                + 'value="' + s.enrollment_id + '" onchange="updateBulkBar()">'
+                + '<div class="flex-1 min-w-0">'
                 + '<span class="font-medium text-gray-900">' + s.first_name + ' ' + s.last_name + '</span>'
                 + '<span class="text-sm text-gray-500 ml-2">' + (s.email || '') + '</span>'
                 + '</div>'
-                + '<div class="flex items-center space-x-3">'
+                + '<div class="flex items-center space-x-3 flex-shrink-0">'
                 + '<span class="text-xs text-gray-400">Enrolled: ' + s.enrollment_date + '</span>'
                 + '<form method="POST" class="inline" onsubmit="return confirmDelete(\'Unenroll this student?\')">'
                 + '<input type="hidden" name="csrf_token" value="' + csrfToken + '">'
@@ -1158,6 +1260,50 @@ function viewEnrolled(classId, className) {
     }
 
     document.getElementById('rosterModal').classList.remove('hidden');
+}
+
+function toggleSelectAll(masterCb) {
+    var checkboxes = document.querySelectorAll('.roster-cb');
+    checkboxes.forEach(function(cb) { cb.checked = masterCb.checked; });
+    updateBulkBar();
+}
+
+function updateBulkBar() {
+    var checked = document.querySelectorAll('.roster-cb:checked');
+    var bar = document.getElementById('bulkUnenrollBar');
+    var countEl = document.getElementById('bulkCount');
+    var selectAll = document.getElementById('selectAllRoster');
+    var allCbs = document.querySelectorAll('.roster-cb');
+
+    if (checked.length > 0) {
+        bar.classList.remove('hidden');
+        countEl.textContent = checked.length;
+    } else {
+        bar.classList.add('hidden');
+    }
+
+    // Keep Select All in sync
+    if (selectAll) {
+        selectAll.checked = allCbs.length > 0 && checked.length === allCbs.length;
+        selectAll.indeterminate = checked.length > 0 && checked.length < allCbs.length;
+    }
+}
+
+function bulkUnenroll() {
+    var checked = document.querySelectorAll('.roster-cb:checked');
+    if (checked.length === 0) return;
+    if (!confirm('Unenroll ' + checked.length + ' student(s) from this class?')) return;
+
+    var container = document.getElementById('bulkUnenrollInputs');
+    container.innerHTML = '';
+    checked.forEach(function(cb) {
+        var input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'enrollment_ids[]';
+        input.value = cb.value;
+        container.appendChild(input);
+    });
+    document.getElementById('bulkUnenrollForm').submit();
 }
 
 // ── Open Add modal (reset form first to clear stale copy data) ──

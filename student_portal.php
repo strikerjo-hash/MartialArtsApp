@@ -307,7 +307,7 @@ try {
          JOIN martial_arts_styles mas ON mas.id = sb.style_id
          WHERE sb.student_id = :sid";
     if (!is_viewing_all_schools()) { $beltSql .= ' AND sb.school_id = :school_id'; }
-    $beltSql .= ' ORDER BY b.rank_order DESC, sb.awarded_date DESC LIMIT 10';
+    $beltSql .= ' ORDER BY b.rank_order DESC, sb.awarded_date DESC';
     $beltStmt = $pdo->prepare($beltSql);
     $beltStmt->bindValue(':sid', $studentId, PDO::PARAM_INT);
     if (!is_viewing_all_schools()) { $beltStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
@@ -401,10 +401,11 @@ try {
         }
         $trWhere = implode(' OR ', $trConditions);
 
-        $trSql = "SELECT br.*, b.name as belt_name, b.color as belt_color, mas.name as style_name
+        $trSql = "SELECT DISTINCT br.*, b.name as belt_name, b.color as belt_color, mas.name as style_name
              FROM belt_resources br
-             JOIN belts b ON b.id = br.belt_id
-             JOIN martial_arts_styles mas ON mas.id = br.style_id
+             JOIN belt_resource_belts brb ON br.id = brb.resource_id
+             JOIN belts b ON b.id = brb.belt_id
+             JOIN martial_arts_styles mas ON mas.id = brb.style_id
              WHERE ({$trWhere})";
         if (!is_viewing_all_schools()) {
             $trSql .= ' AND br.school_id = :school_id';
@@ -779,6 +780,63 @@ include 'includes/student_header.php';
                         <span class="inline-block px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800">Active</span>
                     </div>
                 </div>
+            <?php elseif (!empty($studentPendingChanges)): ?>
+                <?php
+                // Show the proposed plan when no active membership but a pending change exists
+                $proposedChange = $studentPendingChanges[0];
+                $propIsMonthly = (isset($proposedChange['new_billing_frequency']) && $proposedChange['new_billing_frequency'] === 'monthly' && $proposedChange['new_duration'] > 1);
+                $propMonthlyAmt = $propIsMonthly ? round($proposedChange['new_plan_price'] / $proposedChange['new_duration'], 2) : 0;
+                ?>
+                <div class="space-y-3">
+                    <div>
+                        <span class="text-sm text-gray-500">Proposed Plan</span>
+                        <p class="font-medium text-gray-800"><?= htmlspecialchars($proposedChange['new_plan_name']) ?></p>
+                    </div>
+                    <div>
+                        <span class="text-sm text-gray-500">Price</span>
+                        <?php if ($propIsMonthly): ?>
+                            <p class="font-medium text-gray-800"><?= formatMoney($propMonthlyAmt) ?>/mo (<?= formatMoney($proposedChange['new_plan_price']) ?> total)</p>
+                        <?php else: ?>
+                            <p class="font-medium text-gray-800"><?= formatMoney($proposedChange['new_plan_price']) ?></p>
+                        <?php endif; ?>
+                    </div>
+                    <div>
+                        <span class="text-sm text-gray-500">Proposed By</span>
+                        <p class="font-medium text-gray-800"><?= htmlspecialchars($proposedChange['requested_by_name'] ?? 'Studio Admin') ?></p>
+                    </div>
+                    <div>
+                        <span class="text-sm text-gray-500">Status</span>
+                        <span class="inline-block px-2 py-1 text-xs font-semibold rounded-full bg-orange-100 text-orange-800">Pending Approval</span>
+                    </div>
+                    <div>
+                        <span class="text-sm text-gray-500">Expires</span>
+                        <p class="text-xs text-gray-600"><?= date('M j, Y \a\t g:i A', strtotime($proposedChange['expires_at'])) ?></p>
+                    </div>
+                    <div class="pt-2 flex gap-2">
+                        <form method="POST" class="inline">
+                            <?= csrf_field() ?>
+                            <input type="hidden" name="approve_plan_change" value="1">
+                            <input type="hidden" name="change_id" value="<?= $proposedChange['id'] ?>">
+                            <?php if ($proposedChange['proration_type'] === 'upgrade'): ?>
+                                <button type="submit" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-medium text-xs">
+                                    Review &amp; Pay
+                                </button>
+                            <?php else: ?>
+                                <button type="submit" onclick="return confirm('Approve this plan change?')" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-medium text-xs">
+                                    Approve
+                                </button>
+                            <?php endif; ?>
+                        </form>
+                        <form method="POST" class="inline">
+                            <?= csrf_field() ?>
+                            <input type="hidden" name="decline_plan_change" value="1">
+                            <input type="hidden" name="change_id" value="<?= $proposedChange['id'] ?>">
+                            <button type="submit" onclick="return confirm('Decline this plan change?')" class="bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg font-medium text-xs">
+                                Decline
+                            </button>
+                        </form>
+                    </div>
+                </div>
             <?php else: ?>
                 <div class="text-center py-4">
                     <p class="text-gray-500 text-sm mb-3">No active membership found.</p>
@@ -831,26 +889,33 @@ include 'includes/student_header.php';
                 </p>
             </div>
             <?php endif; ?>
-            <?php if (!empty($beltHistory)):
-                $highestBelt = $beltHistory[0]; // Highest by rank_order DESC
-                $isBlackBelt = str_starts_with(strtolower($highestBelt['color'] ?? ''), 'black');
-            ?>
+            <?php if (!empty($beltHistory)): ?>
                 <div class="mt-4 pt-4 border-t border-gray-200">
-                    <span class="text-sm text-gray-500">Highest Belt Rank</span>
-                    <div class="flex items-center gap-2 mt-1">
-                        <span class="inline-block w-4 h-4 rounded-full border border-gray-300" style="<?= beltBackground($highestBelt['color'] ?? '', $colorMap) ?>"></span>
-                        <p class="font-medium text-gray-800">
-                            <?= htmlspecialchars($highestBelt['belt_name']) ?>
-                            <span class="text-xs text-gray-500">(<?= htmlspecialchars($highestBelt['style_name']) ?>)</span>
-                        </p>
-                    </div>
-                    <?php if ($isBlackBelt && !empty($highestBelt['black_belt_number'])): ?>
-                        <div class="mt-2 inline-flex items-center gap-1 bg-gray-900 text-yellow-400 text-xs font-bold px-3 py-1 rounded-full">
-                            <span>&#127941;</span> Black Belt #<?= htmlspecialchars($highestBelt['black_belt_number']) ?>
-                        </div>
-                    <?php endif; ?>
-                    <div class="mt-2">
-                        <a href="student_certificate.php" class="text-xs text-blue-600 hover:underline">View Certificate &rarr;</a>
+                    <span class="text-sm text-gray-500 font-medium">Belt Progression</span>
+                    <div class="mt-2 space-y-2">
+                        <?php foreach ($beltHistory as $beltIdx => $belt):
+                            $isBB = str_starts_with(strtolower($belt['color'] ?? ''), 'black');
+                        ?>
+                            <div class="flex items-center justify-between py-1.5 <?= $beltIdx === 0 ? '' : 'border-t border-gray-100' ?>">
+                                <div class="flex items-center gap-2 min-w-0">
+                                    <span class="inline-block w-4 h-4 rounded-full border border-gray-300 flex-shrink-0" style="<?= beltBackground($belt['color'] ?? '', $colorMap) ?>"></span>
+                                    <div class="min-w-0">
+                                        <p class="font-medium text-gray-800 text-sm truncate">
+                                            <?= htmlspecialchars($belt['belt_name']) ?>
+                                            <span class="text-xs text-gray-500">(<?= htmlspecialchars($belt['style_name']) ?>)</span>
+                                        </p>
+                                        <p class="text-xs text-gray-400"><?= formatDate($belt['awarded_date']) ?></p>
+                                        <?php if ($isBB && !empty($belt['black_belt_number'])): ?>
+                                            <span class="inline-flex items-center gap-1 bg-gray-900 text-yellow-400 text-[10px] font-bold px-2 py-0.5 rounded-full mt-0.5">
+                                                &#127941; BB #<?= htmlspecialchars($belt['black_belt_number']) ?>
+                                            </span>
+                                        <?php endif; ?>
+                                    </div>
+                                </div>
+                                <a href="student_certificate.php?belt_index=<?= $beltIdx ?>"
+                                   class="text-xs text-amber-600 hover:text-amber-800 font-medium whitespace-nowrap ml-2">&#128220; Certificate</a>
+                            </div>
+                        <?php endforeach; ?>
                     </div>
                 </div>
             <?php endif; ?>

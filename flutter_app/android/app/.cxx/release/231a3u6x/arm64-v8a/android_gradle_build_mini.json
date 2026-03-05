@@ -1,0 +1,20 @@
+{
+  "buildFiles": [
+    "C:\\Users\\joejo\\Develop\\flutter\\packages\\flutter_tools\\gradle\\src\\main\\scripts\\CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "C:\\Users\\joejo\\AppData\\Local\\Android\\sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+      "-C",
+      "C:\\Users\\joejo\\OneDrive\\Documents\\GitHub\\MartialArtsApp\\flutter_app\\android\\app\\.cxx\\release\\231a3u6x\\arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "C:\\Users\\joejo\\AppData\\Local\\Android\\sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+    "-C",
+    "C:\\Users\\joejo\\OneDrive\\Documents\\GitHub\\MartialArtsApp\\flutter_app\\android\\app\\.cxx\\release\\231a3u6x\\arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {}
+}

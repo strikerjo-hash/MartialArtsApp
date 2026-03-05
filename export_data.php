@@ -2,10 +2,8 @@
 require_once 'config.php';
 require_once __DIR__ . '/includes/security.php';
 requireLogin();
-
-// Admin / Super Admin access
-if (!in_array(getCurrentUser()['role'], ['admin', 'super_admin'])) {
-    accessDenied('Data export requires Admin or Super Admin privileges.');
+if (!canView('import_data.php')) {
+    accessDenied('Export requires appropriate permissions.');
 }
 
 $pdo = get_db();
@@ -543,8 +541,10 @@ include 'includes/header.php';
     <div class="flex justify-between items-center mb-6">
         <h1 class="text-3xl font-bold text-gray-800">Import / Export Data</h1>
         <div class="space-x-3">
+            <a href="curriculum.php" class="px-4 py-2 rounded-lg font-medium text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">Manage Curriculum</a>
             <a href="import_data.php" class="px-4 py-2 rounded-lg font-medium text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">Import Students</a>
             <a href="import_payments.php" class="px-4 py-2 rounded-lg font-medium text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">Import Payments</a>
+            <a href="import_curriculum.php" class="px-4 py-2 rounded-lg font-medium text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">Import Curriculum</a>
             <a href="export_data.php" class="px-4 py-2 rounded-lg font-medium text-sm bg-blue-600 text-white">Export</a>
         </div>
     </div>

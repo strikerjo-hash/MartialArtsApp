@@ -1,0 +1,11 @@
+[versions]
+android-gradle = "8.1.4"
+kotlin = "1.9.23"
+google-services = "4.4.4"
+flutter-gradle = "1.0.0"
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "android-gradle" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+google-services = { id = "com.google.gms.google-services", version.ref = "google-services" }
+flutter = { id = "dev.flutter.flutter-gradle-plugin", version.ref = "flutter-gradle" }

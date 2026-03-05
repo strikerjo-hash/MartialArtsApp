@@ -56,7 +56,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = "Too many failed attempts. Please wait {$wait} seconds before trying again.";
         } else {
             // Try student login first
-            $student = authenticate_student($username, $password, $ip);
+            $inactive_status = null;
+            $student = authenticate_student($username, $password, $ip, $inactive_status);
 
             if ($student) {
                 login_student($student);
@@ -71,22 +72,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit;
             }
 
-            // Try legacy parent login
-            $parent = authenticate_parent($username, $password, $ip);
-            if ($parent) {
-                // If the legacy parent was matched to a promoted student,
-                // log them in as that student (student-as-parent model)
-                if (!empty($parent['_legacy_parent'])) {
-                    login_student($parent);
+            // Show specific message for deactivated/suspended accounts
+            if ($inactive_status) {
+                if ($inactive_status === 'suspended') {
+                    $error = 'Your account has been suspended. Please contact administration for assistance.';
+                } else {
+                    // Check if deactivated for payment reasons
+                    $deactivation_reason = get_deactivation_reason($username);
+                    if ($deactivation_reason === 'payment') {
+                        $error = 'Your account has been deactivated due to an outstanding balance. Please contact us to resolve your payment before access can be restored.';
+                    } else {
+                        $error = 'Your account has been deactivated. Please contact administration for assistance.';
+                    }
+                }
+            } else {
+                // Try legacy parent login
+                $parent = authenticate_parent($username, $password, $ip);
+                if ($parent) {
+                    // If the legacy parent was matched to a promoted student,
+                    // log them in as that student (student-as-parent model)
+                    if (!empty($parent['_legacy_parent'])) {
+                        login_student($parent);
+                        header('Location: parent_portal.php');
+                        exit;
+                    }
+                    login_parent($parent);
                     header('Location: parent_portal.php');
                     exit;
                 }
-                login_parent($parent);
-                header('Location: parent_portal.php');
-                exit;
-            }
 
-            $error = 'Invalid username or password.';
+                $error = 'Invalid username or password.';
+            }
         }
     }
 }
@@ -141,6 +157,7 @@ $theme = get_theme();
             </form>
 
             <div class="login-footer">
+                <p><a href="password_reset.php">Forgot your password?</a></p>
                 <p><a href="register.php">New student? Create an account</a></p>
                 <a href="admin_login.php" class="admin-link">Staff / Instructor Login &rarr;</a>
             </div>

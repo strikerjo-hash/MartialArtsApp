@@ -53,8 +53,9 @@ function verify_csrf(): bool
         die('Invalid security token. Please go back and try again.');
     }
 
-    // Rotate token after successful verification.
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    // Token is kept stable for the lifetime of the session so that
+    // multiple tabs / browser windows can submit forms concurrently
+    // without invalidating each other's tokens.
 
     // Auto-log POST action for audit trail
     if (function_exists('audit_log_post')) {
@@ -62,6 +63,14 @@ function verify_csrf(): bool
     }
 
     return true;
+}
+
+/**
+ * Alias for csrf_token() — used in some templates.
+ */
+function generate_csrf(): string
+{
+    return csrf_token();
 }
 
 // ----------------------------------------------------------- Rate Limiting

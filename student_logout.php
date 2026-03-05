@@ -2,13 +2,19 @@
 /**
  * student_logout.php — Student Logout
  *
- * Uses the proper logout() function from auth.php which also
- * records the logout in the audit log before clearing the session.
+ * If the admin is impersonating a student, this ends the impersonation
+ * and returns them to the admin dashboard instead of destroying the session.
  */
-require_once 'config.php';
 
-// audit_log is called inside logout() before session is cleared
+require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/includes/impersonation.php';
+
+if (is_impersonating()) {
+    stop_impersonation();
+    header('Location: index.php');
+    exit;
+}
+
 logout();
-
 header('Location: login.php');
 exit;

@@ -8,6 +8,11 @@ $event_id = $_GET['id'] ?? 0;
 // Handle registrations
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     verify_csrf();
+    // Financial operations (registering with payment, removing registrations) require admin
+    $financialEventActions = ['register'];
+    if (in_array($_POST['action'], $financialEventActions, true)) {
+        requireFinancialAccess();
+    }
     switch ($_POST['action']) {
         case 'register':
             try {
@@ -382,16 +387,7 @@ include 'includes/header.php';
             
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Select Student *</label>
-                <select name="student_id" required
-                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
-                    <option value="">Choose a student...</option>
-                    <?php foreach ($students as $student): ?>
-                        <option value="<?php echo $student['id']; ?>">
-                            <?php echo $student['first_name'] . ' ' . $student['last_name']; ?> 
-                            (<?php echo $student['current_belt']; ?>)
-                        </option>
-                    <?php endforeach; ?>
-                </select>
+                <div id="event-student-picker"></div>
             </div>
             
             <div class="grid grid-cols-2 gap-4">
@@ -506,6 +502,25 @@ function editRegistration(reg) {
     document.getElementById('edit_notes').value = reg.notes || '';
     document.getElementById('editModal').classList.remove('hidden');
 }
+</script>
+
+<script src="assets/js/student-picker.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    StudentPicker.init({
+        container: '#event-student-picker',
+        inputName: 'student_id',
+        placeholder: 'Type student name to search\u2026',
+        data: <?= json_encode(array_map(function($s) {
+            return ['id' => $s['id'], 'name' => trim($s['first_name'] . ' ' . $s['last_name']), 'extra' => $s['current_belt'] ?? ''];
+        }, $students)) ?>,
+        renderOption: function(s) {
+            var html = '<div class="sp-option-name">' + s.name + '</div>';
+            if (s.extra) html += '<div class="sp-option-sub">' + s.extra + '</div>';
+            return html;
+        }
+    });
+});
 </script>
 
 <?php include 'includes/footer.php'; ?>

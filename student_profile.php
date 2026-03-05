@@ -113,6 +113,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['change_password'])) {
         $student = $stmt->fetch();
     }
 }
+
+// ---------- Handle communication consent update ----------
+require_once __DIR__ . '/includes/messaging.php';
+$comm_consent_text    = get_comm_consent_text();
+$comm_consent_version = get_comm_consent_version();
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_comm_consent'])) {
+    verify_csrf();
+
+    $wantEmail = !empty($_POST['comm_consent_email']) ? 1 : 0;
+    $wantSms   = !empty($_POST['comm_consent_sms'])   ? 1 : 0;
+    $consentNow = date('Y-m-d H:i:s');
+    $consentIp  = $_SERVER['REMOTE_ADDR'] ?? '';
+
+    try {
+        $updSql = 'UPDATE students SET
+            comm_consent_email = :ce,
+            comm_consent_email_at = :cea,
+            comm_consent_sms = :cs,
+            comm_consent_sms_at = :csa,
+            comm_consent_version = :cv,
+            comm_consent_ip = :cip
+            WHERE id = :id';
+        if (!is_viewing_all_schools()) { $updSql .= ' AND school_id = :school_id'; }
+        $upd = $pdo->prepare($updSql);
+        $upd->bindValue(':ce',  $wantEmail, PDO::PARAM_INT);
+        $upd->bindValue(':cea', $wantEmail ? $consentNow : null);
+        $upd->bindValue(':cs',  $wantSms,   PDO::PARAM_INT);
+        $upd->bindValue(':csa', $wantSms   ? $consentNow : null);
+        $upd->bindValue(':cv',  ($wantEmail || $wantSms) ? $comm_consent_version : null);
+        $upd->bindValue(':cip', ($wantEmail || $wantSms) ? $consentIp : null);
+        $upd->bindValue(':id',  $studentId, PDO::PARAM_INT);
+        if (!is_viewing_all_schools()) { $upd->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+        $upd->execute();
+
+        // Reload student row
+        $stmt->bindValue(':id', $studentId, PDO::PARAM_INT);
+        if (!is_viewing_all_schools()) { $stmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+        $stmt->execute();
+        $student = $stmt->fetch();
+
+        $success = 'Communication preferences updated.';
+    } catch (\PDOException $e) {
+        $errors[] = 'Unable to update communication preferences. Please try again.';
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -232,6 +278,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['change_password'])) {
                 </p>
 
                 <button type="submit" class="btn btn-primary">Change Password</button>
+            </form>
+        </section>
+
+        <!-- Communication Preferences -->
+        <section class="card">
+            <h2>Communication Preferences</h2>
+            <p style="color:#6b7280; font-size:0.9em; margin-bottom:1rem;">
+                Manage your consent for receiving email and SMS/text message communications from <?= htmlspecialchars($theme['studio_name']) ?>.
+            </p>
+            <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:8px; padding:1rem; margin-bottom:1rem; max-height:180px; overflow-y:auto; font-size:0.85rem; color:#374151; line-height:1.5;">
+                <?= nl2br(htmlspecialchars($comm_consent_text)) ?>
+            </div>
+            <form method="POST" action="student_profile.php" class="branding-form">
+                <?= csrf_field() ?>
+                <input type="hidden" name="update_comm_consent" value="1">
+                <div style="margin-bottom:1rem;">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:0.5rem;">
+                        <input type="checkbox" name="comm_consent_email" value="1"
+                               <?= !empty($student['comm_consent_email']) ? 'checked' : '' ?>>
+                        <span>I consent to receive <strong>email</strong> communications</span>
+                    </label>
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                        <input type="checkbox" name="comm_consent_sms" value="1"
+                               <?= !empty($student['comm_consent_sms']) ? 'checked' : '' ?>>
+                        <span>I consent to receive <strong>SMS/text message</strong> communications</span>
+                    </label>
+                </div>
+                <?php if (!empty($student['comm_consent_email_at']) || !empty($student['comm_consent_sms_at'])): ?>
+                <p style="font-size:0.8rem; color:#9ca3af; margin-bottom:0.75rem;">
+                    Last updated:
+                    <?php if (!empty($student['comm_consent_email_at'])): ?>
+                        Email consent <?= date('M j, Y g:i A', strtotime($student['comm_consent_email_at'])) ?>
+                    <?php endif; ?>
+                    <?php if (!empty($student['comm_consent_sms_at'])): ?>
+                        <?= !empty($student['comm_consent_email_at']) ? ' · ' : '' ?>SMS consent <?= date('M j, Y g:i A', strtotime($student['comm_consent_sms_at'])) ?>
+                    <?php endif; ?>
+                    <?php if (!empty($student['comm_consent_version'])): ?>
+                        · Version <?= htmlspecialchars($student['comm_consent_version']) ?>
+                    <?php endif; ?>
+                </p>
+                <?php endif; ?>
+                <button type="submit" class="btn btn-primary">Save Preferences</button>
             </form>
         </section>
 

@@ -19,13 +19,16 @@ if (file_exists(__DIR__ . '/config.local.php')) {
 
 // Database configuration — defaults used only if config.local.php is absent
 if (!defined('DB_HOST'))    define('DB_HOST', 'localhost');
-if (!defined('DB_NAME'))    define('DB_NAME', 'martial_arts_app');
+if (!defined('DB_NAME'))    define('DB_NAME', 'martial_arts_studio');
 if (!defined('DB_USER'))    define('DB_USER', 'root');
 if (!defined('DB_PASS'))    define('DB_PASS', '');
 define('DB_CHARSET', 'utf8mb4');
 
 // Session configuration
 define('SESSION_LIFETIME', 3600); // 1 hour
+
+// Default timezone — overridden per-school once session is loaded
+date_default_timezone_set('America/New_York');
 
 // Security — rate limiting
 define('MAX_LOGIN_ATTEMPTS', 5);        // per 15-minute window
@@ -38,7 +41,7 @@ if (!defined('ENCRYPTION_KEY')) {
 }
 
 // Application paths
-define('BASE_URL', '/MartialArtsApp');
+define('BASE_URL', '/procomp');
 define('APP_ROOT', __DIR__);
 
 // Application name (fallback when no studio name is configured)
@@ -63,12 +66,27 @@ if (!defined('API_MODE')) {
     }
 }
 
+// Apply the current school's timezone to all PHP date/time functions
+if (function_exists('get_school_timezone') && !empty($_SESSION['user_id'] ?? null)) {
+    date_default_timezone_set(get_school_timezone());
+}
+
 // Expose $pdo globally for pages that use it directly
 $pdo = get_db();
+
+// Set MySQL session timezone to match PHP so TIMESTAMP columns return in school timezone
+if (function_exists('get_school_timezone') && !empty($_SESSION['user_id'] ?? null)) {
+    try {
+        $pdo->exec("SET time_zone = '" . date('P') . "'");
+    } catch (\PDOException $e) {
+        // Named timezones may not be loaded in MySQL; offset format (+/-HH:MM) should always work
+    }
+}
 
 // Audit logging & global error handling (must come after DB + auth + session)
 require_once __DIR__ . '/includes/audit.php';
 require_once __DIR__ . '/includes/error_handler.php';
+require_once __DIR__ . '/includes/email_notifications.php';
 
 // Log slow requests (> 1 second) for performance monitoring
 if (!defined('API_MODE')) {
@@ -227,14 +245,50 @@ function require_super_admin(): void
     }
 }
 
-function canView(string $page): bool
+/**
+ * Require admin or super_admin role for financial operations.
+ *
+ * Blocks instructors & staff from pages/actions that involve payments,
+ * discounts, Stripe keys, fee settings, or any other financial data.
+ *
+ * @param string $message  Optional custom denial message.
+ */
+function requireFinancialAccess(string $message = ''): void
+{
+    auth_start_session();
+    $role = $_SESSION['role'] ?? 'staff';
+    if (!in_array($role, ['admin', 'super_admin'], true)) {
+        if (empty($message)) {
+            $message = 'Financial operations require Admin privileges. '
+                     . 'Contact your administrator if you need access.';
+        }
+        accessDenied($message);
+    }
+}
+
+/**
+ * Check (without blocking) whether the current user has financial access.
+ */
+function hasFinancialAccess(): bool
+{
+    auth_start_session();
+    $role = $_SESSION['role'] ?? 'staff';
+    return in_array($role, ['admin', 'super_admin'], true);
+}
+
+/**
+ * Internal helper: check a specific permission column for the current user's role.
+ * Admin/super_admin always return true. Other roles checked against role_permissions table.
+ * Results are cached for the duration of the request (single DB query for all calls).
+ */
+function _checkPermission(string $page, string $column, bool $default = false): bool
 {
     static $permCache = null;
 
     auth_start_session();
     $role = $_SESSION['role'] ?? 'staff';
 
-    // Super admins and admins can see everything
+    // Super admins and admins can do everything
     if ($role === 'admin' || $role === 'super_admin') {
         return true;
     }
@@ -244,17 +298,55 @@ function canView(string $page): bool
         $permCache = [];
         try {
             $pdo  = get_db();
-            $stmt = $pdo->prepare('SELECT page, can_view FROM role_permissions WHERE role = :role');
+            $stmt = $pdo->prepare('SELECT page, can_view, can_create, can_edit, can_delete FROM role_permissions WHERE role = :role');
             $stmt->execute([':role' => $role]);
             foreach ($stmt->fetchAll() as $row) {
-                $permCache[$row['page']] = (bool) $row['can_view'];
+                $permCache[$row['page']] = $row;
             }
         } catch (\PDOException $e) {
-            // Table doesn't exist yet — default to allowing access
+            // Table doesn't exist yet — fall through to defaults
         }
     }
 
-    return $permCache[$page] ?? true;
+    if (isset($permCache[$page])) {
+        return (bool) ($permCache[$page][$column] ?? $default);
+    }
+
+    return $default;
+}
+
+function canView(string $page): bool
+{
+    // Default true for backwards compatibility
+    return _checkPermission($page, 'can_view', true);
+}
+
+function canCreate(string $page): bool
+{
+    return _checkPermission($page, 'can_create', false);
+}
+
+function canEdit(string $page): bool
+{
+    return _checkPermission($page, 'can_edit', false);
+}
+
+function canDelete(string $page): bool
+{
+    return _checkPermission($page, 'can_delete', false);
+}
+
+function canViewAnySettings(): bool
+{
+    $settingsPages = [
+        'settings_school.php', 'settings_belt.php', 'settings_certs.php',
+        'settings_registration.php', 'settings_billing.php',
+        'settings_communications.php', 'settings_system.php',
+    ];
+    foreach ($settingsPages as $page) {
+        if (canView($page)) return true;
+    }
+    return false;
 }
 
 // ---------- Settings (key-value store) ----------

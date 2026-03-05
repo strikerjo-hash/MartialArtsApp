@@ -38,7 +38,7 @@ function auth_start_session(): void
  * Authenticate a student by username & password.
  * Enforces rate limiting.  Returns the student row on success, or false.
  */
-function authenticate_student(string $username, string $password, string $ip = '')
+function authenticate_student(string $username, string $password, string $ip = '', ?string &$inactive_status = null)
 {
     if ($ip === '') {
         $ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
@@ -72,6 +72,8 @@ function authenticate_student(string $username, string $password, string $ip = '
         $is_active = false;
     }
     if (!$is_active) {
+        // Pass back the specific status so the caller can show an appropriate message
+        $inactive_status = $student['status'] ?? 'inactive';
         record_failed_login($username, $ip);
         return false;
     }
@@ -85,6 +87,192 @@ function authenticate_student(string $username, string $password, string $ip = '
 
     record_failed_login($username, $ip);
     return false;
+}
+
+/**
+ * Cascade side-effects when a student account is deactivated.
+ * - Drops active class enrollments
+ * - Cancels future event registrations
+ * - Records the deactivation reason
+ * - If the student is a parent, deactivates all linked child accounts
+ *
+ * @param int    $studentId  The student being deactivated
+ * @param string $reason     'manual' (admin-initiated) or 'payment' (auto/bulk delinquency)
+ * @param array  $visited    Internal: tracks already-processed IDs to prevent infinite recursion
+ */
+function deactivate_student_cascade(int $studentId, string $reason = 'manual', array $visited = []): void
+{
+    // Guard against infinite recursion (child could theoretically also be a parent)
+    if (in_array($studentId, $visited, true)) {
+        return;
+    }
+    $visited[] = $studentId;
+
+    $pdo = get_db();
+
+    // 1. Drop all active class enrollments
+    try {
+        $params = [$studentId];
+        school_param($params);
+        $pdo->prepare("UPDATE class_enrollments SET status = 'dropped' WHERE student_id = ? AND status = 'active'" . school_where())
+            ->execute($params);
+    } catch (\Throwable $e) { /* enrollment table may not exist in all setups */ }
+
+    // 2. Cancel future event registrations (preserve past records)
+    try {
+        $params = [$studentId];
+        school_param($params);
+        $pdo->prepare("
+            UPDATE event_registrations er
+            JOIN events e ON er.event_id = e.id
+            SET er.attendance_status = 'cancelled'
+            WHERE er.student_id = ?
+              AND e.event_date >= CURDATE()
+              AND er.attendance_status = 'registered'" . school_where('er'))
+            ->execute($params);
+    } catch (\Throwable $e) { /* event tables may not exist in all setups */ }
+
+    // 3. Record deactivation reason
+    try {
+        $validReasons = ['manual', 'payment'];
+        $reason = in_array($reason, $validReasons) ? $reason : 'manual';
+        $params = [$reason, $studentId];
+        school_param($params);
+        $pdo->prepare("UPDATE students SET deactivation_reason = ? WHERE id = ?" . school_where())
+            ->execute($params);
+    } catch (\Throwable $e) { /* deactivation_reason column may not exist pre-migration */ }
+
+    // 4. If this student is a parent, cascade deactivation to all linked children
+    try {
+        $params = [$studentId];
+        school_param($params);
+        $parentCheck = $pdo->prepare("SELECT is_parent FROM students WHERE id = ?" . school_where() . " LIMIT 1");
+        $parentCheck->execute($params);
+        $row = $parentCheck->fetch();
+
+        if ($row && (int)($row['is_parent'] ?? 0) === 1) {
+            // Get all linked children
+            $childParams = [$studentId];
+            school_param($childParams);
+            $childStmt = $pdo->prepare(
+                "SELECT ps.student_id FROM parent_students ps
+                 JOIN students s ON s.id = ps.student_id
+                 WHERE ps.parent_id = ?" . school_where('s')
+            );
+            $childStmt->execute($childParams);
+            $children = $childStmt->fetchAll();
+
+            foreach ($children as $child) {
+                $childId = (int)$child['student_id'];
+
+                // Set child status to inactive
+                $statusParams = ['inactive', date('Y-m-d'), $childId];
+                school_param($statusParams);
+                $pdo->prepare("UPDATE students SET status = ?, inactive_since = ? WHERE id = ?" . school_where())
+                    ->execute($statusParams);
+
+                // Cascade to the child (drops their enrollments, events, etc.)
+                deactivate_student_cascade($childId, $reason, $visited);
+
+                // Audit log the child deactivation
+                if (function_exists('audit_log')) {
+                    audit_log('status_change', [
+                        'description' => 'Child account auto-deactivated (parent account deactivated)',
+                        'entity_type' => 'student',
+                        'entity_id'   => $childId,
+                    ]);
+                }
+            }
+        }
+    } catch (\Throwable $e) { /* parent_students table may not exist in all setups */ }
+}
+
+/**
+ * Clean up when a student account is reactivated.
+ * Clears deactivation_reason. Caller handles setting status='active' and inactive_since=NULL.
+ * If the student is a parent, also reactivates all linked child accounts.
+ *
+ * @param int   $studentId  The student being reactivated
+ * @param array $visited    Internal: tracks already-processed IDs to prevent infinite recursion
+ */
+function reactivate_student(int $studentId, array $visited = []): void
+{
+    // Guard against infinite recursion
+    if (in_array($studentId, $visited, true)) {
+        return;
+    }
+    $visited[] = $studentId;
+
+    $pdo = get_db();
+
+    // 1. Clear deactivation reason
+    try {
+        $params = [$studentId];
+        school_param($params);
+        $pdo->prepare("UPDATE students SET deactivation_reason = NULL WHERE id = ?" . school_where())
+            ->execute($params);
+    } catch (\Throwable $e) { /* deactivation_reason column may not exist pre-migration */ }
+
+    // 2. If this student is a parent, cascade reactivation to all linked children
+    try {
+        $params = [$studentId];
+        school_param($params);
+        $parentCheck = $pdo->prepare("SELECT is_parent FROM students WHERE id = ?" . school_where() . " LIMIT 1");
+        $parentCheck->execute($params);
+        $row = $parentCheck->fetch();
+
+        if ($row && (int)($row['is_parent'] ?? 0) === 1) {
+            // Get all linked children
+            $childParams = [$studentId];
+            school_param($childParams);
+            $childStmt = $pdo->prepare(
+                "SELECT ps.student_id FROM parent_students ps
+                 JOIN students s ON s.id = ps.student_id
+                 WHERE ps.parent_id = ?" . school_where('s')
+            );
+            $childStmt->execute($childParams);
+            $children = $childStmt->fetchAll();
+
+            foreach ($children as $child) {
+                $childId = (int)$child['student_id'];
+
+                // Set child status to active and clear inactive_since
+                $statusParams = [$childId];
+                school_param($statusParams);
+                $pdo->prepare("UPDATE students SET status = 'active', inactive_since = NULL WHERE id = ?" . school_where())
+                    ->execute($statusParams);
+
+                // Cascade to the child (clears deactivation_reason, etc.)
+                reactivate_student($childId, $visited);
+
+                // Audit log the child reactivation
+                if (function_exists('audit_log')) {
+                    audit_log('status_change', [
+                        'description' => 'Child account auto-reactivated (parent account reactivated)',
+                        'entity_type' => 'student',
+                        'entity_id'   => $childId,
+                    ]);
+                }
+            }
+        }
+    } catch (\Throwable $e) { /* parent_students table may not exist in all setups */ }
+}
+
+/**
+ * Look up why a student was deactivated (for login error messages).
+ * Returns 'payment', 'manual', or null.
+ */
+function get_deactivation_reason(string $username): ?string
+{
+    $pdo = get_db();
+    try {
+        $stmt = $pdo->prepare("SELECT deactivation_reason FROM students WHERE (email = :u1 OR username = :u2) LIMIT 1");
+        $stmt->execute([':u1' => $username, ':u2' => $username]);
+        $row = $stmt->fetch();
+        return $row ? ($row['deactivation_reason'] ?? null) : null;
+    } catch (\Throwable $e) {
+        return null;
+    }
 }
 
 /**
@@ -145,6 +333,10 @@ function require_student(): void
 function require_registration_complete(): void
 {
     auth_start_session();
+    // Admin impersonation bypasses registration check
+    if (!empty($_SESSION['_impersonating'])) {
+        return;
+    }
     if (!empty($_SESSION['must_change_password']) || !empty($_SESSION['registration_incomplete'])) {
         header('Location: complete_registration.php');
         exit;
@@ -234,6 +426,10 @@ function refresh_payment_lockout_status(): void
 function is_student_payment_locked(): bool
 {
     auth_start_session();
+    // Admin impersonation is never payment-locked
+    if (!empty($_SESSION['_impersonating'])) {
+        return false;
+    }
     if (empty($_SESSION['student_id'])) {
         return false;
     }

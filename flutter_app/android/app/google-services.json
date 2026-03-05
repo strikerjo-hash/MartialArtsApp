@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "801221899990",
+    "project_id": "martial-arts-app-a4ad2",
+    "storage_bucket": "martial-arts-app-a4ad2.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:801221899990:android:ebf6cda8f9ecf6b5d3fb77",
+        "android_client_info": {
+          "package_name": "com.martialarts.martial_arts_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDbKu-Htvq0rxJ8wJQ0I7JfjTtfurTteFs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      },
+      "plugins": [
+        {
+          "plugin_name": "flutterfire_core",
+          "plugin_version": "2.0.0"
+        },
+        {
+          "plugin_name": "flutterfire_auth",
+          "plugin_version": "2.0.0"
+        },
+        {
+          "plugin_name": "flutterfire_firestore",
+          "plugin_version": "2.0.0"
+        },
+        {
+          "plugin_name": "flutterfire_storage",
+          "plugin_version": "2.0.0"
+        }
+      ]
+    }
+  ],
+  "configuration_version": "1"
+}

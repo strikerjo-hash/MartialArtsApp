@@ -36,7 +36,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     isset($_POST['requires_registration']) ? 1 : 0,
                     isset($_POST['tax_deductible']) ? 1 : 0
                 ]);
-                $message = showAlert('Event created successfully!', 'success');
+
+                // Copy to other schools if requested
+                $copyResults = '';
+                if (!empty($_POST['copy_to_schools']) && is_super_admin()) {
+                    require_once __DIR__ . '/includes/program_copy_helpers.php';
+                    $newEventId = (int)$pdo->lastInsertId();
+                    $copyCount = 0;
+                    foreach ($_POST['copy_to_schools'] as $targetSchoolId) {
+                        if (copy_event_to_school($newEventId, (int)$targetSchoolId)) {
+                            $copyCount++;
+                        }
+                    }
+                    if ($copyCount > 0) {
+                        $copyResults = " Also copied to $copyCount other school(s).";
+                    }
+                }
+
+                $message = showAlert('Event created successfully!' . $copyResults, 'success');
                 break;
                 
             case 'delete':
@@ -98,9 +115,9 @@ if ($status_filter) {
 $stmt->execute();
 $events = $stmt->fetchAll();
 
-// Get instructors for dropdown
+// Get instructors for dropdown (via user_schools junction for multi-school support)
 $params = [];
-$stmt = $pdo->prepare("SELECT id, full_name FROM users WHERE role IN ('admin', 'super_admin', 'instructor')" . school_where() . " ORDER BY full_name");
+$stmt = $pdo->prepare("SELECT DISTINCT u.id, u.full_name FROM users u INNER JOIN user_schools us ON u.id = us.user_id WHERE u.role IN ('admin', 'super_admin', 'instructor')" . school_where('us') . " ORDER BY u.full_name");
 school_param($params);
 $stmt->execute($params);
 $instructors = $stmt->fetchAll();
@@ -449,6 +466,25 @@ include 'includes/header.php';
                 </label>
             </div>
 
+            <?php if (is_super_admin() && count(get_all_schools()) > 1): ?>
+            <div class="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="enableCopyEvent" onchange="document.getElementById('copyEventSchools').classList.toggle('hidden', !this.checked)" class="w-4 h-4 text-blue-600 rounded">
+                    <span class="text-sm font-medium text-gray-700">Also create in other schools</span>
+                </label>
+                <div id="copyEventSchools" class="hidden mt-2 ml-6 space-y-1">
+                    <p class="text-xs text-gray-500 mb-1">Instructor will be cleared in copied events.</p>
+                    <?php foreach (get_all_schools() as $_cs): ?>
+                        <?php if ((int)$_cs['id'] !== (int)current_school_id()): ?>
+                        <label class="flex items-center gap-2 text-sm text-gray-600">
+                            <input type="checkbox" name="copy_to_schools[]" value="<?= $_cs['id'] ?>" class="rounded">
+                            <?= htmlspecialchars($_cs['name']) ?>
+                        </label>
+                        <?php endif; ?>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+            <?php endif; ?>
             <div class="flex justify-end space-x-3 pt-4">
                 <button type="button" onclick="document.getElementById('addModal').classList.add('hidden')"
                         class="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">

@@ -1,0 +1,2 @@
+C:/Users/joejo/OneDrive/Documents/GitHub/MartialArtsApp/flutter_app/android/app/.cxx/release/231a3u6x/x86_64/CMakeFiles/edit_cache.dir
+C:/Users/joejo/OneDrive/Documents/GitHub/MartialArtsApp/flutter_app/android/app/.cxx/release/231a3u6x/x86_64/CMakeFiles/rebuild_cache.dir

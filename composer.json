@@ -1,0 +1,12 @@
+{
+    "name": "martial-arts-app/reports",
+    "description": "Dependencies for report export functionality",
+    "require": {
+        "php": ">=8.0",
+        "phpoffice/phpspreadsheet": "^1.29"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    }
+}

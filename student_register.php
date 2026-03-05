@@ -198,7 +198,7 @@ if ($step == 2 && isset($_SESSION['registration_plan_id'])) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Student Registration - <?php echo APP_NAME; ?></title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="assets/css/tailwind.css">
     <script src="https://js.stripe.com/v3/"></script>
 </head>
 <body class="bg-gray-100">

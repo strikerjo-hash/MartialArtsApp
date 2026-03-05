@@ -1,0 +1,2 @@
+C:/Users/joejo/OneDrive/Documents/GitHub/MartialArtsApp/flutter_app/android/app/.cxx/release/231a3u6x/armeabi-v7a/CMakeFiles/edit_cache.dir
+C:/Users/joejo/OneDrive/Documents/GitHub/MartialArtsApp/flutter_app/android/app/.cxx/release/231a3u6x/armeabi-v7a/CMakeFiles/rebuild_cache.dir

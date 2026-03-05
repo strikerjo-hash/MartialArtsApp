@@ -9,9 +9,11 @@
 
 require_once 'config.php';
 require_once __DIR__ . '/includes/payment_gateway.php';
+require_once __DIR__ . '/includes/parent_auth.php';
 
-// Determine access mode: admin/staff viewing a student's cert, or student viewing their own
+// Determine access mode: admin/staff, parent viewing child, or student viewing their own
 $isAdminView = false;
+$isParentView = false;
 $backLink = 'student_portal.php';
 $backLabel = 'Back to Dashboard';
 
@@ -22,6 +24,19 @@ if (isset($_SESSION['user_id']) && !empty($_SESSION['user_id']) && isset($_GET['
     $isAdminView = true;
     $backLink = 'student_detail.php?id=' . $studentId;
     $backLabel = 'Back to Student Detail';
+} elseif (isset($_GET['child_id']) && (
+    !empty($_SESSION['is_parent']) ||
+    (isset($_SESSION['user_type']) && $_SESSION['user_type'] === 'parent')
+)) {
+    // Parent accessing child's certificate via ?child_id=X
+    require_parent();
+    $parentId = get_effective_parent_id();
+    $childId = (int) $_GET['child_id'];
+    $childRow = parent_verify_child($parentId, $childId);
+    $studentId = $childId;
+    $isParentView = true;
+    $backLink = 'parent_child.php?id=' . $childId;
+    $backLabel = 'Back to Child Overview';
 } elseif ((isset($_SESSION['is_student']) || (isset($_SESSION['user_type']) && $_SESSION['user_type'] === 'student')) && isset($_SESSION['student_id'])) {
     // Student portal access — enforce payment lockout
     require_student_payment_clear();
@@ -201,7 +216,7 @@ foreach ($fieldMap as $short => $info) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Certificate of Achievement - <?php echo htmlspecialchars($siteName); ?></title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="assets/css/tailwind.css">
     <style>
         <?php if ($hasCustomFont): ?>
         @font-face {
@@ -274,7 +289,7 @@ foreach ($fieldMap as $short => $info) {
             <a href="<?php echo $backLink; ?>" class="text-blue-600 hover:underline text-sm">&larr; <?php echo $backLabel; ?></a>
             <div class="flex gap-3">
                 <?php if (count($beltAchievements) > 1): ?>
-                    <select onchange="window.location.href='student_certificate.php?<?php echo $isAdminView ? 'student_id=' . $studentId . '&' : ''; ?>belt_index='+this.value"
+                    <select onchange="window.location.href='student_certificate.php?<?php echo $isAdminView ? 'student_id=' . $studentId . '&' : ($isParentView ? 'child_id=' . $studentId . '&' : ''); ?>belt_index='+this.value"
                             class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
                         <?php foreach ($beltAchievements as $i => $ba): ?>
                             <option value="<?php echo $i; ?>" <?php echo $i === $selectedIndex ? 'selected' : ''; ?>>
@@ -487,6 +502,7 @@ foreach ($fieldMap as $short => $info) {
         <div class="no-print container mx-auto px-4 py-8 max-w-4xl">
             <h2 class="text-xl font-bold text-gray-800 mb-4">All Belt Achievements</h2>
             <div class="bg-white rounded-lg shadow overflow-hidden">
+                <div class="overflow-x-auto">
                 <table class="min-w-full">
                     <thead class="bg-gray-50">
                         <tr>
@@ -530,6 +546,7 @@ foreach ($fieldMap as $short => $info) {
                         <?php endforeach; ?>
                     </tbody>
                 </table>
+                </div><!-- /overflow-x-auto -->
             </div>
         </div>
         <?php endif; ?>

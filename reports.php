@@ -1,6 +1,14 @@
 <?php
 require_once 'config.php';
 requireLogin();
+
+// Require at least one report permission
+$canFinancial = canView('reports_financial.php');
+$canStudent   = canView('reports_student.php');
+if (!$canFinancial && !$canStudent) {
+    accessDenied('You do not have permission to view reports.');
+}
+
 require_once 'includes/report_helpers.php';
 
 // === Date Range Filter ===
@@ -90,7 +98,11 @@ school_param($params);
 $stmt->execute($params);
 $stats['expiring_soon'] = $stmt->fetch()['c'];
 
-// Financial stats — filtered by date range
+// Financial stats — filtered by date range (only if user has financial permission)
+$stats['range_revenue'] = 0;
+$stats['monthly_revenue'] = 0;
+$stats['yearly_revenue'] = 0;
+if ($canFinancial) {
 try {
     $params = [$date_from, $date_to];
     $rev_stmt = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE payment_date BETWEEN ? AND ? AND status = 'completed'" . school_where());
@@ -132,8 +144,13 @@ try {
     $stmt->execute($params);
     $stats['yearly_revenue'] = (float) $stmt->fetch()['total'];
 }
+} // end $canFinancial
 
 // Event stats
+$stats['total_events'] = 0;
+$stats['upcoming_events'] = 0;
+$stats['total_classes'] = 0;
+if ($canStudent) {
 $params = [];
 $stmt = $pdo->prepare("SELECT COUNT(*) as c FROM events WHERE 1=1" . school_where());
 school_param($params);
@@ -152,8 +169,19 @@ $stmt = $pdo->prepare("SELECT COUNT(*) as c FROM classes WHERE status = 'active'
 school_param($params);
 $stmt->execute($params);
 $stats['total_classes'] = $stmt->fetch()['c'];
+} // end $canStudent
 
 // Revenue by month — enhanced with count and refund totals (always last 12 months for trend chart)
+$monthly_revenue = [];
+$stats['range_payment_count'] = 0;
+$stats['range_refund_count'] = 0;
+$stats['range_refund_total'] = 0.0;
+$revenue_by_category = [];
+$revenue_by_method = [];
+$yearly_comparison = [];
+$total_category_revenue = 0;
+$total_method_revenue = 0;
+if ($canFinancial) {
 try {
     $params = [];
     $stmt = $pdo->prepare("
@@ -265,7 +293,35 @@ try {
 // Calculate totals for category/method percentage calculations
 $total_category_revenue = array_sum(array_column($revenue_by_category, 'total'));
 $total_method_revenue = array_sum(array_column($revenue_by_method, 'total'));
+} // end $canFinancial — revenue queries
 
+// ===== STUDENT DATA QUERIES (gated by $canStudent) =====
+$top_attendance = [];
+$no_membership_students = [];
+$over_limit_students = [];
+$total_compliance_issues = 0;
+$retention_cohorts = [];
+$totalActiveForRetention = 1;
+$churn_risk_students = [];
+$belt_pipeline = [];
+$class_attendance = [];
+$class_capacity = [];
+$attendance_trends = [];
+$attendance_heatmap = [];
+$student_consistency = [];
+$dropout_risk = [];
+$seasonal_patterns = [];
+$instructor_summary = [];
+$instructor_promotions = [];
+$instructor_capacity = [];
+$avg_promotion_time = [];
+$promotion_velocity = [];
+$instructor_promotions_detail = [];
+$belt_test_pass_rates = [];
+$event_revenue_summary = [];
+$event_roi = [];
+
+if ($canStudent) {
 // Top students by attendance (uses date range)
 $params = [$date_from, $date_to];
 $top_stmt = $pdo->prepare("
@@ -301,7 +357,9 @@ $stmt->execute($params);
 $no_membership_students = $stmt->fetchAll();
 
 // Students enrolled in MORE classes than their plan allows
-$over_limit_students = $pdo->query("
+$olParams = [];
+school_param($olParams);
+$olStmt = $pdo->prepare("
     SELECT s.id, s.first_name, s.last_name, s.email,
            mp.name as plan_name, mp.classes_per_week,
            COUNT(ce.id) as enrolled_classes
@@ -310,18 +368,22 @@ $over_limit_students = $pdo->query("
     JOIN memberships m ON m.student_id = s.id AND m.status = 'active' AND m.end_date >= CURDATE()
     JOIN membership_plans mp ON m.plan_id = mp.id
     WHERE s.status = 'active'
-      AND mp.classes_per_week < 99
+      AND mp.classes_per_week < 99" . school_where('s') . "
     GROUP BY s.id, s.first_name, s.last_name, s.email, mp.name, mp.classes_per_week
     HAVING COUNT(ce.id) > mp.classes_per_week
     ORDER BY (COUNT(ce.id) - mp.classes_per_week) DESC
-")->fetchAll();
+");
+$olStmt->execute($olParams);
+$over_limit_students = $olStmt->fetchAll();
 
 $total_compliance_issues = count($no_membership_students) + count($over_limit_students);
 
 // === NEW: Student Retention Cohorts ===
 $retention_cohorts = [];
 try {
-    $retention_cohorts = $pdo->query("
+    $rcParams = [];
+    school_param($rcParams);
+    $rcStmt = $pdo->prepare("
         SELECT
             CASE
                 WHEN DATEDIFF(CURDATE(), join_date) < 90 THEN 'Under 3 months'
@@ -332,47 +394,70 @@ try {
             END as cohort,
             COUNT(*) as count
         FROM students
-        WHERE status = 'active'
+        WHERE status = 'active'" . school_where() . "
         GROUP BY cohort
         ORDER BY MIN(DATEDIFF(CURDATE(), join_date))
-    ")->fetchAll();
+    ");
+    $rcStmt->execute($rcParams);
+    $retention_cohorts = $rcStmt->fetchAll();
 } catch (\PDOException $e) {}
 
 $totalActiveForRetention = max(1, (int) ($stats['active_students'] ?: 1));
+} // end $canStudent — basic student queries (continued later for Phase queries)
 
-// === NEW: Projected vs Actual Income ===
+// === NEW: Projected vs Actual Income (financial) ===
 $projected_monthly = 0;
+$projected_yearly = 0;
+$payment_defaults = [];
+$payment_drilldown = [];
+$paid_count = 0;
+$pending_count = 0;
+$partial_count = 0;
+$overdue_count = 0;
+if ($canFinancial) {
 try {
-    $projected_monthly = (float) $pdo->query("
+    $pmParams = [];
+    school_param($pmParams);
+    $pmStmt = $pdo->prepare("
         SELECT COALESCE(SUM(
             ROUND(mp.price / GREATEST(mp.duration_months, 1), 2)
         ), 0) as projected
         FROM memberships m
         JOIN membership_plans mp ON m.plan_id = mp.id
-        WHERE m.status = 'active' AND m.end_date >= CURDATE()
-    ")->fetch()['projected'];
+        WHERE m.status = 'active' AND m.end_date >= CURDATE()" . school_where('m') . "
+    ");
+    $pmStmt->execute($pmParams);
+    $projected_monthly = (float) $pmStmt->fetch()['projected'];
 } catch (\PDOException $e) {}
 $projected_yearly = $projected_monthly * 12;
 
 // === NEW: Payment Defaults ===
 $payment_defaults = [];
 try {
-    $payment_defaults = $pdo->query("
+    $pdParams = [];
+    school_param($pdParams);
+    $pdStmt = $pdo->prepare("
         SELECT rl.*, s.first_name, s.last_name, s.email, s.status as student_status,
                mp.name as plan_name, m.status as membership_status
         FROM renewal_log rl
         JOIN students s ON rl.student_id = s.id
         JOIN memberships m ON rl.membership_id = m.id
         JOIN membership_plans mp ON m.plan_id = mp.id
-        WHERE rl.action = 'payment_failed'
+        WHERE rl.action = 'payment_failed'" . school_where('s') . "
         ORDER BY rl.created_at DESC
         LIMIT 50
-    ")->fetchAll();
+    ");
+    $pdStmt->execute($pdParams);
+    $payment_defaults = $pdStmt->fetchAll();
 } catch (\PDOException $e) {}
+} // end $canFinancial — projected/payment defaults
 
 // === Class Attendance Reports (date-range filtered) ===
+if ($canStudent) {
 $class_attendance = [];
 try {
+    $caParams = [$date_from, $date_to];
+    school_param($caParams);
     $ca_stmt = $pdo->prepare("
         SELECT c.id, c.name, c.day_of_week, c.start_time,
                COUNT(DISTINCT a.attendance_date) as total_sessions,
@@ -383,18 +468,22 @@ try {
                ROUND(COUNT(CASE WHEN a.status = 'present' THEN 1 END) * 100.0 / NULLIF(COUNT(a.id), 0), 1) as avg_rate
         FROM classes c
         LEFT JOIN attendance a ON c.id = a.class_id AND a.attendance_date BETWEEN ? AND ?
-        WHERE c.status = 'active'
+        WHERE c.status = 'active'" . school_where('c') . "
         GROUP BY c.id
         ORDER BY c.name
     ");
-    $ca_stmt->execute([$date_from, $date_to]);
+    $ca_stmt->execute($caParams);
     $class_attendance = $ca_stmt->fetchAll();
 } catch (\PDOException $e) {}
+} // end $canStudent — class attendance
 
 // === Payment Status Drill-Down Report ===
+if ($canFinancial) {
 $payment_drilldown = [];
 try {
-    $payment_drilldown = $pdo->query("
+    $pddParams = [];
+    school_param($pddParams);
+    $pddStmt = $pdo->prepare("
         SELECT s.id, s.first_name, s.last_name, s.email, s.phone, s.status as student_status,
                mp.name as plan_name, mp.price as plan_price,
                m.status as membership_status, m.payment_status,
@@ -408,7 +497,7 @@ try {
             WHERE m2.student_id = s.id
             ORDER BY m2.end_date DESC LIMIT 1
         )
-        AND s.status = 'active'
+        AND s.status = 'active'" . school_where('s') . "
         ORDER BY
             CASE m.payment_status
                 WHEN 'pending' THEN 1
@@ -416,7 +505,9 @@ try {
                 WHEN 'paid' THEN 3
             END,
             s.last_name, s.first_name
-    ")->fetchAll();
+    ");
+    $pddStmt->execute($pddParams);
+    $payment_drilldown = $pddStmt->fetchAll();
 } catch (\PDOException $e) {}
 
 $paid_count = 0;
@@ -432,6 +523,7 @@ foreach ($payment_drilldown as $pd) {
         $overdue_count++;
     }
 }
+} // end $canFinancial — payment drilldown
 
 // =============================================
 // NEW QUERIES FOR TABBED REPORTS (Phase 2)
@@ -441,71 +533,96 @@ foreach ($payment_drilldown as $pd) {
 $avg_revenue_per_student = 0;
 $paying_student_count = 0;
 $top_spenders = [];
+$best_worst_months = [];
+if ($canFinancial) {
 try {
+    $rpsParams = [$date_from, $date_to];
+    school_param($rpsParams);
     $rps_stmt = $pdo->prepare("
         SELECT ROUND(SUM(p.amount) / NULLIF(COUNT(DISTINCT p.student_id), 0), 2) as avg_per_student,
                COUNT(DISTINCT p.student_id) as paying_students
         FROM payments p
-        WHERE p.payment_date BETWEEN ? AND ? AND p.amount > 0
+        WHERE p.payment_date BETWEEN ? AND ? AND p.amount > 0" . school_where('p') . "
     ");
-    $rps_stmt->execute([$date_from, $date_to]);
+    $rps_stmt->execute($rpsParams);
     $rpsRow = $rps_stmt->fetch();
     $avg_revenue_per_student = (float) ($rpsRow['avg_per_student'] ?? 0);
     $paying_student_count = (int) ($rpsRow['paying_students'] ?? 0);
 } catch (\PDOException $e) {}
 
 try {
+    $tsParams = [$date_from, $date_to];
+    school_param($tsParams);
     $ts_stmt = $pdo->prepare("
         SELECT s.first_name, s.last_name, SUM(p.amount) as total_spent, COUNT(p.id) as payment_count
         FROM students s
         JOIN payments p ON s.id = p.student_id
-        WHERE p.payment_date BETWEEN ? AND ? AND p.amount > 0
+        WHERE p.payment_date BETWEEN ? AND ? AND p.amount > 0" . school_where('s') . "
         GROUP BY s.id ORDER BY total_spent DESC LIMIT 10
     ");
-    $ts_stmt->execute([$date_from, $date_to]);
+    $ts_stmt->execute($tsParams);
     $top_spenders = $ts_stmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // --- Revenue Tab: Best/Worst Performing Months (last 24 months) ---
 $best_worst_months = [];
 try {
-    $best_worst_months = $pdo->query("
+    $bwParams = [];
+    school_param($bwParams);
+    $bwStmt = $pdo->prepare("
         SELECT DATE_FORMAT(payment_date, '%Y-%m') as month, DATE_FORMAT(payment_date, '%M %Y') as label,
                SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as revenue, COUNT(*) as txn_count
-        FROM payments WHERE payment_date >= DATE_SUB(CURDATE(), INTERVAL 24 MONTH) AND amount > 0
+        FROM payments WHERE payment_date >= DATE_SUB(CURDATE(), INTERVAL 24 MONTH) AND amount > 0" . school_where() . "
         GROUP BY month ORDER BY revenue DESC
-    ")->fetchAll();
+    ");
+    $bwStmt->execute($bwParams);
+    $best_worst_months = $bwStmt->fetchAll();
 } catch (\PDOException $e) {}
+} // end $canFinancial — Phase 2 revenue queries
 
-// --- Students Tab: Student Lifetime Value ---
+// --- Students Tab: Student Lifetime Value (financial data — gated by $canFinancial) ---
 $ltv_cohorts = [];
+$top_ltv_students = [];
+if ($canFinancial) {
 try {
-    $ltv_cohorts = $pdo->query("
+    $ltvParams = [];
+    school_param($ltvParams);
+    $ltvStmt = $pdo->prepare("
         SELECT YEAR(s.join_date) as join_year, COUNT(DISTINCT s.id) as student_count,
                ROUND(AVG(COALESCE(rev.total, 0)), 2) as avg_ltv
         FROM students s
         LEFT JOIN (SELECT student_id, SUM(amount) as total FROM payments WHERE amount > 0 GROUP BY student_id) rev ON s.id = rev.student_id
-        WHERE s.is_parent = 0
+        WHERE s.is_parent = 0" . school_where('s') . "
         GROUP BY join_year ORDER BY join_year DESC
-    ")->fetchAll();
+    ");
+    $ltvStmt->execute($ltvParams);
+    $ltv_cohorts = $ltvStmt->fetchAll();
 } catch (\PDOException $e) {}
 
 $top_ltv_students = [];
 try {
-    $top_ltv_students = $pdo->query("
+    $tltvParams = [];
+    school_param($tltvParams);
+    $tltvStmt = $pdo->prepare("
         SELECT s.first_name, s.last_name, s.join_date, s.status, COALESCE(SUM(p.amount), 0) as lifetime_revenue,
                COUNT(p.id) as total_payments
         FROM students s
         LEFT JOIN payments p ON s.id = p.student_id AND p.amount > 0
-        WHERE s.is_parent = 0
+        WHERE s.is_parent = 0" . school_where('s') . "
         GROUP BY s.id ORDER BY lifetime_revenue DESC LIMIT 20
-    ")->fetchAll();
+    ");
+    $tltvStmt->execute($tltvParams);
+    $top_ltv_students = $tltvStmt->fetchAll();
 } catch (\PDOException $e) {}
+} // end $canFinancial — LTV queries
 
-// --- Students Tab: Churn Risk / At-Risk Students ---
+// --- Students Tab: Churn Risk / At-Risk Students (student data) ---
+if ($canStudent) {
 $churn_risk_students = [];
 try {
-    $churn_risk_students = $pdo->query("
+    $crParams = [];
+    school_param($crParams);
+    $crStmt = $pdo->prepare("
         SELECT s.id, s.first_name, s.last_name, s.email, m.end_date, DATEDIFF(m.end_date, CURDATE()) as days_left,
                mp.name as plan_name, m.auto_renew,
                (SELECT COUNT(*) FROM attendance a WHERE a.student_id = s.id AND a.status = 'present'
@@ -514,69 +631,87 @@ try {
         FROM students s
         JOIN memberships m ON m.student_id = s.id AND m.status = 'active'
         JOIN membership_plans mp ON m.plan_id = mp.id
-        WHERE s.status = 'active' AND (
+        WHERE s.status = 'active'" . school_where('s') . " AND (
             (m.end_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY) AND m.auto_renew = 0)
             OR EXISTS (SELECT 1 FROM renewal_log rl WHERE rl.student_id = s.id AND rl.action = 'payment_failed')
         )
         ORDER BY days_left ASC
-    ")->fetchAll();
+    ");
+    $crStmt->execute($crParams);
+    $churn_risk_students = $crStmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // --- Students Tab: Belt Progression Pipeline ---
 $belt_pipeline = [];
 try {
-    $belt_pipeline = $pdo->query("
+    $bpParams = [];
+    school_param($bpParams);
+    $bpStmt = $pdo->prepare("
         SELECT belt_rank, COUNT(*) as student_count
         FROM students
-        WHERE status = 'active' AND is_parent = 0 AND belt_rank IS NOT NULL AND belt_rank != ''
+        WHERE status = 'active' AND is_parent = 0 AND belt_rank IS NOT NULL AND belt_rank != ''" . school_where() . "
         GROUP BY belt_rank ORDER BY student_count DESC
-    ")->fetchAll();
+    ");
+    $bpStmt->execute($bpParams);
+    $belt_pipeline = $bpStmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // --- Attendance Tab: Class Capacity Utilization ---
 $class_capacity = [];
 try {
-    $class_capacity = $pdo->query("
+    $ccParams = [];
+    school_param($ccParams);
+    $ccStmt = $pdo->prepare("
         SELECT c.name, c.day_of_week, c.start_time, c.max_students,
                COUNT(ce.id) as enrolled, ROUND(COUNT(ce.id) * 100.0 / NULLIF(c.max_students, 0), 1) as utilization_pct
         FROM classes c
         LEFT JOIN class_enrollments ce ON c.id = ce.class_id AND ce.status = 'active'
-        WHERE c.status = 'active' GROUP BY c.id ORDER BY utilization_pct DESC
-    ")->fetchAll();
+        WHERE c.status = 'active'" . school_where('c') . " GROUP BY c.id ORDER BY utilization_pct DESC
+    ");
+    $ccStmt->execute($ccParams);
+    $class_capacity = $ccStmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // --- Attendance Tab: Attendance Trends (12 months for Chart.js line chart) ---
 $attendance_trends = [];
 try {
-    $attendance_trends = $pdo->query("
+    $atParams = [];
+    school_param($atParams);
+    $atStmt = $pdo->prepare("
         SELECT DATE_FORMAT(a.attendance_date, '%Y-%m') as month,
                COUNT(CASE WHEN a.status = 'present' THEN 1 END) as present_count,
                COUNT(*) as total_records,
                ROUND(COUNT(CASE WHEN a.status = 'present' THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 1) as rate
         FROM attendance a
-        WHERE a.attendance_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+        WHERE a.attendance_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)" . school_where('a') . "
         GROUP BY month ORDER BY month ASC
-    ")->fetchAll();
+    ");
+    $atStmt->execute($atParams);
+    $attendance_trends = $atStmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // --- Events Tab: Event Revenue Summary ---
 $event_revenue_summary = [];
 try {
+    $ersParams = [$date_from, $date_to];
+    school_param($ersParams);
     $ers_stmt = $pdo->prepare("
         SELECT e.event_type, COUNT(DISTINCT e.id) as event_count, COUNT(er.id) as registrations,
                COALESCE(SUM(er.amount_paid), 0) as total_revenue
         FROM events e
         LEFT JOIN event_registrations er ON e.id = er.event_id
-        WHERE e.event_date BETWEEN ? AND ?
+        WHERE e.event_date BETWEEN ? AND ?" . school_where('e') . "
         GROUP BY e.event_type ORDER BY total_revenue DESC
     ");
-    $ers_stmt->execute([$date_from, $date_to]);
+    $ers_stmt->execute($ersParams);
     $event_revenue_summary = $ers_stmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // --- Events Tab: Event ROI / Attendance Analysis ---
 $event_roi = [];
 try {
+    $eroiParams = [$date_from, $date_to];
+    school_param($eroiParams);
     $eroi_stmt = $pdo->prepare("
         SELECT e.name, e.event_type, e.event_date, e.registration_fee, e.max_participants,
                COUNT(er.id) as registrations,
@@ -586,41 +721,61 @@ try {
                ROUND(COUNT(er.id) * 100.0 / NULLIF(e.max_participants, 0), 1) as fill_rate
         FROM events e
         LEFT JOIN event_registrations er ON e.id = er.event_id
-        WHERE e.event_date BETWEEN ? AND ?
+        WHERE e.event_date BETWEEN ? AND ?" . school_where('e') . "
         GROUP BY e.id ORDER BY e.event_date DESC
     ");
-    $eroi_stmt->execute([$date_from, $date_to]);
+    $eroi_stmt->execute($eroiParams);
     $event_roi = $eroi_stmt->fetchAll();
 } catch (\PDOException $e) {}
+} // end $canStudent — events, churn risk, belt pipeline, class capacity, attendance trends
 
-// --- Compliance Tab: Discount Code Performance ---
+// --- Compliance Tab: Discount Code Performance (financial) ---
 $discount_performance = [];
+$credit_summary = ['students_with_credit' => 0, 'total_outstanding' => 0];
+$recent_credits = [];
+if ($canFinancial) {
 try {
-    $discount_performance = $pdo->query("
+    $dpParams = [];
+    school_param($dpParams);
+    $dpStmt = $pdo->prepare("
         SELECT dc.code, dc.description, dc.discount_type, dc.discount_value,
                dc.uses_count, dc.max_uses, COALESCE(SUM(dcu.applied_amount), 0) as total_discounted, dc.is_active
         FROM discount_codes dc
         LEFT JOIN discount_code_uses dcu ON dc.id = dcu.discount_code_id
+        WHERE 1=1" . school_where('dc') . "
         GROUP BY dc.id ORDER BY total_discounted DESC
-    ")->fetchAll();
+    ");
+    $dpStmt->execute($dpParams);
+    $discount_performance = $dpStmt->fetchAll();
 } catch (\PDOException $e) {}
 
 // --- Compliance Tab: Credit Ledger Summary ---
 $credit_summary = ['students_with_credit' => 0, 'total_outstanding' => 0];
 $recent_credits = [];
 try {
-    $cs = $pdo->query("
+    $csParams = [];
+    school_param($csParams);
+    $csStmt = $pdo->prepare("
         SELECT COUNT(DISTINCT id) as students_with_credit, COALESCE(SUM(account_credit), 0) as total_outstanding
-        FROM students WHERE account_credit > 0
-    ")->fetch();
+        FROM students WHERE account_credit > 0" . school_where() . "
+    ");
+    $csStmt->execute($csParams);
+    $cs = $csStmt->fetch();
     $credit_summary = $cs ?: $credit_summary;
 } catch (\PDOException $e) {}
 try {
-    $recent_credits = $pdo->query("
+    $rcrParams = [];
+    school_param($rcrParams);
+    $rcrStmt = $pdo->prepare("
         SELECT cl.created_at, s.first_name, s.last_name, cl.amount, cl.balance_after, cl.reference_type, cl.description
-        FROM credit_ledger cl JOIN students s ON cl.student_id = s.id ORDER BY cl.created_at DESC LIMIT 25
-    ")->fetchAll();
+        FROM credit_ledger cl JOIN students s ON cl.student_id = s.id
+        WHERE 1=1" . school_where('s') . "
+        ORDER BY cl.created_at DESC LIMIT 25
+    ");
+    $rcrStmt->execute($rcrParams);
+    $recent_credits = $rcrStmt->fetchAll();
 } catch (\PDOException $e) {}
+} // end $canFinancial — discount codes, credit ledger
 
 // =============================================
 // NEW REPORT TAB QUERIES (Phases 4-8)
@@ -685,7 +840,8 @@ if (is_super_admin()) {
     } catch (\PDOException $e) { $school_plan_mix = []; }
 }
 
-// === PHASE 5: Instructor Performance ===
+// === PHASE 5: Instructor Performance (student data) ===
+if ($canStudent) {
 $instructor_summary = [];
 $instructor_promotions = [];
 $instructor_capacity = [];
@@ -745,8 +901,9 @@ try {
     $ic_stmt->execute($params);
     $instructor_capacity = $ic_stmt->fetchAll();
 } catch (\PDOException $e) {}
+} // end $canStudent — instructor performance
 
-// === PHASE 6: Membership Lifecycle ===
+// === PHASE 6: Membership Lifecycle (financial data) ===
 $new_memberships_trend = [];
 $membership_renewal_rate = 0;
 $membership_cancel_rate = 0;
@@ -754,6 +911,7 @@ $plan_popularity = [];
 $avg_membership_duration = 0;
 $payment_collection_rate = 0;
 $mrr = 0;
+if ($canFinancial) {
 
 try {
     $params = [];
@@ -855,8 +1013,10 @@ try {
     $mrr_stmt->execute($params);
     $mrr = (float) ($mrr_stmt->fetch()['mrr'] ?? 0);
 } catch (\PDOException $e) {}
+} // end $canFinancial — membership lifecycle
 
-// === PHASE 7: Belt Progression ===
+// === PHASE 7: Belt Progression (student data) ===
+if ($canStudent) {
 $avg_promotion_time = [];
 $promotion_velocity = [];
 $instructor_promotions_detail = [];
@@ -935,6 +1095,7 @@ $attendance_heatmap = [];
 $student_consistency = [];
 $dropout_risk = [];
 $seasonal_patterns = [];
+// (still inside $canStudent block)
 
 try {
     $ah_stmt = $pdo->prepare("
@@ -1008,6 +1169,7 @@ try {
     $sp_stmt->execute($params);
     $seasonal_patterns = $sp_stmt->fetchAll();
 } catch (\PDOException $e) {}
+} // end $canStudent — belt progression, attendance patterns
 
 // --- Tab Badge Counts ---
 $tab_badges = [
@@ -1072,6 +1234,7 @@ include 'includes/header.php';
 
     <!-- Summary Cards -->
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+        <?php if ($canStudent): ?>
         <div class="bg-white rounded-lg shadow p-6">
             <h3 class="text-gray-600 text-sm font-medium mb-2">Total Students</h3>
             <p class="text-3xl font-bold text-gray-800"><?php echo $stats['total_students']; ?></p>
@@ -1082,6 +1245,8 @@ include 'includes/header.php';
             <p class="text-3xl font-bold text-gray-800"><?php echo $stats['active_memberships']; ?></p>
             <p class="text-sm text-orange-600 mt-1"><?php echo $stats['expiring_soon']; ?> expiring soon</p>
         </div>
+        <?php endif; ?>
+        <?php if ($canFinancial): ?>
         <div class="bg-white rounded-lg shadow p-6">
             <h3 class="text-gray-600 text-sm font-medium mb-2">Revenue (<?php echo $range_label; ?>)</h3>
             <p class="text-3xl font-bold text-green-600"><?php echo formatMoney($stats['range_revenue']); ?></p>
@@ -1095,10 +1260,11 @@ include 'includes/header.php';
             <p class="text-3xl font-bold <?php echo $total_compliance_issues > 0 ? 'text-red-600' : 'text-green-600'; ?>"><?php echo $total_compliance_issues; ?></p>
             <p class="text-sm <?php echo $total_compliance_issues > 0 ? 'text-red-600' : 'text-green-600'; ?> mt-1"><?php echo $total_compliance_issues > 0 ? 'Needs attention' : 'All clear'; ?></p>
         </div>
+        <?php endif; ?>
     </div>
 
     <!-- Revenue Category Breakdown Badges -->
-    <?php if (!empty($revenue_by_category)): ?>
+    <?php if ($canFinancial && !empty($revenue_by_category)): ?>
     <?php
     $categoryLabels = ['membership' => 'Memberships', 'event' => 'Events', 'merchandise' => 'Merchandise', 'other' => 'Other'];
     $categoryColors = ['membership' => 'bg-blue-100 text-blue-800 border-blue-200', 'event' => 'bg-purple-100 text-purple-800 border-purple-200', 'merchandise' => 'bg-orange-100 text-orange-800 border-orange-200', 'other' => 'bg-gray-100 text-gray-700 border-gray-200'];
@@ -1121,39 +1287,58 @@ include 'includes/header.php';
     <?php endif; ?>
 
     <!-- TAB NAVIGATION -->
+    <?php
+    // Determine default active tab based on permissions
+    $defaultTab = $canFinancial ? 'revenue' : 'students';
+    $inactiveClass = 'report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700';
+    $activeClass   = 'report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-blue-600 text-blue-600';
+    $isFirstTab    = true;
+    ?>
     <div class="bg-white rounded-lg shadow mb-6">
         <div class="flex overflow-x-auto border-b border-gray-200" id="reportTabs">
-            <button onclick="switchTab('revenue')" data-tab="revenue" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-blue-600 text-blue-600">
+            <?php if ($canFinancial): ?>
+            <button onclick="switchTab('revenue')" data-tab="revenue" class="<?php echo $defaultTab === 'revenue' ? $activeClass : $inactiveClass; ?>">
                 Revenue <?php if ($tab_badges['revenue'] > 0): ?><span class="ml-1 px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-700"><?php echo $tab_badges['revenue']; ?></span><?php endif; ?>
             </button>
-            <button onclick="switchTab('students')" data-tab="students" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+            <?php endif; ?>
+            <?php if ($canStudent): ?>
+            <button onclick="switchTab('students')" data-tab="students" class="<?php echo $defaultTab === 'students' ? $activeClass : $inactiveClass; ?>">
                 Students <?php if ($tab_badges['students'] > 0): ?><span class="ml-1 px-2 py-0.5 text-xs rounded-full bg-orange-100 text-orange-700"><?php echo $tab_badges['students']; ?> at-risk</span><?php endif; ?>
             </button>
-            <button onclick="switchTab('attendance')" data-tab="attendance" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+            <button onclick="switchTab('attendance')" data-tab="attendance" class="<?php echo $inactiveClass; ?>">
                 Attendance <?php if ($tab_badges['attendance'] > 0): ?><span class="ml-1 px-2 py-0.5 text-xs rounded-full bg-gray-200 text-gray-600"><?php echo $tab_badges['attendance']; ?> classes</span><?php endif; ?>
             </button>
-            <button onclick="switchTab('events')" data-tab="events" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+            <button onclick="switchTab('events')" data-tab="events" class="<?php echo $inactiveClass; ?>">
                 Events <?php if ($tab_badges['events'] > 0): ?><span class="ml-1 px-2 py-0.5 text-xs rounded-full bg-purple-100 text-purple-700"><?php echo $tab_badges['events']; ?></span><?php endif; ?>
             </button>
-            <button onclick="switchTab('compliance')" data-tab="compliance" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+            <?php endif; ?>
+            <?php if ($canFinancial): ?>
+            <button onclick="switchTab('compliance')" data-tab="compliance" class="<?php echo $inactiveClass; ?>">
                 Compliance <?php if ($tab_badges['compliance'] > 0): ?><span class="ml-1 px-2 py-0.5 text-xs rounded-full bg-red-100 text-red-700"><?php echo $tab_badges['compliance']; ?></span><?php endif; ?>
             </button>
+            <?php endif; ?>
             <span class="self-center px-2 text-gray-300">|</span>
-            <button onclick="switchTab('instructors')" data-tab="instructors" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+            <?php if ($canStudent): ?>
+            <button onclick="switchTab('instructors')" data-tab="instructors" class="<?php echo $inactiveClass; ?>">
                 Instructors <?php if ($tab_badges['instructors'] > 0): ?><span class="ml-1 px-2 py-0.5 text-xs rounded-full bg-teal-100 text-teal-700"><?php echo $tab_badges['instructors']; ?></span><?php endif; ?>
             </button>
-            <button onclick="switchTab('membership-lifecycle')" data-tab="membership-lifecycle" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+            <?php endif; ?>
+            <?php if ($canFinancial): ?>
+            <button onclick="switchTab('membership-lifecycle')" data-tab="membership-lifecycle" class="<?php echo $inactiveClass; ?>">
                 Memberships
             </button>
-            <button onclick="switchTab('belt-progression')" data-tab="belt-progression" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+            <?php endif; ?>
+            <?php if ($canStudent): ?>
+            <button onclick="switchTab('belt-progression')" data-tab="belt-progression" class="<?php echo $inactiveClass; ?>">
                 Belt Progression
             </button>
-            <button onclick="switchTab('attendance-patterns')" data-tab="attendance-patterns" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+            <button onclick="switchTab('attendance-patterns')" data-tab="attendance-patterns" class="<?php echo $inactiveClass; ?>">
                 Attendance Patterns <?php if ($tab_badges['attendance_patterns'] > 0): ?><span class="ml-1 px-2 py-0.5 text-xs rounded-full bg-orange-100 text-orange-700"><?php echo $tab_badges['attendance_patterns']; ?> at-risk</span><?php endif; ?>
             </button>
+            <?php endif; ?>
             <?php if (is_super_admin()): ?>
             <span class="self-center px-2 text-gray-300">|</span>
-            <button onclick="switchTab('schools')" data-tab="schools" class="report-tab px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700">
+            <button onclick="switchTab('schools')" data-tab="schools" class="<?php echo $inactiveClass; ?>">
                 School Comparison <?php if (!empty($tab_badges['schools'])): ?><span class="ml-1 px-2 py-0.5 text-xs rounded-full bg-yellow-100 text-yellow-700"><?php echo $tab_badges['schools']; ?> schools</span><?php endif; ?>
             </button>
             <?php endif; ?>
@@ -1161,9 +1346,10 @@ include 'includes/header.php';
     </div>
 
     <!-- ============================================= -->
-    <!-- REVENUE TAB -->
+    <!-- REVENUE TAB (Financial) -->
     <!-- ============================================= -->
-    <div id="tab-revenue" class="report-panel">
+    <?php if ($canFinancial): ?>
+    <div id="tab-revenue" class="report-panel<?php echo $defaultTab !== 'revenue' ? ' hidden' : ''; ?>">
 
     <!-- Export Buttons -->
     <div class="flex justify-end mb-4">
@@ -1408,11 +1594,13 @@ include 'includes/header.php';
     <?php endif; ?>
 
     </div><!-- END tab-revenue -->
+    <?php endif; // $canFinancial — revenue tab ?>
 
     <!-- ============================================= -->
-    <!-- STUDENTS TAB -->
+    <!-- STUDENTS TAB (Student Data) -->
     <!-- ============================================= -->
-    <div id="tab-students" class="report-panel hidden">
+    <?php if ($canStudent): ?>
+    <div id="tab-students" class="report-panel<?php echo $defaultTab !== 'students' ? ' hidden' : ''; ?>">
 
     <!-- Export Buttons -->
     <div class="flex justify-end mb-4">
@@ -1436,7 +1624,8 @@ include 'includes/header.php';
         <?php else: ?><p class="text-center text-gray-500 py-4">No active students to display.</p><?php endif; ?>
     </div>
 
-    <!-- Student Lifetime Value -->
+    <!-- Student Lifetime Value (financial data — only shown if user has financial permission) -->
+    <?php if ($canFinancial): ?>
     <div class="bg-white rounded-lg shadow p-6 mb-8">
         <h2 class="text-xl font-semibold text-gray-800 mb-1">Student Lifetime Value (LTV)</h2>
         <p class="text-sm text-gray-500 mb-4">Average total revenue per student, grouped by join year.</p>
@@ -1462,6 +1651,7 @@ include 'includes/header.php';
         </table></div>
         <?php endif; ?>
     </div>
+    <?php endif; // $canFinancial — LTV section ?>
 
     <!-- Churn Risk -->
     <div class="bg-white rounded-lg shadow p-6 mb-8">
@@ -1512,10 +1702,12 @@ include 'includes/header.php';
     <?php endif; ?>
 
     </div><!-- END tab-students -->
+    <?php endif; // $canStudent — students tab ?>
 
     <!-- ============================================= -->
-    <!-- ATTENDANCE TAB -->
+    <!-- ATTENDANCE TAB (Student Data) -->
     <!-- ============================================= -->
+    <?php if ($canStudent): ?>
     <div id="tab-attendance" class="report-panel hidden">
 
     <!-- Export Buttons -->
@@ -1611,10 +1803,12 @@ include 'includes/header.php';
     </div>
 
     </div><!-- END tab-attendance -->
+    <?php endif; // $canStudent — attendance tab ?>
 
     <!-- ============================================= -->
-    <!-- EVENTS TAB -->
+    <!-- EVENTS TAB (Student Data) -->
     <!-- ============================================= -->
+    <?php if ($canStudent): ?>
     <div id="tab-events" class="report-panel hidden">
 
     <!-- Export Buttons -->
@@ -1674,10 +1868,12 @@ include 'includes/header.php';
     <?php endif; ?>
 
     </div><!-- END tab-events -->
+    <?php endif; // $canStudent — events tab ?>
 
     <!-- ============================================= -->
-    <!-- COMPLIANCE TAB -->
+    <!-- COMPLIANCE TAB (Financial) -->
     <!-- ============================================= -->
+    <?php if ($canFinancial): ?>
     <div id="tab-compliance" class="report-panel hidden">
 
     <!-- Export Buttons -->
@@ -1836,26 +2032,35 @@ include 'includes/header.php';
     </div>
 
     </div><!-- END tab-compliance -->
+    <?php endif; // $canFinancial — compliance tab ?>
 
     <!-- ============================================= -->
-    <!-- INSTRUCTOR PERFORMANCE TAB -->
+    <!-- INSTRUCTOR PERFORMANCE TAB (Student Data) -->
     <!-- ============================================= -->
+    <?php if ($canStudent): ?>
     <?php include 'reports_html_part8.php'; ?>
+    <?php endif; ?>
 
     <!-- ============================================= -->
-    <!-- MEMBERSHIP LIFECYCLE TAB -->
+    <!-- MEMBERSHIP LIFECYCLE TAB (Financial) -->
     <!-- ============================================= -->
+    <?php if ($canFinancial): ?>
     <?php include 'reports_html_part9.php'; ?>
+    <?php endif; ?>
 
     <!-- ============================================= -->
-    <!-- BELT PROGRESSION TAB -->
+    <!-- BELT PROGRESSION TAB (Student Data) -->
     <!-- ============================================= -->
+    <?php if ($canStudent): ?>
     <?php include 'reports_html_part10.php'; ?>
+    <?php endif; ?>
 
     <!-- ============================================= -->
-    <!-- ATTENDANCE PATTERNS TAB -->
+    <!-- ATTENDANCE PATTERNS TAB (Student Data) -->
     <!-- ============================================= -->
+    <?php if ($canStudent): ?>
     <?php include 'reports_html_part11.php'; ?>
+    <?php endif; ?>
 
     <!-- ============================================= -->
     <!-- SCHOOL COMPARISON TAB (Super Admin Only) -->

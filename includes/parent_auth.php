@@ -343,6 +343,105 @@ function sync_parent_payment_methods_to_student(int $parentId, int $studentId): 
 }
 
 /**
+ * Copy payment methods from a child-student to a parent-student (reverse sync).
+ * Used for edge cases where the child had a card before the parent account existed.
+ * Both are rows in the students table; payment_methods.student_id is the key.
+ */
+function sync_child_payment_methods_to_parent(int $childStudentId, int $parentStudentId): int
+{
+    $pdo = get_db();
+    $copied = 0;
+
+    try {
+        // Get child-student's payment methods
+        $childMethods = $pdo->prepare(
+            "SELECT * FROM payment_methods WHERE student_id = ? ORDER BY is_default DESC, created_at DESC"
+        );
+        $childMethods->execute([$childStudentId]);
+        $childCards = $childMethods->fetchAll();
+
+        if (empty($childCards)) {
+            return 0;
+        }
+
+        // Get child name for the label
+        $stParams = [$childStudentId];
+        $childStmt = $pdo->prepare("SELECT first_name, last_name FROM students WHERE id = ?" . school_where() . " LIMIT 1");
+        school_param($stParams);
+        $childStmt->execute($stParams);
+        $childInfo = $childStmt->fetch();
+        $childName = $childInfo ? trim($childInfo['first_name'] . ' ' . $childInfo['last_name']) : 'Child';
+
+        // Get parent's existing payment methods to avoid duplicates
+        $existingStmt = $pdo->prepare(
+            "SELECT last_four, card_brand FROM payment_methods WHERE student_id = ?"
+        );
+        $existingStmt->execute([$parentStudentId]);
+        $existingCards = [];
+        foreach ($existingStmt->fetchAll() as $ec) {
+            $existingCards[] = ($ec['card_brand'] ?? '') . ':' . $ec['last_four'];
+        }
+
+        // Count existing parent cards to decide default status
+        $countStmt = $pdo->prepare("SELECT COUNT(*) FROM payment_methods WHERE student_id = ?");
+        $countStmt->execute([$parentStudentId]);
+        $existingCount = (int) $countStmt->fetchColumn();
+
+        foreach ($childCards as $cc) {
+            // Skip cards that are themselves already a "(via ...)" copy to avoid chains
+            if (stripos($cc['label'] ?? '', '(via ') !== false) {
+                continue;
+            }
+
+            $cardKey = ($cc['card_brand'] ?? '') . ':' . $cc['last_four'];
+            if (in_array($cardKey, $existingCards, true)) {
+                continue;
+            }
+
+            $label = ($cc['label'] ?: ($cc['card_brand'] . ' ' . $cc['last_four'])) . ' (via ' . $childName . ')';
+            $isDefault = ($existingCount === 0 && $copied === 0) ? 1 : 0;
+
+            try {
+                $ins = $pdo->prepare(
+                    "INSERT INTO payment_methods (student_id, label, card_brand, last_four, exp_month, exp_year, encrypted_token, gateway_payment_method_id, is_default)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                );
+                $ins->execute([
+                    $parentStudentId,
+                    $label,
+                    $cc['card_brand'],
+                    $cc['last_four'],
+                    $cc['exp_month'] ?? null,
+                    $cc['exp_year'] ?? null,
+                    $cc['encrypted_token'] ?? '',
+                    $cc['gateway_payment_method_id'] ?? null,
+                    $isDefault,
+                ]);
+                $copied++;
+            } catch (\PDOException $e) {
+                try {
+                    $ins = $pdo->prepare(
+                        "INSERT INTO payment_methods (student_id, label, card_brand, last_four, encrypted_token, is_default)
+                         VALUES (?, ?, ?, ?, ?, ?)"
+                    );
+                    $ins->execute([
+                        $parentStudentId,
+                        $label,
+                        $cc['card_brand'],
+                        $cc['last_four'],
+                        $cc['encrypted_token'] ?? '',
+                        $isDefault,
+                    ]);
+                    $copied++;
+                } catch (\PDOException $e2) {}
+            }
+        }
+    } catch (\PDOException $e) {}
+
+    return $copied;
+}
+
+/**
  * Unlink a child-student from a parent-student.
  */
 function unlink_student_from_parent(int $parentId, int $studentId): bool

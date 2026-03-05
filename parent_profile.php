@@ -87,6 +87,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    if (isset($_POST['update_comm_consent'])) {
+        require_once __DIR__ . '/includes/messaging.php';
+        $ccText    = get_comm_consent_text();
+        $ccVersion = get_comm_consent_version();
+        $wantEmail = !empty($_POST['comm_consent_email']) ? 1 : 0;
+        $wantSms   = !empty($_POST['comm_consent_sms'])   ? 1 : 0;
+        $consentNow = date('Y-m-d H:i:s');
+        $consentIp  = $_SERVER['REMOTE_ADDR'] ?? '';
+
+        try {
+            $tbl = $isStudentParent ? 'students' : 'parents';
+            $ccParams = [
+                $wantEmail,
+                $wantEmail ? $consentNow : null,
+                $wantSms,
+                $wantSms ? $consentNow : null,
+                ($wantEmail || $wantSms) ? $ccVersion : null,
+                ($wantEmail || $wantSms) ? $consentIp : null,
+                $parentId,
+            ];
+            $ccSql = "UPDATE {$tbl} SET
+                comm_consent_email = ?, comm_consent_email_at = ?,
+                comm_consent_sms = ?, comm_consent_sms_at = ?,
+                comm_consent_version = ?, comm_consent_ip = ?
+                WHERE id = ?" . school_where();
+            school_param($ccParams);
+            $pdo->prepare($ccSql)->execute($ccParams);
+
+            // Re-fetch
+            $params = [$parentId];
+            school_param($params);
+            $stmt->execute($params);
+            $parent = $stmt->fetch();
+
+            $message = showAlert('Communication preferences updated!', 'success');
+        } catch (\PDOException $e) {
+            $message = showAlert('Unable to update communication preferences.', 'error');
+        }
+    }
+
     if (isset($_POST['change_password'])) {
         $currentPw = $_POST['current_password'] ?? '';
         $newPw     = $_POST['new_password'] ?? '';
@@ -269,6 +309,60 @@ include 'includes/parent_header.php';
                 </div>
             </div>
         </div>
+    </div>
+
+    <!-- Communication Preferences -->
+    <div class="mt-8 bg-white rounded-lg shadow p-6">
+        <h2 class="text-lg font-semibold text-gray-800 mb-2">Communication Preferences</h2>
+        <p class="text-sm text-gray-600 mb-4">
+            Manage your consent for receiving email and SMS/text message communications.
+        </p>
+        <?php
+        if (!function_exists('get_comm_consent_text')) {
+            require_once __DIR__ . '/includes/messaging.php';
+        }
+        $ccDisplayText    = get_comm_consent_text();
+        $ccDisplayVersion = get_comm_consent_version();
+        ?>
+        <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 max-h-48 overflow-y-auto mb-4 text-sm text-gray-700 leading-relaxed">
+            <?= nl2br(htmlspecialchars($ccDisplayText)) ?>
+        </div>
+        <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
+            <input type="hidden" name="update_comm_consent" value="1">
+            <div class="space-y-2">
+                <label class="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" name="comm_consent_email" value="1"
+                           class="w-5 h-5 text-blue-600 rounded"
+                           <?= !empty($parent['comm_consent_email']) ? 'checked' : '' ?>>
+                    <span class="text-sm font-medium text-gray-700">I consent to receive <strong>email</strong> communications</span>
+                </label>
+                <label class="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" name="comm_consent_sms" value="1"
+                           class="w-5 h-5 text-blue-600 rounded"
+                           <?= !empty($parent['comm_consent_sms']) ? 'checked' : '' ?>>
+                    <span class="text-sm font-medium text-gray-700">I consent to receive <strong>SMS/text message</strong> communications</span>
+                </label>
+            </div>
+            <?php if (!empty($parent['comm_consent_email_at']) || !empty($parent['comm_consent_sms_at'])): ?>
+            <p class="text-xs text-gray-400">
+                Last updated:
+                <?php if (!empty($parent['comm_consent_email_at'])): ?>
+                    Email consent <?= date('M j, Y g:i A', strtotime($parent['comm_consent_email_at'])) ?>
+                <?php endif; ?>
+                <?php if (!empty($parent['comm_consent_sms_at'])): ?>
+                    <?= !empty($parent['comm_consent_email_at']) ? ' · ' : '' ?>SMS consent <?= date('M j, Y g:i A', strtotime($parent['comm_consent_sms_at'])) ?>
+                <?php endif; ?>
+                <?php if (!empty($parent['comm_consent_version'])): ?>
+                    · Version <?= htmlspecialchars($parent['comm_consent_version']) ?>
+                <?php endif; ?>
+            </p>
+            <?php endif; ?>
+            <button type="submit"
+                    class="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-4 rounded-lg text-sm">
+                Save Preferences
+            </button>
+        </form>
     </div>
 </div>
 

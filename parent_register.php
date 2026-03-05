@@ -21,6 +21,9 @@ if (current_user_type() === 'student') {
 }
 
 $pdo = get_db();
+require_once __DIR__ . '/includes/messaging.php';
+$comm_consent_text    = get_comm_consent_text();
+$comm_consent_version = get_comm_consent_version();
 $errors = [];
 $success = false;
 $form = [
@@ -87,11 +90,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (empty($errors)) {
         $hash = password_hash($password, PASSWORD_DEFAULT);
-        $stmt = $pdo->prepare("
-            INSERT INTO parents (school_id, username, password_hash, first_name, last_name, email, phone, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
-        ");
-        $stmt->execute([
+
+        // Detect available columns for backward-compatible INSERT
+        $parentCols    = $pdo->query("SHOW COLUMNS FROM parents")->fetchAll();
+        $parentColNames = array_column($parentCols, 'Field');
+
+        $insertCols   = ['school_id', 'username', 'password_hash', 'first_name', 'last_name', 'email', 'phone', 'status'];
+        $insertVals   = ['?', '?', '?', '?', '?', '?', '?', '?'];
+        $insertParams = [
             current_school_id(),
             $form['username'],
             $hash,
@@ -99,7 +105,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $form['last_name'],
             $form['email'] ?: null,
             $form['phone'] ?: null,
-        ]);
+            'active',
+        ];
+
+        // Communication consent
+        $consentNow = date('Y-m-d H:i:s');
+        $consentIp  = $_SERVER['REMOTE_ADDR'] ?? '';
+        if (!empty($_POST['comm_consent_email']) && in_array('comm_consent_email', $parentColNames, true)) {
+            $insertCols[] = 'comm_consent_email';    $insertVals[] = '?'; $insertParams[] = 1;
+            $insertCols[] = 'comm_consent_email_at'; $insertVals[] = '?'; $insertParams[] = $consentNow;
+        }
+        if (!empty($_POST['comm_consent_sms']) && in_array('comm_consent_sms', $parentColNames, true)) {
+            $insertCols[] = 'comm_consent_sms';    $insertVals[] = '?'; $insertParams[] = 1;
+            $insertCols[] = 'comm_consent_sms_at'; $insertVals[] = '?'; $insertParams[] = $consentNow;
+        }
+        if ((!empty($_POST['comm_consent_email']) || !empty($_POST['comm_consent_sms'])) && in_array('comm_consent_version', $parentColNames, true)) {
+            $insertCols[] = 'comm_consent_version'; $insertVals[] = '?'; $insertParams[] = $comm_consent_version;
+            $insertCols[] = 'comm_consent_ip';       $insertVals[] = '?'; $insertParams[] = $consentIp;
+        }
+
+        $colList = implode(', ', $insertCols);
+        $valList = implode(', ', $insertVals);
+        $stmt = $pdo->prepare("INSERT INTO parents ({$colList}) VALUES ({$valList})");
+        $stmt->execute($insertParams);
 
         // Auto-login
         $fetchParams = [$pdo->lastInsertId()];
@@ -197,6 +225,29 @@ $theme = get_theme();
                     <label for="password_confirm">Confirm Password *</label>
                     <input type="password" id="password_confirm" name="password_confirm" required
                            placeholder="Re-enter password">
+                </div>
+
+                <!-- Communication Consent -->
+                <div class="form-group" style="margin-top:1rem; padding:1rem; background:#f9fafb; border:1px solid #e5e7eb; border-radius:8px;">
+                    <label style="font-weight:600; margin-bottom:0.5rem; display:block;">Digital Communication Consent</label>
+                    <div style="max-height:160px; overflow-y:auto; background:white; border:1px solid #d1d5db; border-radius:6px; padding:0.75rem; font-size:0.85rem; color:#374151; line-height:1.5; margin-bottom:0.75rem;">
+                        <?= nl2br(htmlspecialchars($comm_consent_text)) ?>
+                    </div>
+                    <div style="margin-bottom:0.5rem;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:normal; margin-bottom:0.35rem;">
+                            <input type="checkbox" name="comm_consent_email" value="1"
+                                   <?= !empty($_POST['comm_consent_email']) ? 'checked' : '' ?>>
+                            I consent to receive <strong>email</strong> communications
+                        </label>
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:normal;">
+                            <input type="checkbox" name="comm_consent_sms" value="1"
+                                   <?= !empty($_POST['comm_consent_sms']) ? 'checked' : '' ?>>
+                            I consent to receive <strong>SMS/text message</strong> communications
+                        </label>
+                    </div>
+                    <p style="font-size:0.75rem; color:#6b7280; margin:0;">
+                        Consent is optional and not required for enrollment. You can update your preferences at any time from your profile page.
+                    </p>
                 </div>
 
                 <button type="submit" class="btn btn-primary btn-block">Create Account</button>

@@ -87,6 +87,17 @@ run_migration($pdo, 'Create schools table', "CREATE TABLE IF NOT EXISTS schools 
 
 run_migration($pdo, 'Insert default school', "INSERT IGNORE INTO schools (id, name, slug) VALUES (1, 'Default School', 'default')", $results, $errors);
 
+// Add banner_color column to schools table for per-school banner customisation
+try {
+    $colCheck = $pdo->query("SHOW COLUMNS FROM schools LIKE 'banner_color'");
+    if ($colCheck->rowCount() === 0) {
+        $pdo->exec("ALTER TABLE schools ADD COLUMN banner_color VARCHAR(7) DEFAULT '#3b82f6'");
+        $results[] = '[OK] Added banner_color column to schools table';
+    }
+} catch (\PDOException $e) {
+    $errors[] = '[ERROR] Adding banner_color column: ' . $e->getMessage();
+}
+
 run_migration($pdo, 'Create settings table', "CREATE TABLE IF NOT EXISTS settings (
     school_id INT NOT NULL DEFAULT 1,
     setting_key VARCHAR(100) NOT NULL,
@@ -429,6 +440,447 @@ run_migration($pdo, 'Index event_registrations student', "ALTER TABLE event_regi
 run_migration($pdo, 'Index event_registrations payment', "ALTER TABLE event_registrations ADD INDEX idx_event_reg_payment (payment_status)", $results, $errors);
 run_migration($pdo, 'Index message_recipients', "ALTER TABLE message_recipients ADD INDEX idx_msg_recipients (recipient_id, is_read)", $results, $errors);
 run_migration($pdo, 'Index training_logs student', "ALTER TABLE training_logs ADD INDEX idx_training_student (student_id)", $results, $errors);
+
+// ============================================================================
+// 14. Password resets
+// ============================================================================
+
+run_migration($pdo, 'Create password_resets table', "CREATE TABLE IF NOT EXISTS password_resets (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    school_id INT NOT NULL DEFAULT 1,
+    user_type VARCHAR(20) NOT NULL DEFAULT 'student',
+    user_id INT NOT NULL,
+    username VARCHAR(255) NOT NULL,
+    code_hash VARCHAR(255) NOT NULL,
+    ip_address VARCHAR(45) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    used_at DATETIME DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_pr_user (user_type, user_id),
+    INDEX idx_pr_username (username),
+    INDEX idx_pr_expires (expires_at)
+)", $results, $errors);
+
+// ============================================================================
+// 15. Conversation messaging system
+// ============================================================================
+
+run_migration($pdo, 'Create conversations table', "CREATE TABLE IF NOT EXISTS conversations (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    school_id INT NOT NULL DEFAULT 1,
+    participant_one_type ENUM('admin','student') NOT NULL,
+    participant_one_id INT NOT NULL,
+    participant_two_type ENUM('admin','student') NOT NULL,
+    participant_two_id INT NOT NULL,
+    last_message_at DATETIME DEFAULT NULL,
+    last_message_preview VARCHAR(100) DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_conv_school (school_id),
+    INDEX idx_conv_p1 (participant_one_type, participant_one_id, school_id),
+    INDEX idx_conv_p2 (participant_two_type, participant_two_id, school_id),
+    INDEX idx_conv_last_msg (last_message_at),
+    UNIQUE KEY unique_conversation (school_id, participant_one_type, participant_one_id, participant_two_type, participant_two_id)
+)", $results, $errors);
+
+run_migration($pdo, 'Create conversation_participants table', "CREATE TABLE IF NOT EXISTS conversation_participants (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    school_id INT NOT NULL DEFAULT 1,
+    conversation_id INT NOT NULL,
+    participant_type ENUM('admin','student') NOT NULL,
+    participant_id INT NOT NULL,
+    last_read_at DATETIME DEFAULT NULL,
+    hidden_at DATETIME DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_cp_school (school_id),
+    INDEX idx_cp_conversation (conversation_id),
+    INDEX idx_cp_participant (participant_type, participant_id, school_id),
+    UNIQUE KEY unique_participant (conversation_id, participant_type, participant_id)
+)", $results, $errors);
+
+run_migration($pdo, 'Create direct_messages table', "CREATE TABLE IF NOT EXISTS direct_messages (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    school_id INT NOT NULL DEFAULT 1,
+    conversation_id INT NOT NULL,
+    sender_type ENUM('admin','student') NOT NULL,
+    sender_id INT NOT NULL,
+    body TEXT NOT NULL,
+    is_flagged TINYINT(1) NOT NULL DEFAULT 0,
+    flag_reason VARCHAR(255) DEFAULT NULL,
+    is_system TINYINT(1) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_dm_school (school_id),
+    INDEX idx_dm_conversation (conversation_id, created_at),
+    INDEX idx_dm_sender (sender_type, sender_id),
+    INDEX idx_dm_flagged (is_flagged, school_id)
+)", $results, $errors);
+
+run_migration($pdo, 'Create student_blocks table', "CREATE TABLE IF NOT EXISTS student_blocks (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    school_id INT NOT NULL DEFAULT 1,
+    blocker_student_id INT NOT NULL,
+    blocked_student_id INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_sb_school (school_id),
+    INDEX idx_sb_blocker (blocker_student_id, school_id),
+    INDEX idx_sb_blocked (blocked_student_id, school_id),
+    UNIQUE KEY unique_block (school_id, blocker_student_id, blocked_student_id)
+)", $results, $errors);
+
+run_migration($pdo, 'Create moderation_words table', "CREATE TABLE IF NOT EXISTS moderation_words (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    school_id INT NOT NULL DEFAULT 1,
+    word VARCHAR(100) NOT NULL,
+    severity ENUM('flag','block') NOT NULL DEFAULT 'flag',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_mw_school (school_id)
+)", $results, $errors);
+
+run_migration($pdo, 'Create flagged_message_reviews table', "CREATE TABLE IF NOT EXISTS flagged_message_reviews (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    school_id INT NOT NULL DEFAULT 1,
+    direct_message_id INT NOT NULL,
+    reviewed_by INT DEFAULT NULL,
+    review_action ENUM('pending','dismissed','warned','suspended') NOT NULL DEFAULT 'pending',
+    review_notes TEXT DEFAULT NULL,
+    reviewed_at DATETIME DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_fmr_school (school_id),
+    INDEX idx_fmr_message (direct_message_id),
+    INDEX idx_fmr_status (review_action, school_id)
+)", $results, $errors);
+
+// Seed default moderation words (only inserts if table is empty)
+try {
+    $checkWords = $pdo->query("SELECT COUNT(*) FROM moderation_words");
+    if ((int) $checkWords->fetchColumn() === 0) {
+        $defaultWords = [
+            // Threats
+            'kill you', 'beat you up', 'hurt you', 'fight you', 'punch you', 'stab you',
+            'shoot you', 'murder', 'gonna die', 'death threat', 'come for you',
+            // Severe profanity & slurs
+            'fuck you', 'fucking', 'motherfucker', 'shit', 'bitch', 'asshole',
+            'bastard', 'dick', 'pussy', 'whore', 'slut', 'retard', 'retarded',
+            'faggot', 'nigger', 'nigga', 'spic', 'chink', 'kike',
+            // Harassment
+            'kill yourself', 'kys', 'go die', 'nobody likes you', 'worthless',
+            // Bullying
+            'ugly', 'fatass', 'loser', 'freak',
+        ];
+        $insStmt = $pdo->prepare("INSERT INTO moderation_words (school_id, word, severity) VALUES (1, ?, 'flag')");
+        foreach ($defaultWords as $w) {
+            $insStmt->execute([$w]);
+        }
+        $results[] = '[OK] Seeded default moderation words (' . count($defaultWords) . ' words)';
+    } else {
+        $results[] = '[SKIP] Moderation words already seeded';
+    }
+} catch (\PDOException $e) {
+    $errors[] = '[ERROR] Seeding moderation words: ' . $e->getMessage();
+}
+
+// ============================================================================
+// 16. Membership hold/freeze support
+// ============================================================================
+
+run_migration($pdo, 'Extend memberships.status for on_hold', "ALTER TABLE memberships MODIFY COLUMN status ENUM('active','expired','cancelled','on_hold') DEFAULT 'active'", $results, $errors);
+run_migration($pdo, 'Add memberships.hold_start_date', "ALTER TABLE memberships ADD COLUMN hold_start_date DATE DEFAULT NULL", $results, $errors);
+run_migration($pdo, 'Add memberships.hold_end_date', "ALTER TABLE memberships ADD COLUMN hold_end_date DATE DEFAULT NULL", $results, $errors);
+run_migration($pdo, 'Add memberships.hold_reason', "ALTER TABLE memberships ADD COLUMN hold_reason VARCHAR(255) DEFAULT NULL", $results, $errors);
+run_migration($pdo, 'Add memberships.cancelled_at', "ALTER TABLE memberships ADD COLUMN cancelled_at DATETIME DEFAULT NULL", $results, $errors);
+run_migration($pdo, 'Add memberships.cancel_reason', "ALTER TABLE memberships ADD COLUMN cancel_reason VARCHAR(255) DEFAULT NULL", $results, $errors);
+
+// ============================================================================
+// 17. Deactivation cascade support
+// ============================================================================
+
+run_migration($pdo, 'Add students.deactivation_reason', "ALTER TABLE students ADD COLUMN deactivation_reason ENUM('manual','payment') DEFAULT NULL", $results, $errors);
+
+// ============================================================================
+// 18. Student profile extended fields (CSV import support)
+// ============================================================================
+
+run_migration($pdo, 'Add students.medical_info', "ALTER TABLE students ADD COLUMN medical_info TEXT DEFAULT NULL", $results, $errors);
+run_migration($pdo, 'Add students.school_district', "ALTER TABLE students ADD COLUMN school_district VARCHAR(100) DEFAULT NULL", $results, $errors);
+
+// ============================================================================
+// 19. Camp program support on membership plans
+// ============================================================================
+
+run_migration($pdo, 'Add membership_plans.is_camp', "ALTER TABLE membership_plans ADD COLUMN is_camp TINYINT(1) NOT NULL DEFAULT 0", $results, $errors);
+
+// ============================================================================
+// 20. Multi-school user assignments (user_schools junction table)
+// ============================================================================
+
+run_migration($pdo, 'Create user_schools junction table', "
+    CREATE TABLE IF NOT EXISTS user_schools (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        school_id INT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_user_school (user_id, school_id),
+        KEY idx_user_schools_school (school_id)
+    )
+", $results, $errors);
+
+// Backfill: copy existing users.school_id into user_schools
+try {
+    $checkTable = $pdo->query("SELECT COUNT(*) FROM user_schools");
+    $rowCount = (int) $checkTable->fetchColumn();
+    if ($rowCount === 0) {
+        $backfill = $pdo->exec("INSERT IGNORE INTO user_schools (user_id, school_id) SELECT id, school_id FROM users WHERE school_id IS NOT NULL");
+        $results[] = "Backfilled user_schools from users.school_id ({$backfill} rows)";
+    }
+} catch (\PDOException $e) {
+    // Table may not exist yet on first run — ignore
+}
+
+// ============================================================================
+// 21. Multi-belt resource assignments (belt_resource_belts junction table)
+// ============================================================================
+
+run_migration($pdo, 'Create belt_resource_belts junction table', "
+    CREATE TABLE IF NOT EXISTS belt_resource_belts (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        resource_id INT NOT NULL,
+        belt_id INT NOT NULL,
+        style_id INT NOT NULL,
+        UNIQUE KEY unique_resource_belt (resource_id, belt_id),
+        KEY idx_brb_belt (belt_id),
+        KEY idx_brb_resource (resource_id)
+    )
+", $results, $errors);
+
+// Backfill: copy existing belt_resources belt assignments into junction table
+try {
+    $checkBrb = $pdo->query("SELECT COUNT(*) FROM belt_resource_belts");
+    $brbCount = (int) $checkBrb->fetchColumn();
+    if ($brbCount === 0) {
+        $brbFill = $pdo->exec("INSERT IGNORE INTO belt_resource_belts (resource_id, belt_id, style_id) SELECT id, belt_id, style_id FROM belt_resources WHERE belt_id IS NOT NULL AND style_id IS NOT NULL");
+        $results[] = "Backfilled belt_resource_belts from belt_resources ({$brbFill} rows)";
+    }
+} catch (\PDOException $e) {
+    // Table may not exist yet on first run — ignore
+}
+
+// ============================================================================
+// 22. Class curriculum scheduling
+// ============================================================================
+
+run_migration($pdo, 'Create class_curriculum table', "
+    CREATE TABLE IF NOT EXISTS class_curriculum (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        school_id INT NOT NULL DEFAULT 1,
+        class_id INT NOT NULL,
+        class_date DATE NOT NULL,
+        line1 VARCHAR(500) DEFAULT NULL,
+        line2 VARCHAR(500) DEFAULT NULL,
+        line3 VARCHAR(500) DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_cc_school (school_id),
+        INDEX idx_cc_class_date (class_id, class_date),
+        UNIQUE KEY unique_cc_entry (school_id, class_id, class_date),
+        FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE
+    )
+", $results, $errors);
+
+// ============================================================================
+// 23. Communication consent (TCPA / CAN-SPAM)
+// ============================================================================
+
+// Students
+run_migration($pdo, 'Add students.comm_consent_email',
+    "ALTER TABLE students ADD COLUMN comm_consent_email TINYINT(1) NOT NULL DEFAULT 0", $results, $errors);
+run_migration($pdo, 'Add students.comm_consent_email_at',
+    "ALTER TABLE students ADD COLUMN comm_consent_email_at DATETIME DEFAULT NULL", $results, $errors);
+run_migration($pdo, 'Add students.comm_consent_sms',
+    "ALTER TABLE students ADD COLUMN comm_consent_sms TINYINT(1) NOT NULL DEFAULT 0", $results, $errors);
+run_migration($pdo, 'Add students.comm_consent_sms_at',
+    "ALTER TABLE students ADD COLUMN comm_consent_sms_at DATETIME DEFAULT NULL", $results, $errors);
+run_migration($pdo, 'Add students.comm_consent_version',
+    "ALTER TABLE students ADD COLUMN comm_consent_version VARCHAR(50) DEFAULT NULL", $results, $errors);
+run_migration($pdo, 'Add students.comm_consent_ip',
+    "ALTER TABLE students ADD COLUMN comm_consent_ip VARCHAR(45) DEFAULT NULL", $results, $errors);
+
+// Parents
+run_migration($pdo, 'Add parents.comm_consent_email',
+    "ALTER TABLE parents ADD COLUMN comm_consent_email TINYINT(1) NOT NULL DEFAULT 0", $results, $errors);
+run_migration($pdo, 'Add parents.comm_consent_email_at',
+    "ALTER TABLE parents ADD COLUMN comm_consent_email_at DATETIME DEFAULT NULL", $results, $errors);
+run_migration($pdo, 'Add parents.comm_consent_sms',
+    "ALTER TABLE parents ADD COLUMN comm_consent_sms TINYINT(1) NOT NULL DEFAULT 0", $results, $errors);
+run_migration($pdo, 'Add parents.comm_consent_sms_at',
+    "ALTER TABLE parents ADD COLUMN comm_consent_sms_at DATETIME DEFAULT NULL", $results, $errors);
+run_migration($pdo, 'Add parents.comm_consent_version',
+    "ALTER TABLE parents ADD COLUMN comm_consent_version VARCHAR(50) DEFAULT NULL", $results, $errors);
+run_migration($pdo, 'Add parents.comm_consent_ip',
+    "ALTER TABLE parents ADD COLUMN comm_consent_ip VARCHAR(45) DEFAULT NULL", $results, $errors);
+
+// ============================================================================
+// 24. Account merge support
+// ============================================================================
+
+run_migration($pdo, 'Create account_merges table', "
+    CREATE TABLE IF NOT EXISTS account_merges (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        school_id INT NOT NULL,
+        primary_student_id INT NOT NULL,
+        merged_student_id INT NOT NULL,
+        merged_by_user_id INT NOT NULL,
+        merge_reason VARCHAR(255) DEFAULT NULL,
+        records_moved TEXT DEFAULT NULL,
+        profile_fields_filled TEXT DEFAULT NULL,
+        conflicts_skipped TEXT DEFAULT NULL,
+        stripe_customer_id_lost VARCHAR(255) DEFAULT NULL,
+        source_account_snapshot TEXT DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_merges_school (school_id),
+        INDEX idx_merges_primary (primary_student_id),
+        INDEX idx_merges_merged (merged_student_id)
+    )
+", $results, $errors);
+
+run_migration($pdo, 'Widen students.deactivation_reason to VARCHAR(50)',
+    "ALTER TABLE students MODIFY COLUMN deactivation_reason VARCHAR(50) DEFAULT NULL", $results, $errors);
+
+// ============================================================================
+// 25. Role permissions (4-column schema + seed defaults)
+// ============================================================================
+
+run_migration($pdo, 'Create role_permissions table', "
+    CREATE TABLE IF NOT EXISTS role_permissions (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        role VARCHAR(50) NOT NULL,
+        page VARCHAR(100) NOT NULL,
+        can_view TINYINT(1) DEFAULT 0,
+        can_create TINYINT(1) DEFAULT 0,
+        can_edit TINYINT(1) DEFAULT 0,
+        can_delete TINYINT(1) DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_role_page (role, page)
+    )
+", $results, $errors);
+
+// Upgrade from 2-column schema to 4-column schema (handles existing installs)
+run_migration($pdo, 'Add role_permissions.can_create column',
+    "ALTER TABLE role_permissions ADD COLUMN can_create TINYINT(1) DEFAULT 0 AFTER can_view", $results, $errors);
+run_migration($pdo, 'Add role_permissions.can_delete column',
+    "ALTER TABLE role_permissions ADD COLUMN can_delete TINYINT(1) DEFAULT 0 AFTER can_edit", $results, $errors);
+
+// Seed default permissions for instructor and staff (idempotent — only if no rows exist)
+try {
+    $checkPerms = $pdo->query("SELECT COUNT(*) FROM role_permissions WHERE role = 'instructor'");
+    if ((int)$checkPerms->fetchColumn() === 0) {
+        $pdo->exec("INSERT IGNORE INTO role_permissions (role, page, can_view, can_create, can_edit, can_delete) VALUES
+            ('instructor', 'index.php',               1, 0, 0, 0),
+            ('instructor', 'students.php',             1, 0, 1, 0),
+            ('instructor', 'parent_accounts.php',      1, 0, 0, 0),
+            ('instructor', 'memberships.php',          1, 0, 0, 0),
+            ('instructor', 'classes.php',              1, 0, 1, 0),
+            ('instructor', 'events.php',               1, 0, 1, 0),
+            ('instructor', 'calendar.php',             1, 0, 0, 0),
+            ('instructor', 'attendance.php',           1, 1, 1, 0),
+            ('instructor', 'curriculum.php',           0, 0, 0, 0),
+            ('instructor', 'makeup_classes.php',       1, 1, 1, 0),
+            ('instructor', 'payments.php',             1, 0, 0, 0),
+            ('instructor', 'belts.php',                1, 1, 1, 0),
+            ('instructor', 'reports_financial.php',     0, 0, 0, 0),
+            ('instructor', 'reports_student.php',       1, 0, 0, 0),
+            ('instructor', 'messages.php',             1, 1, 0, 0),
+            ('instructor', 'users.php',                0, 0, 0, 0),
+            ('instructor', 'settings_school.php',       1, 0, 0, 0),
+            ('instructor', 'settings_belt.php',         1, 0, 0, 0),
+            ('instructor', 'settings_certs.php',        0, 0, 0, 0),
+            ('instructor', 'settings_registration.php', 0, 0, 0, 0),
+            ('instructor', 'settings_billing.php',      0, 0, 0, 0),
+            ('instructor', 'settings_communications.php', 0, 0, 0, 0),
+            ('instructor', 'settings_system.php',       0, 0, 0, 0),
+            ('instructor', 'admin_dashboard.php',      0, 0, 0, 0),
+            ('instructor', 'import_data.php',          0, 0, 0, 0),
+            ('instructor', 'merge_accounts.php',       0, 0, 0, 0),
+            ('instructor', 'pending_registrations.php',0, 0, 0, 0),
+            ('staff', 'index.php',                     1, 0, 0, 0),
+            ('staff', 'students.php',                  1, 1, 1, 0),
+            ('staff', 'parent_accounts.php',           1, 0, 0, 0),
+            ('staff', 'memberships.php',               1, 1, 1, 0),
+            ('staff', 'classes.php',                   1, 0, 0, 0),
+            ('staff', 'events.php',                    1, 1, 1, 0),
+            ('staff', 'calendar.php',                  1, 0, 0, 0),
+            ('staff', 'attendance.php',                1, 1, 1, 0),
+            ('staff', 'curriculum.php',                0, 0, 0, 0),
+            ('staff', 'makeup_classes.php',            1, 1, 0, 0),
+            ('staff', 'payments.php',                  1, 1, 0, 0),
+            ('staff', 'belts.php',                     1, 0, 0, 0),
+            ('staff', 'reports_financial.php',           0, 0, 0, 0),
+            ('staff', 'reports_student.php',             1, 0, 0, 0),
+            ('staff', 'messages.php',                  1, 1, 0, 0),
+            ('staff', 'users.php',                     0, 0, 0, 0),
+            ('staff', 'settings_school.php',            0, 0, 0, 0),
+            ('staff', 'settings_belt.php',              0, 0, 0, 0),
+            ('staff', 'settings_certs.php',             0, 0, 0, 0),
+            ('staff', 'settings_registration.php',      0, 0, 0, 0),
+            ('staff', 'settings_billing.php',           0, 0, 0, 0),
+            ('staff', 'settings_communications.php',    0, 0, 0, 0),
+            ('staff', 'settings_system.php',            0, 0, 0, 0),
+            ('staff', 'admin_dashboard.php',           0, 0, 0, 0),
+            ('staff', 'import_data.php',               0, 0, 0, 0),
+            ('staff', 'merge_accounts.php',            0, 0, 0, 0),
+            ('staff', 'pending_registrations.php',     1, 0, 1, 0)
+        ");
+        $results[] = '[OK] Seeded default role_permissions for instructor and staff roles';
+    } else {
+        $results[] = '[SKIP] role_permissions already seeded for instructor';
+    }
+} catch (\PDOException $e) {
+    $errors[] = '[ERROR] Seeding role_permissions: ' . $e->getMessage();
+}
+
+// Migrate old settings.php permission to new per-tab permissions
+try {
+    $oldSettings = $pdo->query("SELECT COUNT(*) FROM role_permissions WHERE page = 'settings.php'");
+    if ((int)$oldSettings->fetchColumn() > 0) {
+        // School & Schedule and Belt Testing inherit old view access
+        $pdo->exec("INSERT IGNORE INTO role_permissions (role, page, can_view, can_create, can_edit, can_delete)
+            SELECT role, 'settings_school.php', can_view, can_create, can_edit, can_delete
+            FROM role_permissions WHERE page = 'settings.php'");
+        $pdo->exec("INSERT IGNORE INTO role_permissions (role, page, can_view, can_create, can_edit, can_delete)
+            SELECT role, 'settings_belt.php', can_view, can_create, can_edit, can_delete
+            FROM role_permissions WHERE page = 'settings.php'");
+        // Other 5 tabs default to deny-by-default
+        foreach (['settings_certs.php', 'settings_registration.php', 'settings_billing.php', 'settings_communications.php', 'settings_system.php'] as $newPage) {
+            $pdo->exec("INSERT IGNORE INTO role_permissions (role, page, can_view, can_create, can_edit, can_delete)
+                SELECT role, '$newPage', 0, 0, 0, 0
+                FROM role_permissions WHERE page = 'settings.php'");
+        }
+        // Remove old settings.php rows
+        $pdo->exec("DELETE FROM role_permissions WHERE page = 'settings.php'");
+        $results[] = '[OK] Migrated settings.php permission to 7 per-tab settings permissions';
+    }
+} catch (\PDOException $e) {
+    $errors[] = '[ERROR] Migrating settings permissions: ' . $e->getMessage();
+}
+
+// Migrate old reports.php permission to new split permissions (reports_financial.php + reports_student.php)
+try {
+    $oldReports = $pdo->query("SELECT COUNT(*) FROM role_permissions WHERE page = 'reports.php'");
+    if ((int)$oldReports->fetchColumn() > 0) {
+        // Copy the old reports.php can_view to reports_student.php (student data inherits old access)
+        $pdo->exec("INSERT IGNORE INTO role_permissions (role, page, can_view, can_create, can_edit, can_delete)
+            SELECT role, 'reports_student.php', can_view, can_create, can_edit, can_delete
+            FROM role_permissions WHERE page = 'reports.php'");
+        // Financial reports defaults to no access for non-admin roles (deny-by-default)
+        $pdo->exec("INSERT IGNORE INTO role_permissions (role, page, can_view, can_create, can_edit, can_delete)
+            SELECT role, 'reports_financial.php', 0, 0, 0, 0
+            FROM role_permissions WHERE page = 'reports.php'");
+        // Remove old reports.php rows
+        $pdo->exec("DELETE FROM role_permissions WHERE page = 'reports.php'");
+        $results[] = '[OK] Migrated reports.php permission to reports_financial.php + reports_student.php';
+    }
+} catch (\PDOException $e) {
+    $errors[] = '[ERROR] Migrating reports permissions: ' . $e->getMessage();
+}
 
 // ============================================================================
 // Output results

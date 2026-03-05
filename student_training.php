@@ -127,16 +127,23 @@ try {
             $placeholders = implode(',', array_fill(0, count($beltIds), '?'));
             $rStmt = $pdo->prepare(
                 "SELECT br.*, b.name as belt_name, b.color as belt_color,
-                        b.rank_order, mas.name as style_name
+                        b.rank_order, mas.name as style_name, brb.belt_id as junction_belt_id
                  FROM belt_resources br
-                 JOIN belts b ON b.id = br.belt_id
-                 JOIN martial_arts_styles mas ON mas.id = br.style_id
-                 WHERE br.belt_id IN ($placeholders)
+                 JOIN belt_resource_belts brb ON br.id = brb.resource_id
+                 JOIN belts b ON b.id = brb.belt_id
+                 JOIN martial_arts_styles mas ON mas.id = brb.style_id
+                 WHERE brb.belt_id IN ($placeholders)
                  ORDER BY mas.name, b.rank_order, br.sort_order ASC, br.created_at DESC"
             );
             $params = $beltIds;
             $rStmt->execute($params);
+            $seenResourceBelt = [];
             foreach ($rStmt->fetchAll() as $res) {
+                // Deduplicate: a resource assigned to multiple accessible belts should appear once per belt group
+                $dedupKey = $res['id'] . '-' . $res['junction_belt_id'];
+                if (isset($seenResourceBelt[$dedupKey])) continue;
+                $seenResourceBelt[$dedupKey] = true;
+
                 $key = $res['style_name'] . ' — ' . $res['belt_name'];
                 $resourcesByBelt[$key][] = $res;
             }
@@ -150,7 +157,7 @@ try {
     if (!empty($accessibleBelts)) {
         $allBeltIds = array_column($accessibleBelts, 'belt_id');
         $ph = implode(',', array_fill(0, count($allBeltIds), '?'));
-        $cStmt = $pdo->prepare("SELECT COUNT(*) FROM belt_resources WHERE belt_id IN ($ph)");
+        $cStmt = $pdo->prepare("SELECT COUNT(DISTINCT brb.resource_id) FROM belt_resource_belts brb WHERE brb.belt_id IN ($ph)");
         $params = $allBeltIds;
         $cStmt->execute($params);
         $totalAccessibleResources = (int) $cStmt->fetchColumn();

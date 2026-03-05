@@ -1,10 +1,44 @@
 <?php
 require_once 'config.php';
+require_once __DIR__ . '/includes/belt_cycle.php';
 requireLogin();
 
 $message = '';
 $selected_date = $_GET['date'] ?? date('Y-m-d');
 $selected_class = $_GET['class_id'] ?? '';
+$currentUser = getCurrentUser();
+$isAdmin = in_array($currentUser['role'] ?? '', ['admin', 'super_admin']);
+
+// Handle admin override enrollment (add student to class without membership)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_enroll_student']) && $isAdmin) {
+    verify_csrf();
+    $enrollStudentId = (int) $_POST['enroll_student_id'];
+    $enrollClassId = (int) $_POST['enroll_class_id'];
+    $enrollDate = $_POST['enroll_date'] ?? date('Y-m-d');
+
+    if ($enrollStudentId > 0 && $enrollClassId > 0) {
+        // Check if already enrolled
+        $checkParams = [$enrollStudentId, $enrollClassId];
+        school_param($checkParams);
+        $checkEnroll = $pdo->prepare(
+            "SELECT id FROM class_enrollments WHERE student_id = ? AND class_id = ? AND status = 'active'" . school_where() . " LIMIT 1"
+        );
+        $checkEnroll->execute($checkParams);
+        if ($checkEnroll->fetch()) {
+            $message = showAlert('Student is already enrolled in this class.', 'info');
+        } else {
+            $pdo->prepare(
+                "INSERT INTO class_enrollments (school_id, student_id, class_id, enrollment_date, status)
+                 VALUES (?, ?, ?, CURDATE(), 'active')
+                 ON DUPLICATE KEY UPDATE status = 'active'"
+            )->execute([current_school_id(), $enrollStudentId, $enrollClassId]);
+            $message = showAlert('Student enrolled in class successfully (admin override).', 'success');
+        }
+    }
+    // Preserve selection
+    $selected_class = $enrollClassId;
+    $selected_date = $enrollDate;
+}
 
 // Handle attendance submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['attendance'])) {
@@ -96,12 +130,60 @@ if ($selected_class) {
                 ORDER BY m2.end_date DESC LIMIT 1
             )
         LEFT JOIN membership_plans mp ON m.plan_id = mp.id
-        WHERE ce.class_id = ? AND ce.status = 'active'" . school_where('ce') . "
+        WHERE ce.class_id = ? AND ce.status = 'active' AND s.status = 'active'" . school_where('ce') . "
         ORDER BY s.first_name, s.last_name
     ");
     school_param($params);
     $enrolled_students->execute($params);
     $enrolled_students = $enrolled_students->fetchAll();
+}
+
+// Fetch curriculum for the selected class and date
+$curriculum = null;
+$isTestPrep = false;
+if ($selected_class) {
+    $currParams = [$selected_class, $selected_date];
+    school_param($currParams);
+    $currStmt = $pdo->prepare("
+        SELECT line1, line2, line3 FROM class_curriculum
+        WHERE class_id = ? AND class_date = ?" . school_where() . "
+        LIMIT 1
+    ");
+    $currStmt->execute($currParams);
+    $curriculum = $currStmt->fetch();
+
+    // If no curriculum found, check if the date is past the belt testing cycle end date
+    if (!$curriculum) {
+        $cycle = get_current_cycle();
+        if ($selected_date > $cycle['end']) {
+            $isTestPrep = true;
+            $curriculum = [
+                'line1' => 'Test Prep',
+                'line2' => null,
+                'line3' => null,
+            ];
+        }
+    }
+}
+
+// For admin override: get all active students NOT already enrolled in this class
+$unenrolled_students = [];
+if ($selected_class && $isAdmin) {
+    $ueParams = [];
+    school_param($ueParams);
+    $ueParams[] = (int) $selected_class;
+    $ueStmt = $pdo->prepare("
+        SELECT s.id, s.first_name, s.last_name
+        FROM students s
+        WHERE s.status = 'active'" . school_where('s') . "
+        AND s.id NOT IN (
+            SELECT ce.student_id FROM class_enrollments ce
+            WHERE ce.class_id = ? AND ce.status = 'active'
+        )
+        ORDER BY s.first_name, s.last_name
+    ");
+    $ueStmt->execute($ueParams);
+    $unenrolled_students = $ueStmt->fetchAll();
 }
 
 include 'includes/header.php';
@@ -151,6 +233,91 @@ include 'includes/header.php';
         </div>
     </div>
     
+    <!-- Curriculum Display -->
+    <?php if ($selected_class && $curriculum): ?>
+        <div class="bg-white rounded-lg shadow p-6 mb-6">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-lg font-semibold text-gray-800">
+                    <?php if ($isTestPrep): ?>
+                        <span class="text-orange-600">Today's Curriculum — Test Prep</span>
+                    <?php else: ?>
+                        Today's Curriculum
+                    <?php endif; ?>
+                </h2>
+                <?php if ($isTestPrep): ?>
+                    <span class="px-3 py-1 bg-orange-100 text-orange-700 text-xs font-semibold rounded-full">Past Cycle End Date</span>
+                <?php endif; ?>
+            </div>
+
+            <?php if ($isTestPrep): ?>
+                <div class="bg-orange-50 border border-orange-200 rounded-lg p-4">
+                    <p class="text-orange-800 font-medium">This date is past the current belt testing cycle end date (<?php echo formatDate(get_current_cycle()['end']); ?>).</p>
+                    <p class="text-orange-700 text-sm mt-1">All classes default to <strong>Test Prep</strong> until a new cycle begins.</p>
+                </div>
+            <?php else: ?>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <?php if (!empty($curriculum['line1'])): ?>
+                    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                        <div class="text-xs font-semibold text-blue-600 uppercase mb-1">Focus</div>
+                        <div class="text-gray-800 font-medium"><?php echo htmlspecialchars($curriculum['line1']); ?></div>
+                    </div>
+                    <?php endif; ?>
+                    <?php if (!empty($curriculum['line2'])): ?>
+                    <div class="bg-green-50 border border-green-200 rounded-lg p-4">
+                        <div class="text-xs font-semibold text-green-600 uppercase mb-1">Rotation</div>
+                        <div class="text-gray-800 font-medium"><?php echo htmlspecialchars($curriculum['line2']); ?></div>
+                    </div>
+                    <?php endif; ?>
+                    <?php if (!empty($curriculum['line3'])): ?>
+                    <div class="bg-purple-50 border border-purple-200 rounded-lg p-4">
+                        <div class="text-xs font-semibold text-purple-600 uppercase mb-1">Technique</div>
+                        <div class="text-gray-800 font-medium"><?php echo htmlspecialchars($curriculum['line3']); ?></div>
+                    </div>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
+        </div>
+    <?php elseif ($selected_class && !$curriculum): ?>
+        <div class="bg-white rounded-lg shadow p-6 mb-6">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h2 class="text-lg font-semibold text-gray-500">No Curriculum Planned</h2>
+                    <p class="text-sm text-gray-400 mt-1">No curriculum has been set for this class on this date.</p>
+                </div>
+                <?php if ($isAdmin): ?>
+                    <div class="flex gap-3">
+                        <a href="curriculum.php?class_id=<?php echo (int) $selected_class; ?>" class="text-blue-600 hover:text-blue-800 text-sm font-medium">Manage Curriculum</a>
+                        <a href="import_curriculum.php" class="text-gray-500 hover:text-gray-700 text-sm font-medium">Import from XLSX</a>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+    <?php endif; ?>
+
+    <!-- Admin Override: Add Student to Class -->
+    <?php if ($selected_class && $isAdmin && !empty($unenrolled_students)): ?>
+        <div class="bg-white rounded-lg shadow p-4 mb-6">
+            <details>
+                <summary class="cursor-pointer text-sm font-medium text-gray-700 hover:text-gray-900">
+                    Admin Override: Enroll Student Without Membership
+                </summary>
+                <form method="POST" class="mt-3 flex flex-wrap items-end gap-3">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="admin_enroll_student" value="1">
+                    <input type="hidden" name="enroll_class_id" value="<?php echo (int) $selected_class; ?>">
+                    <input type="hidden" name="enroll_date" value="<?php echo htmlspecialchars($selected_date); ?>">
+                    <div class="flex-1 min-w-[200px]">
+                        <label class="block text-xs font-medium text-gray-600 mb-1">Select Student</label>
+                        <div id="attendance-enroll-picker"></div>
+                    </div>
+                    <button type="submit" class="bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-medium">
+                        Enroll Student
+                    </button>
+                </form>
+            </details>
+        </div>
+    <?php endif; ?>
+
     <!-- Attendance Form -->
     <?php if ($selected_class && !empty($enrolled_students)): ?>
         <div class="bg-white rounded-lg shadow">
@@ -292,8 +459,14 @@ include 'includes/header.php';
         <div class="bg-white rounded-lg shadow p-12 text-center text-gray-500">
             <p class="text-lg">No students enrolled in this class</p>
             <a href="classes.php" class="text-blue-600 hover:text-blue-800 mt-2 inline-block">
-                Manage Class Enrollments →
+                Manage Class Enrollments
             </a>
+            <?php if ($isAdmin): ?>
+                <span class="mx-2 text-gray-300">|</span>
+                <a href="import_curriculum.php" class="text-blue-600 hover:text-blue-800 mt-2 inline-block">
+                    Import from Spreadsheet
+                </a>
+            <?php endif; ?>
         </div>
     <?php else: ?>
         <div class="bg-white rounded-lg shadow p-12 text-center text-gray-500">
@@ -410,5 +583,19 @@ function copyReminderMessage() {
     });
 }
 </script>
+
+<?php if ($selected_class && $isAdmin && !empty($unenrolled_students)): ?>
+<script src="assets/js/student-picker.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    StudentPicker.init({
+        container: '#attendance-enroll-picker',
+        inputName: 'enroll_student_id',
+        placeholder: 'Type student name to search\u2026',
+        data: <?= json_encode(array_map(function($s) { return ['id' => $s['id'], 'name' => trim($s['first_name'] . ' ' . $s['last_name'])]; }, $unenrolled_students)) ?>
+    });
+});
+</script>
+<?php endif; ?>
 
 <?php include 'includes/footer.php'; ?>

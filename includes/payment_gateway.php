@@ -1742,6 +1742,13 @@ function calculateTotalWithFees(array $params): array
 
         foreach ($codes as $code) {
             $code = strtoupper($code);
+
+            // Hard cap: max 2 discount codes (one per scope)
+            if (count($allDiscountCodes) >= 2) {
+                $discountError = ($discountError ? $discountError . ' ' : '') . $code . ': Maximum of 2 discount codes allowed.';
+                continue;
+            }
+
             $validation = validateDiscountCode($code, $planId, $eventId);
             if (!$validation['valid']) {
                 $discountError = ($discountError ? $discountError . ' ' : '') . $code . ': ' . $validation['error'];
@@ -1754,13 +1761,14 @@ function calculateTotalWithFees(array $params): array
             // Prevent stacking two codes that cover the same scope
             if ($scope === 'both') {
                 if (!empty($coveredScopes)) {
-                    $discountError = ($discountError ? $discountError . ' ' : '') . $code . ': Another discount already covers this scope.';
+                    $discountError = ($discountError ? $discountError . ' ' : '') . $code . ': You already have a discount applied that covers this.';
                     continue;
                 }
                 $coveredScopes = ['plan_price' => true, 'registration_fee' => true];
             } else {
                 if (isset($coveredScopes[$scope])) {
-                    $discountError = ($discountError ? $discountError . ' ' : '') . $code . ': A discount for ' . str_replace('_', ' ', $scope) . ' is already applied.';
+                    $friendlyScope = $scope === 'plan_price' ? 'plan price' : 'registration fee';
+                    $discountError = ($discountError ? $discountError . ' ' : '') . $code . ': You already have a discount code applied for the ' . $friendlyScope . '.';
                     continue;
                 }
                 $coveredScopes[$scope] = true;

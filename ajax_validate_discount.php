@@ -82,6 +82,12 @@ if (in_array(strtoupper($code), $existingArr, true)) {
     exit;
 }
 
+// Max 2 discount codes allowed (one for plan price, one for registration fee)
+if (count($existingArr) >= 2) {
+    echo json_encode(['valid' => false, 'error' => 'You can only apply up to two discount codes — one for the plan price and one for the registration fee.']);
+    exit;
+}
+
 // Build the full breakdown with all codes combined
 $breakdown = calculateTotalWithFees([
     'base_amount'      => $baseAmount,

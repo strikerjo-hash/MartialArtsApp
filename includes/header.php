@@ -108,6 +108,24 @@ $siteName = getSiteName();
                     <span class="mr-3">👨‍👩‍👧‍👦</span>
                     <span>Parent Accounts</span>
                 </a>
+                <?php
+                // Pending parent link requests count
+                try {
+                    $_plParams = [];
+                    $_plSql = "SELECT COUNT(*) FROM pending_parent_links WHERE status = 'pending'" . school_where();
+                    school_param($_plParams);
+                    $_plStmt = $pdo->prepare($_plSql);
+                    $_plStmt->execute($_plParams);
+                    $_pendingLinkCount = (int)$_plStmt->fetchColumn();
+                } catch (\PDOException $e) { $_pendingLinkCount = 0; }
+                ?>
+                <a href="pending_parent_links.php" class="flex items-center px-4 py-3 mb-2 rounded-lg <?php echo basename($_SERVER['PHP_SELF']) == 'pending_parent_links.php' ? 'active-nav' : ''; ?>">
+                    <span class="mr-3">🔗</span>
+                    <span>Parent Link Requests</span>
+                    <?php if ($_pendingLinkCount > 0): ?>
+                        <span class="ml-auto bg-red-500 text-white text-xs font-bold px-2 py-0.5 rounded-full"><?= $_pendingLinkCount ?></span>
+                    <?php endif; ?>
+                </a>
                 <?php endif; ?>
 
                 <?php if (canView('memberships.php')): ?>

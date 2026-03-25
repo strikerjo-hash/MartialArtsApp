@@ -882,6 +882,81 @@ try {
     $errors[] = '[ERROR] Migrating reports permissions: ' . $e->getMessage();
 }
 
+// Add source_parent_id to payment_methods for separated-parent card isolation
+try {
+    $colCheck = $pdo->query("SHOW COLUMNS FROM payment_methods LIKE 'source_parent_id'");
+    if ($colCheck->rowCount() === 0) {
+        $pdo->exec("ALTER TABLE payment_methods ADD COLUMN source_parent_id INT DEFAULT NULL AFTER is_default");
+        $pdo->exec("ALTER TABLE payment_methods ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at");
+        $pdo->exec("CREATE INDEX idx_pm_source_parent ON payment_methods(source_parent_id)");
+        $results[] = '[OK] Added source_parent_id and updated_at columns to payment_methods';
+
+        // Backfill: tag existing child cards with their parent's ID where possible
+        $pdo->exec("
+            UPDATE payment_methods pm
+            JOIN parent_students ps ON pm.student_id = ps.student_id
+            SET pm.source_parent_id = ps.parent_id
+            WHERE pm.source_parent_id IS NULL
+              AND pm.label LIKE '%via %'
+        ");
+        $results[] = '[OK] Backfilled source_parent_id for existing synced cards';
+    }
+} catch (\PDOException $e) {
+    $errors[] = '[ERROR] Adding source_parent_id to payment_methods: ' . $e->getMessage();
+}
+
+// Also ensure updated_at exists even if source_parent_id already did
+try {
+    $colCheck2 = $pdo->query("SHOW COLUMNS FROM payment_methods LIKE 'updated_at'");
+    if ($colCheck2->rowCount() === 0) {
+        $pdo->exec("ALTER TABLE payment_methods ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at");
+        $results[] = '[OK] Added updated_at column to payment_methods';
+    }
+} catch (\PDOException $e) {
+    $errors[] = '[ERROR] Adding updated_at to payment_methods: ' . $e->getMessage();
+}
+
+// Fix discount_codes UNIQUE constraint: allow same code across different schools
+try {
+    // Check if the old global UNIQUE on code exists
+    $idxCheck = $pdo->query("SHOW INDEX FROM discount_codes WHERE Key_name = 'code'");
+    if ($idxCheck->rowCount() > 0) {
+        $pdo->exec("ALTER TABLE discount_codes DROP INDEX `code`");
+        $results[] = '[OK] Dropped global UNIQUE index on discount_codes.code';
+    }
+} catch (\PDOException $e) {
+    // Index may not exist or already dropped
+}
+try {
+    $idxCheck2 = $pdo->query("SHOW INDEX FROM discount_codes WHERE Key_name = 'idx_dc_school_code'");
+    if ($idxCheck2->rowCount() === 0) {
+        $pdo->exec("ALTER TABLE discount_codes ADD UNIQUE KEY idx_dc_school_code (school_id, code)");
+        $results[] = '[OK] Added UNIQUE(school_id, code) on discount_codes';
+    }
+} catch (\PDOException $e) {
+    $errors[] = '[ERROR] Adding school-scoped unique index to discount_codes: ' . $e->getMessage();
+}
+
+// Create pending_parent_links table for admin-approval of parent-child linking
+run_migration($pdo, 'Create pending_parent_links table', "
+    CREATE TABLE IF NOT EXISTS pending_parent_links (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        school_id INT NOT NULL,
+        parent_id INT NOT NULL,
+        student_id INT NOT NULL,
+        relationship VARCHAR(50) DEFAULT 'parent',
+        status ENUM('pending','approved','denied') DEFAULT 'pending',
+        requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        resolved_at TIMESTAMP NULL DEFAULT NULL,
+        resolved_by INT DEFAULT NULL,
+        admin_notes TEXT DEFAULT NULL,
+        INDEX idx_ppl_school_status (school_id, status),
+        INDEX idx_ppl_parent (parent_id),
+        INDEX idx_ppl_student (student_id),
+        UNIQUE KEY idx_ppl_unique_pending (school_id, parent_id, student_id, status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+", $results, $errors);
+
 // ============================================================================
 // Output results
 // ============================================================================

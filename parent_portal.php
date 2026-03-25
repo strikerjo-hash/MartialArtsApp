@@ -20,7 +20,7 @@ $pdo = get_db();
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf();
 
-    // Link existing student — accepts student_id (from picker) or student_identifier (legacy text input)
+    // Request to link existing student — creates pending request for admin approval
     if (isset($_POST['link_student'])) {
         $studentId = (int)($_POST['student_id'] ?? 0);
         $identifier = trim($_POST['student_identifier'] ?? '');
@@ -29,7 +29,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $foundStudent = null;
 
         if ($studentId > 0) {
-            // Picker mode: student_id submitted directly
             $findParams = [$studentId];
             $findSql = "SELECT id, first_name, last_name FROM students WHERE id = ? AND status = 'active'" . school_where();
             school_param($findParams);
@@ -37,7 +36,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $findStmt->execute($findParams);
             $foundStudent = $findStmt->fetch();
         } elseif ($identifier !== '') {
-            // Legacy text input: search by username or email
             $findSql = "SELECT id, first_name, last_name FROM students WHERE (username = :u1 OR email = :u2) AND status = 'active'";
             if (!is_viewing_all_schools()) {
                 $findSql .= ' AND school_id = :school_id';
@@ -56,12 +54,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$foundStudent) {
             $message = showAlert('No active student found. Please select a student from the list.', 'error');
         } else {
-            $linked = link_student_to_parent($parentId, $foundStudent['id'], $relationship);
-            if ($linked) {
-                $childName = htmlspecialchars($foundStudent['first_name'] . ' ' . $foundStudent['last_name']);
-                $message = showAlert('Successfully linked ' . $childName . ' to your account! Your payment methods have been shared with their account.', 'success');
-            } else {
+            // Check if already linked
+            $alreadyLinked = $pdo->prepare("SELECT 1 FROM parent_students WHERE parent_id = ? AND student_id = ?" . school_where());
+            $alParams = [$parentId, $foundStudent['id']];
+            school_param($alParams);
+            $alreadyLinked->execute($alParams);
+            if ($alreadyLinked->fetch()) {
                 $message = showAlert('This student is already linked to your account.', 'error');
+            } else {
+                // Check if there's already a pending request
+                $existingReq = $pdo->prepare("SELECT 1 FROM pending_parent_links WHERE parent_id = ? AND student_id = ? AND status = 'pending'" . school_where());
+                $erParams = [$parentId, $foundStudent['id']];
+                school_param($erParams);
+                $existingReq->execute($erParams);
+                if ($existingReq->fetch()) {
+                    $message = showAlert('You already have a pending request for this student. Please wait for admin approval.', 'info');
+                } else {
+                    // Create pending link request
+                    $reqStmt = $pdo->prepare("INSERT INTO pending_parent_links (school_id, parent_id, student_id, relationship) VALUES (?, ?, ?, ?)");
+                    $reqStmt->execute([current_school_id(), $parentId, $foundStudent['id'], $relationship]);
+                    $childName = htmlspecialchars($foundStudent['first_name'] . ' ' . $foundStudent['last_name']);
+                    $message = showAlert('Your request to link ' . $childName . ' has been submitted. An administrator will review and approve it shortly.', 'success');
+                }
             }
         }
     }
@@ -75,6 +89,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 }
+
+// Fetch pending link requests for this parent
+$pendingLinks = [];
+try {
+    $plParams = [$parentId];
+    $plSql = "SELECT ppl.*, s.first_name, s.last_name
+              FROM pending_parent_links ppl
+              JOIN students s ON s.id = ppl.student_id
+              WHERE ppl.parent_id = ? AND ppl.status = 'pending'" . school_where('ppl') . "
+              ORDER BY ppl.requested_at DESC";
+    school_param($plParams);
+    $plStmt = $pdo->prepare($plSql);
+    $plStmt->execute($plParams);
+    $pendingLinks = $plStmt->fetchAll();
+} catch (\PDOException $e) {}
 
 // Fetch children
 $children = get_parent_children($parentId);
@@ -142,6 +171,28 @@ include 'includes/parent_header.php';
         <h1 class="text-3xl font-bold text-gray-800 mb-2">Family Dashboard</h1>
         <p class="text-gray-600">Manage your children's memberships, events, and payments</p>
     </div>
+
+    <?php if (!empty($pendingLinks)): ?>
+    <div class="mb-6">
+        <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <h3 class="text-sm font-semibold text-amber-800 mb-2">Pending Link Requests</h3>
+            <div class="space-y-2">
+                <?php foreach ($pendingLinks as $pl): ?>
+                    <div class="flex items-center justify-between bg-white rounded-md px-4 py-2 border border-amber-100">
+                        <div class="flex items-center gap-3">
+                            <span class="text-amber-500">⏳</span>
+                            <span class="text-sm text-gray-700">
+                                <strong><?= htmlspecialchars($pl['first_name'] . ' ' . $pl['last_name']) ?></strong>
+                                <span class="text-gray-500 capitalize">(<?= htmlspecialchars($pl['relationship']) ?>)</span>
+                            </span>
+                        </div>
+                        <span class="text-xs text-amber-600 font-medium">Awaiting admin approval</span>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+    </div>
+    <?php endif; ?>
 
     <!-- Children Cards -->
     <div class="mb-8">
@@ -338,8 +389,8 @@ include 'includes/parent_header.php';
         </div>
 
         <p class="text-sm text-gray-600 mb-4">
-            Search for your child's name to link them to your family account.
-            The student must already have an account registered at the studio.
+            Search for your child's name to request linking them to your family account.
+            An administrator will review and approve your request.
         </p>
 
         <form method="POST" class="space-y-4">
@@ -368,7 +419,7 @@ include 'includes/parent_header.php';
                 </button>
                 <button type="submit"
                         class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">
-                    Link Child
+                    Request Link
                 </button>
             </div>
         </form>

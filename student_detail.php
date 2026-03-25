@@ -536,6 +536,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // Demote parent back to regular student account
+    if (isset($_POST['revoke_parent'])) {
+        verify_csrf();
+        if (!empty($student['is_parent'])) {
+            // Remove all child links
+            $params = [$student_id];
+            school_param($params);
+            $pdo->prepare("DELETE FROM parent_students WHERE parent_id = ?" . school_where())->execute($params);
+            // Revoke parent flag
+            $params = [$student_id];
+            school_param($params);
+            $pdo->prepare("UPDATE students SET is_parent = 0 WHERE id = ?" . school_where())->execute($params);
+            $student['is_parent'] = 0;
+            $pm_message = showAlert('Parent capabilities removed. This account is now a regular student account.', 'success');
+        }
+    }
+
     // Sync payment methods from a child student to this parent account (used on PARENT's page)
     if (isset($_POST['sync_child_cards_to_parent'])) {
         verify_csrf();
@@ -1717,9 +1734,18 @@ include 'includes/header.php';
         <!-- Linked Children (shown when this student IS a parent) -->
         <?php if (!empty($student['is_parent'])): ?>
             <div class="px-6 py-4 border-b border-gray-200" id="linked-children">
-                <h3 class="text-sm font-semibold text-gray-600 uppercase tracking-wider mb-3">
-                    👶 Linked Students (<?= count($linkedChildren) ?>)
-                </h3>
+                <div class="flex items-center justify-between mb-3">
+                    <h3 class="text-sm font-semibold text-gray-600 uppercase tracking-wider">
+                        Linked Students (<?= count($linkedChildren) ?>)
+                    </h3>
+                    <form method="POST" class="inline" onsubmit="return confirm('Remove parent capabilities from this account? This will unlink all children and revert to a regular student account.')">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="revoke_parent" value="1">
+                        <button type="submit" class="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 transition-colors">
+                            Revoke Parent Status
+                        </button>
+                    </form>
+                </div>
                 <?php if (empty($linkedChildren)): ?>
                     <div class="py-4 text-center text-gray-400 text-sm">
                         <p>No students linked to this parent account yet.</p>

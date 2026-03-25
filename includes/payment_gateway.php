@@ -595,18 +595,29 @@ function charge_student(int $studentId, float $amount, string $description, ?int
     $pm = $pmStmt->fetch();
 
     // If student has no card, try their parent's card (parent_students junction)
+    // Prefer the most recently updated parent card (last parent to update wins)
     if (!$pm && !$paymentMethodId) {
         try {
             require_once __DIR__ . '/parent_auth.php';
             $parentAccounts = get_student_parents($studentId);
+            $bestPm = null;
+            $bestUpdated = '';
             foreach ($parentAccounts as $parentAcct) {
-                $ppmStmt = $pdo->prepare("SELECT * FROM payment_methods WHERE student_id = ? AND is_default = 1 LIMIT 1");
+                $ppmStmt = $pdo->prepare("SELECT * FROM payment_methods WHERE student_id = ? AND is_default = 1 ORDER BY created_at DESC LIMIT 1");
                 $ppmStmt->execute([$parentAcct['id']]);
-                $pm = $ppmStmt->fetch();
-                if ($pm) {
-                    error_log("[PAYMENT] Using parent #{$parentAcct['id']} ({$parentAcct['first_name']} {$parentAcct['last_name']}) card for student #{$studentId}");
-                    break;
+                $candidate = $ppmStmt->fetch();
+                if ($candidate) {
+                    $updatedAt = $candidate['updated_at'] ?? $candidate['created_at'] ?? '';
+                    if (!$bestPm || $updatedAt > $bestUpdated) {
+                        $bestPm = $candidate;
+                        $bestUpdated = $updatedAt;
+                        error_log("[PAYMENT] Candidate parent #{$parentAcct['id']} ({$parentAcct['first_name']} {$parentAcct['last_name']}) card for student #{$studentId} (updated: {$updatedAt})");
+                    }
                 }
+            }
+            if ($bestPm) {
+                $pm = $bestPm;
+                error_log("[PAYMENT] Using most recently updated parent card for student #{$studentId}");
             }
         } catch (\Throwable $e) {
             error_log("[PAYMENT] Parent card fallback failed for student #{$studentId}: " . $e->getMessage());
@@ -1607,41 +1618,41 @@ function validateDiscountCode(string $code, ?int $planId = null, ?int $eventId =
     }
 
     if (!$discount) {
-        return ['valid' => false, 'error' => 'Invalid discount code.', 'discount' => null];
+        return ['valid' => false, 'error' => 'We couldn\'t find that discount code. Please double-check and try again.', 'discount' => null];
     }
 
     if (!$discount['is_active']) {
-        return ['valid' => false, 'error' => 'This discount code is no longer active.', 'discount' => null];
+        return ['valid' => false, 'error' => 'This discount code is no longer active. Please contact the studio for assistance.', 'discount' => null];
     }
 
     // Date range check
     $today = date('Y-m-d');
     if ($discount['valid_from'] && $today < $discount['valid_from']) {
-        return ['valid' => false, 'error' => 'This discount code is not yet valid.', 'discount' => null];
+        return ['valid' => false, 'error' => 'This discount code isn\'t active yet. It becomes valid on ' . date('M j, Y', strtotime($discount['valid_from'])) . '.', 'discount' => null];
     }
     if ($discount['valid_until'] && $today > $discount['valid_until']) {
-        return ['valid' => false, 'error' => 'This discount code has expired.', 'discount' => null];
+        return ['valid' => false, 'error' => 'This discount code has expired. Please contact the studio if you need a new code.', 'discount' => null];
     }
 
     // Max uses check
     if ($discount['max_uses'] !== null && $discount['uses_count'] >= $discount['max_uses']) {
-        return ['valid' => false, 'error' => 'This discount code has reached its maximum number of uses.', 'discount' => null];
+        return ['valid' => false, 'error' => 'This discount code has been fully redeemed. Please contact the studio for assistance.', 'discount' => null];
     }
 
     // Plan/event scope check
     if ($discount['plan_id'] !== null && $planId !== null && (int) $discount['plan_id'] !== $planId) {
-        return ['valid' => false, 'error' => 'This discount code is not valid for the selected plan.', 'discount' => null];
+        return ['valid' => false, 'error' => 'This discount code doesn\'t apply to the selected plan.', 'discount' => null];
     }
     if ($discount['event_id'] !== null && $eventId !== null && (int) $discount['event_id'] !== $eventId) {
-        return ['valid' => false, 'error' => 'This discount code is not valid for this event.', 'discount' => null];
+        return ['valid' => false, 'error' => 'This discount code doesn\'t apply to this event.', 'discount' => null];
     }
 
     // Code is plan-specific but used in event context (or vice versa)
     if ($discount['plan_id'] !== null && $planId === null && $eventId !== null) {
-        return ['valid' => false, 'error' => 'This discount code is for membership plans only.', 'discount' => null];
+        return ['valid' => false, 'error' => 'This discount code is for membership plans only, not events.', 'discount' => null];
     }
     if ($discount['event_id'] !== null && $eventId === null && $planId !== null) {
-        return ['valid' => false, 'error' => 'This discount code is for events only.', 'discount' => null];
+        return ['valid' => false, 'error' => 'This discount code is for events only, not membership plans.', 'discount' => null];
     }
 
     return ['valid' => true, 'error' => '', 'discount' => $discount];
@@ -1692,11 +1703,12 @@ function calculateDiscountAmount(array $discount, float $planPrice, float $regis
 
 /**
  * Central fee calculation — computes all fees, discounts, and totals.
+ * Supports multiple comma-separated discount codes (one per applies_to scope).
  *
  * @param array $params [
  *   'base_amount'      => float,   Plan charge (first installment or full price)
  *   'registration_fee' => float,   0 for upgrades/renewals
- *   'discount_code'    => ?string, Optional discount code
+ *   'discount_code'    => ?string, Optional discount code(s), comma-separated
  *   'plan_id'          => ?int,    For discount validation scope
  *   'event_id'         => ?int,    For event discount scope
  * ]
@@ -1706,7 +1718,7 @@ function calculateTotalWithFees(array $params): array
 {
     $baseAmount      = round((float) ($params['base_amount'] ?? 0), 2);
     $registrationFee = round((float) ($params['registration_fee'] ?? 0), 2);
-    $discountCode    = trim($params['discount_code'] ?? '');
+    $discountCodeRaw = trim($params['discount_code'] ?? '');
     $planId          = $params['plan_id'] ?? null;
     $eventId         = $params['event_id'] ?? null;
 
@@ -1716,17 +1728,70 @@ function calculateTotalWithFees(array $params): array
     $discountError   = '';
     $discountRecord  = null;
 
-    // Validate & calculate discount
-    if ($discountCode !== '') {
-        $validation = validateDiscountCode($discountCode, $planId, $eventId);
-        if ($validation['valid']) {
-            $discountRecord = $validation['discount'];
-            $discountDetail = calculateDiscountAmount($discountRecord, $baseAmount, $registrationFee);
-            $discountAmount = $discountDetail['total_discount'];
-            $discountCodeId = (int) $discountRecord['id'];
-        } else {
-            $discountError = $validation['error'];
+    // Multi-code support
+    $allDiscountCodes   = [];  // validated code strings
+    $allDiscountIds     = [];  // validated code IDs
+    $allDiscountRecords = [];  // validated discount rows
+    $allDiscountDetails = [];  // per-code breakdown
+    $totalPlanDiscount  = 0;
+    $totalRegDiscount   = 0;
+    $coveredScopes      = []; // track which applies_to scopes are covered
+
+    if ($discountCodeRaw !== '') {
+        $codes = array_unique(array_filter(array_map('trim', explode(',', $discountCodeRaw))));
+
+        foreach ($codes as $code) {
+            $code = strtoupper($code);
+            $validation = validateDiscountCode($code, $planId, $eventId);
+            if (!$validation['valid']) {
+                $discountError = ($discountError ? $discountError . ' ' : '') . $code . ': ' . $validation['error'];
+                continue;
+            }
+
+            $rec = $validation['discount'];
+            $scope = $rec['applies_to']; // 'plan_price', 'registration_fee', or 'both'
+
+            // Prevent stacking two codes that cover the same scope
+            if ($scope === 'both') {
+                if (!empty($coveredScopes)) {
+                    $discountError = ($discountError ? $discountError . ' ' : '') . $code . ': Another discount already covers this scope.';
+                    continue;
+                }
+                $coveredScopes = ['plan_price' => true, 'registration_fee' => true];
+            } else {
+                if (isset($coveredScopes[$scope])) {
+                    $discountError = ($discountError ? $discountError . ' ' : '') . $code . ': A discount for ' . str_replace('_', ' ', $scope) . ' is already applied.';
+                    continue;
+                }
+                $coveredScopes[$scope] = true;
+            }
+
+            // Calculate this code's discount on remaining undiscounted amounts
+            $remainingPlan = $baseAmount - $totalPlanDiscount;
+            $remainingReg  = $registrationFee - $totalRegDiscount;
+            $detail = calculateDiscountAmount($rec, max(0, $remainingPlan), max(0, $remainingReg));
+
+            $totalPlanDiscount += $detail['plan_discount'];
+            $totalRegDiscount  += $detail['reg_fee_discount'];
+
+            $allDiscountCodes[]   = $code;
+            $allDiscountIds[]     = (int) $rec['id'];
+            $allDiscountRecords[] = $rec;
+            $allDiscountDetails[] = array_merge($detail, ['code' => $code, 'code_id' => (int) $rec['id']]);
         }
+    }
+
+    $discountAmount = round($totalPlanDiscount + $totalRegDiscount, 2);
+
+    // For backward compat: single-code fields use first validated code
+    if (!empty($allDiscountCodes)) {
+        $discountCodeId  = $allDiscountIds[0];
+        $discountRecord  = $allDiscountRecords[0];
+        $discountDetail  = [
+            'plan_discount'    => round($totalPlanDiscount, 2),
+            'reg_fee_discount' => round($totalRegDiscount, 2),
+            'total_discount'   => $discountAmount,
+        ];
     }
 
     $subtotal = round($baseAmount + $registrationFee - $discountAmount, 2);
@@ -1743,7 +1808,7 @@ function calculateTotalWithFees(array $params): array
         'registration_fee'       => $registrationFee,
         'discount_amount'        => $discountAmount,
         'discount_detail'        => $discountDetail,
-        'discount_code'          => $discountCode,
+        'discount_code'          => implode(',', $allDiscountCodes) ?: $discountCodeRaw,
         'discount_code_id'       => $discountCodeId,
         'discount_record'        => $discountRecord,
         'discount_error'         => $discountError,
@@ -1751,6 +1816,10 @@ function calculateTotalWithFees(array $params): array
         'service_fee'            => $serviceFee,
         'service_fee_percentage' => $feePct,
         'total'                  => $total,
+        // Multi-code fields
+        'discount_codes'         => $allDiscountCodes,
+        'discount_code_ids'      => $allDiscountIds,
+        'discount_details_all'   => $allDiscountDetails,
     ];
 }
 
@@ -1770,6 +1839,22 @@ function recordDiscountCodeUse(int $discountCodeId, int $studentId, float $appli
         $udStmt->execute($udParams);
     } catch (\PDOException $e) {
         error_log("[FEE] Failed to record discount use: " . $e->getMessage());
+    }
+}
+
+/**
+ * Record usage for all discount codes in a breakdown (multi-code safe).
+ */
+function recordAllDiscountCodeUses(array $breakdown, int $studentId, string $context, ?int $referenceId = null): void
+{
+    if (!empty($breakdown['discount_details_all'])) {
+        foreach ($breakdown['discount_details_all'] as $dd) {
+            if (($dd['code_id'] ?? 0) > 0 && ($dd['total_discount'] ?? 0) > 0) {
+                recordDiscountCodeUse($dd['code_id'], $studentId, $dd['total_discount'], $context, $referenceId);
+            }
+        }
+    } elseif (!empty($breakdown['discount_code_id'])) {
+        recordDiscountCodeUse($breakdown['discount_code_id'], $studentId, $breakdown['discount_amount'], $context, $referenceId);
     }
 }
 
@@ -1813,14 +1898,27 @@ function renderFeeBreakdownHtml(array $breakdown, bool $isTailwind = true, strin
         $html .= '</div>';
     }
 
-    // Discount
+    // Discount(s)
     if ($breakdown['discount_amount'] > 0) {
-        $codeDisplay = $breakdown['discount_code'] ? ' (' . htmlspecialchars($breakdown['discount_code']) . ')' : '';
-        $discountLabel = 'Discount' . $codeDisplay . ':';
-        $html .= '<div class="' . $rowClass . '">';
-        $html .= '<span class="' . $greenClass . '">' . $discountLabel . '</span>';
-        $html .= '<span class="' . $greenClass . '">-' . formatMoney($breakdown['discount_amount']) . '</span>';
-        $html .= '</div>';
+        if (!empty($breakdown['discount_details_all']) && count($breakdown['discount_details_all']) > 1) {
+            // Multiple codes: show each on its own line
+            foreach ($breakdown['discount_details_all'] as $dd) {
+                $ddAmount = $dd['total_discount'] ?? 0;
+                if ($ddAmount > 0) {
+                    $html .= '<div class="' . $rowClass . '">';
+                    $html .= '<span class="' . $greenClass . '">Discount (' . htmlspecialchars($dd['code']) . '):</span>';
+                    $html .= '<span class="' . $greenClass . '">-' . formatMoney($ddAmount) . '</span>';
+                    $html .= '</div>';
+                }
+            }
+        } else {
+            $codeDisplay = $breakdown['discount_code'] ? ' (' . htmlspecialchars($breakdown['discount_code']) . ')' : '';
+            $discountLabel = 'Discount' . $codeDisplay . ':';
+            $html .= '<div class="' . $rowClass . '">';
+            $html .= '<span class="' . $greenClass . '">' . $discountLabel . '</span>';
+            $html .= '<span class="' . $greenClass . '">-' . formatMoney($breakdown['discount_amount']) . '</span>';
+            $html .= '</div>';
+        }
     }
 
     // Service fee

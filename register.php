@@ -558,16 +558,8 @@ if ($step == 2) {
                 ]);
             }
 
-            // Record discount code usage
-            if ($feeBreakdown['discount_code_id']) {
-                recordDiscountCodeUse(
-                    $feeBreakdown['discount_code_id'],
-                    $regStudentId,
-                    $feeBreakdown['discount_amount'],
-                    'registration',
-                    $membershipId
-                );
-            }
+            // Record discount code usage (supports multiple codes)
+            recordAllDiscountCodeUses($feeBreakdown, $regStudentId, 'registration', $membershipId);
 
             // Preserve parent info for success page
             if ($isMinorFlow) {
@@ -1053,9 +1045,9 @@ elseif ($step == 2 && $selected_plan): ?>
             <!-- Discount Code Input -->
             <div class="discount-code-section" style="margin-bottom:1rem;">
                 <label style="font-size:.875rem;font-weight:600;color:var(--text-color);display:block;margin-bottom:.25rem;">Discount Code</label>
+                <div id="applied-codes-list" style="margin-bottom:.35rem;"></div>
                 <div style="display:flex;gap:.5rem;">
                     <input type="text" id="discount-input" placeholder="Enter code"
-                           value="<?= htmlspecialchars($discountCodeFromPost) ?>"
                            style="flex:1;padding:.5rem .75rem;border:1px solid var(--border-color);border-radius:8px;font-size:.875rem;background:var(--card-bg);color:var(--text-color);">
                     <button type="button" id="apply-discount-btn"
                             style="padding:.5rem 1rem;border:none;border-radius:8px;background:var(--accent-color);color:#fff;font-size:.875rem;cursor:pointer;">
@@ -1155,12 +1147,84 @@ elseif ($step == 2 && $selected_plan): ?>
                         form.submit();
                     });
 
-                    // ── Discount code AJAX ──
+                    // ── Discount code AJAX (multi-code) ──
                     const discountInput  = document.getElementById('discount-input');
                     const applyBtn       = document.getElementById('apply-discount-btn');
                     const discountMsg    = document.getElementById('discount-message');
                     const discountHidden = document.getElementById('discount_code_hidden');
                     const breakdownArea  = document.getElementById('fee-breakdown-area');
+                    const appliedList    = document.getElementById('applied-codes-list');
+                    let appliedCodes = [];
+
+                    function renderAppliedCodes(perCodeDetails) {
+                        if (!appliedList) return;
+                        if (!perCodeDetails || perCodeDetails.length === 0) {
+                            appliedList.innerHTML = '';
+                            return;
+                        }
+                        let html = '';
+                        perCodeDetails.forEach(function(d) {
+                            html += '<span style="display:inline-flex;align-items:center;gap:.25rem;background:var(--accent-color,#4caf50);color:#fff;padding:.15rem .5rem;border-radius:12px;font-size:.75rem;margin-right:.35rem;margin-bottom:.25rem;">'
+                                + d.code + ' (-$' + d.total_discount.toFixed(2) + ')'
+                                + ' <button type="button" onclick="removeDiscountCode(\'' + d.code + '\')" style="background:none;border:none;color:#fff;cursor:pointer;font-size:.85rem;padding:0 2px;">&times;</button>'
+                                + '</span>';
+                        });
+                        appliedList.innerHTML = html;
+                    }
+
+                    window.removeDiscountCode = function(code) {
+                        appliedCodes = appliedCodes.filter(function(c) { return c.toUpperCase() !== code.toUpperCase(); });
+                        discountHidden.value = appliedCodes.join(',');
+                        // Re-validate with remaining codes
+                        if (appliedCodes.length === 0) {
+                            appliedList.innerHTML = '';
+                            discountMsg.innerHTML = '';
+                            btnText.textContent = 'Pay $' + parseFloat('<?= $feeBreakdown['total'] ?>').toFixed(2);
+                            breakdownArea.innerHTML = '<?= addslashes(renderFeeBreakdownHtml($feeBreakdown, false, $isMonthly ? "First Month" : "Plan Price")) ?>';
+                            return;
+                        }
+                        revalidateAll();
+                    };
+
+                    async function revalidateAll() {
+                        const fd = new FormData();
+                        fd.append('code', appliedCodes[appliedCodes.length - 1]);
+                        fd.append('existing_codes', appliedCodes.slice(0, -1).join(','));
+                        fd.append('plan_id', '<?= $regPlanId ?>');
+                        fd.append('base_amount', '<?= $proration['amount'] ?>');
+                        fd.append('registration_fee', '<?= $regFee ?>');
+                        try {
+                            const resp = await fetch('ajax_validate_discount.php', { method: 'POST', body: fd });
+                            const data = await resp.json();
+                            if (data.valid) {
+                                updateBreakdown(data);
+                                renderAppliedCodes(data.per_code_details || []);
+                            }
+                        } catch(e) {}
+                    }
+
+                    function updateBreakdown(data) {
+                        btnText.textContent = 'Pay $' + parseFloat(data.total).toFixed(2);
+                        let html = '';
+                        html += row('<?= $isMonthly ? 'First Month' : 'Plan Price' ?>:', '$' + parseFloat('<?= $proration['amount'] ?>').toFixed(2));
+                        <?php if ($regFee > 0): ?>
+                        html += row('Registration Fee:', '$<?= number_format($regFee, 2) ?>');
+                        <?php endif; ?>
+                        if (data.per_code_details && data.per_code_details.length > 1) {
+                            data.per_code_details.forEach(function(d) {
+                                if (d.total_discount > 0) {
+                                    html += '<div class="payment-row"><span class="text-green">Discount (' + d.code + '):</span><span class="text-green">-$' + d.total_discount.toFixed(2) + '</span></div>';
+                                }
+                            });
+                        } else if (data.total_discount > 0) {
+                            html += '<div class="payment-row"><span class="text-green">Discount (' + (data.all_codes || appliedCodes.join(',')) + '):</span><span class="text-green">-$' + data.total_discount.toFixed(2) + '</span></div>';
+                        }
+                        if (data.service_fee > 0) {
+                            html += row('Service Fee (<?= number_format($feeBreakdown['service_fee_percentage'], 2) ?>%):', '$' + data.service_fee.toFixed(2));
+                        }
+                        html += '<div class="payment-row fee-total-row"><span class="fee-total-label">Total Due:</span><span class="fee-total-value">$' + data.total.toFixed(2) + '</span></div>';
+                        breakdownArea.innerHTML = '<div class="fee-breakdown">' + html + '</div>';
+                    }
 
                     if (applyBtn) {
                         applyBtn.addEventListener('click', async function() {
@@ -1174,6 +1238,7 @@ elseif ($step == 2 && $selected_plan): ?>
 
                             const fd = new FormData();
                             fd.append('code', code);
+                            fd.append('existing_codes', appliedCodes.join(','));
                             fd.append('plan_id', '<?= $regPlanId ?>');
                             fd.append('base_amount', '<?= $proration['amount'] ?>');
                             fd.append('registration_fee', '<?= $regFee ?>');
@@ -1184,31 +1249,16 @@ elseif ($step == 2 && $selected_plan): ?>
 
                                 if (data.valid) {
                                     discountMsg.innerHTML = '<span style="color:#4caf50;">' + data.message + '</span>';
-                                    discountHidden.value = code;
-
-                                    // Update pay button
-                                    btnText.textContent = 'Pay $' + parseFloat(data.total).toFixed(2);
-
-                                    // Re-render breakdown via server (reload with code in URL would be complex, so update inline)
-                                    let html = '';
-                                    html += row('<?= $isMonthly ? 'First Month' : 'Plan Price' ?>:', '$' + parseFloat('<?= $proration['amount'] ?>').toFixed(2));
-                                    <?php if ($regFee > 0): ?>
-                                    html += row('Registration Fee:', '$<?= number_format($regFee, 2) ?>');
-                                    <?php endif; ?>
-                                    if (data.total_discount > 0) {
-                                        html += '<div class="payment-row"><span class="text-green">Discount (' + code + '):</span><span class="text-green">-$' + data.total_discount.toFixed(2) + '</span></div>';
-                                    }
-                                    if (data.service_fee > 0) {
-                                        html += row('Service Fee (<?= number_format($feeBreakdown['service_fee_percentage'], 2) ?>%):', '$' + data.service_fee.toFixed(2));
-                                    }
-                                    html += '<div class="payment-row fee-total-row"><span class="fee-total-label">Total Due:</span><span class="fee-total-value">$' + data.total.toFixed(2) + '</span></div>';
-                                    breakdownArea.innerHTML = '<div class="fee-breakdown">' + html + '</div>';
+                                    appliedCodes = (data.all_codes || code).split(',').filter(Boolean);
+                                    discountHidden.value = appliedCodes.join(',');
+                                    discountInput.value = '';
+                                    updateBreakdown(data);
+                                    renderAppliedCodes(data.per_code_details || []);
                                 } else {
                                     discountMsg.innerHTML = '<span style="color:#ef5350;">' + data.error + '</span>';
-                                    discountHidden.value = '';
                                 }
                             } catch (err) {
-                                discountMsg.innerHTML = '<span style="color:#ef5350;">Error validating code.</span>';
+                                discountMsg.innerHTML = '<span style="color:#ef5350;">Unable to validate code. Please try again.</span>';
                             }
                             applyBtn.disabled = false;
                             applyBtn.textContent = 'Apply';

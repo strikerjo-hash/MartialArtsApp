@@ -125,7 +125,79 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $stmt->execute($params);
             $message = showAlert('Discount code ' . ($newVal ? 'activated' : 'deactivated') . '.', 'success');
             break;
+
+        case 'copy_to_school':
+            $targetSchoolId = (int) ($_POST['target_school_id'] ?? 0);
+            $selectedIds = $_POST['selected_codes'] ?? [];
+            if (!$targetSchoolId || empty($selectedIds)) {
+                $message = showAlert('Please select at least one code and a target school.', 'error');
+                break;
+            }
+            if ($targetSchoolId === (int) current_school_id()) {
+                $message = showAlert('Cannot copy to the same school.', 'error');
+                break;
+            }
+            $copied = 0;
+            $skipped = 0;
+            $copyErrors = [];
+            foreach ($selectedIds as $srcId) {
+                $srcId = (int) $srcId;
+                // Fetch original code
+                $params = [$srcId];
+                $srcStmt = $pdo->prepare("SELECT * FROM discount_codes WHERE id = ?" . school_where());
+                school_param($params);
+                $srcStmt->execute($params);
+                $src = $srcStmt->fetch();
+                if (!$src) continue;
+
+                // Check if code already exists in target school
+                $dupStmt = $pdo->prepare("SELECT id FROM discount_codes WHERE code = ? AND school_id = ?");
+                $dupStmt->execute([$src['code'], $targetSchoolId]);
+                if ($dupStmt->fetch()) {
+                    $skipped++;
+                    continue;
+                }
+
+                // Insert into target school (reset uses_count, no plan/event scope since IDs differ)
+                try {
+                    $pdo->prepare("INSERT INTO discount_codes
+                        (school_id, code, description, discount_type, discount_value, applies_to, plan_id, event_id, max_uses, valid_from, valid_until, is_active)
+                        VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)"
+                    )->execute([
+                        $targetSchoolId,
+                        $src['code'],
+                        $src['description'],
+                        $src['discount_type'],
+                        $src['discount_value'],
+                        $src['applies_to'],
+                        $src['max_uses'],
+                        $src['valid_from'],
+                        $src['valid_until'],
+                        $src['is_active'],
+                    ]);
+                    $copied++;
+                } catch (\PDOException $e) {
+                    // Duplicate or other constraint — skip gracefully
+                    $skipped++;
+                    $copyErrors[] = $src['code'] . ': ' . $e->getMessage();
+                }
+            }
+            $msg = "Copied $copied discount code(s) to the selected school.";
+            if ($skipped > 0) {
+                $msg .= " Skipped $skipped code(s).";
+                if (!empty($copyErrors)) {
+                    $msg .= " If codes failed to copy, please run the migration page first (migrate.php) to update the database, then try again.";
+                }
+            }
+            $message = showAlert($msg, $copied > 0 ? 'success' : 'error');
+            break;
     }
+}
+
+// Fetch schools for copy feature (super_admin only)
+$allSchools = [];
+if (getCurrentUser()['role'] === 'super_admin') {
+    $allSchools = get_all_schools();
 }
 
 // Fetch all discount codes
@@ -151,10 +223,18 @@ include 'includes/header.php';
 
     <div class="flex justify-between items-center mb-6">
         <h1 class="text-3xl font-bold text-gray-800">Discount Codes</h1>
-        <button onclick="document.getElementById('addCodeModal').classList.remove('hidden')"
-                class="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-medium">
-            + Add Discount Code
-        </button>
+        <div class="flex gap-2">
+            <?php if (!empty($allSchools) && count($allSchools) > 1): ?>
+            <button onclick="document.getElementById('copyToSchoolModal').classList.remove('hidden')"
+                    class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium text-sm">
+                Copy to School
+            </button>
+            <?php endif; ?>
+            <button onclick="document.getElementById('addCodeModal').classList.remove('hidden')"
+                    class="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-medium">
+                + Add Discount Code
+            </button>
+        </div>
     </div>
 
     <!-- Codes Table -->
@@ -445,6 +525,67 @@ include 'includes/header.php';
         </form>
     </div>
 </div>
+
+<?php if (!empty($allSchools) && count($allSchools) > 1): ?>
+<!-- Copy to School Modal -->
+<div id="copyToSchoolModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+    <div class="relative top-20 mx-auto p-5 border w-full max-w-lg shadow-lg rounded-md bg-white">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-xl font-bold text-gray-800">Copy Discount Codes to Another School</h3>
+            <button onclick="document.getElementById('copyToSchoolModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button>
+        </div>
+        <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="copy_to_school">
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Target School *</label>
+                <select name="target_school_id" required class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                    <option value="">Select a school...</option>
+                    <?php foreach ($allSchools as $sch): ?>
+                        <?php if ((int)$sch['id'] !== (int)current_school_id()): ?>
+                        <option value="<?= (int)$sch['id'] ?>"><?= htmlspecialchars($sch['name']) ?></option>
+                        <?php endif; ?>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">Select Codes to Copy</label>
+                <div class="max-h-60 overflow-y-auto border border-gray-200 rounded-lg p-2 space-y-1">
+                    <?php if (empty($codes)): ?>
+                        <p class="text-sm text-gray-500 italic p-2">No discount codes to copy.</p>
+                    <?php else: ?>
+                        <label class="flex items-center p-1 hover:bg-gray-50 rounded cursor-pointer">
+                            <input type="checkbox" id="selectAllCodes" onchange="document.querySelectorAll('.copy-code-cb').forEach(c=>c.checked=this.checked)" class="rounded border-gray-300 text-blue-600 mr-2">
+                            <span class="text-sm font-medium text-gray-700">Select All</span>
+                        </label>
+                        <hr class="my-1">
+                        <?php foreach ($codes as $c): ?>
+                        <label class="flex items-center p-1 hover:bg-gray-50 rounded cursor-pointer">
+                            <input type="checkbox" name="selected_codes[]" value="<?= (int)$c['id'] ?>" class="copy-code-cb rounded border-gray-300 text-blue-600 mr-2">
+                            <span class="text-sm"><?= htmlspecialchars($c['code']) ?></span>
+                            <span class="text-xs text-gray-500 ml-2">
+                                (<?= $c['discount_type'] === 'percentage' ? number_format($c['discount_value'], 0) . '%' : formatMoney($c['discount_value']) ?>
+                                <?= $c['applies_to'] === 'registration_fee' ? '- Reg Fee' : ($c['applies_to'] === 'plan_price' ? '- Plan' : '') ?>)
+                            </span>
+                        </label>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </div>
+            </div>
+
+            <p class="text-xs text-gray-500">Plan and event restrictions will be cleared on copied codes since plan/event IDs differ between schools. Uses count resets to 0.</p>
+
+            <div class="flex justify-end space-x-3 pt-2">
+                <button type="button" onclick="document.getElementById('copyToSchoolModal').classList.add('hidden')"
+                        class="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Cancel</button>
+                <button type="submit" class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Copy Selected</button>
+            </div>
+        </form>
+    </div>
+</div>
+<?php endif; ?>
 
 <script>
 function editCode(c) {

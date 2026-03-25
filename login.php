@@ -158,9 +158,16 @@ $theme = get_theme();
 
             <div class="login-footer">
                 <p><a href="password_reset.php">Forgot your password?</a></p>
-                <p><a href="register.php">New student? Create an account</a></p>
                 <a href="admin_login.php" class="admin-link">Staff / Instructor Login &rarr;</a>
             </div>
+        </div>
+
+        <!-- Registration Card -->
+        <div class="login-card" style="margin-top: 1.25rem; padding: 2rem 2rem; border: 2px solid rgba(255,255,255,.15); background: var(--secondary-color);">
+            <h2 style="font-size: 1.6rem; font-weight: 800; margin: 0 0 1.25rem 0; color: #fff; text-transform: uppercase; letter-spacing: 1px;">Register Here<br><span style="font-size: 1.1rem; font-weight: 600; letter-spacing: .5px;">For a Free Trial!</span></h2>
+            <a href="register.php" class="btn btn-primary btn-block" style="font-size: 1.1rem; padding: .85rem 1.5rem; text-decoration: none; display: inline-block; border-radius: 8px; font-weight: 700; letter-spacing: .3px;">
+                New Student &mdash; Create Account
+            </a>
         </div>
     </div>
 </body>

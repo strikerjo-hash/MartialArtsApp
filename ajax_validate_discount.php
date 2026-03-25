@@ -3,13 +3,15 @@
  * ajax_validate_discount.php — AJAX endpoint for real-time discount code validation
  *
  * Accepts POST with:
- *   code             — the discount code string
+ *   code             — discount code string (single code to validate)
+ *   existing_codes   — (optional) comma-separated already-applied codes
  *   plan_id          — (optional) plan ID for scope check
  *   event_id         — (optional) event ID for scope check
  *   base_amount      — plan charge / event fee
  *   registration_fee — registration fee (0 for events/upgrades)
  *
- * Returns JSON response.
+ * Returns JSON response. When existing_codes is provided, the breakdown
+ * reflects all codes combined.
  */
 
 header('Content-Type: application/json');
@@ -46,10 +48,11 @@ if (!hash_equals($expected, $csrfToken)) {
     exit;
 }
 
-$code           = trim($_POST['code'] ?? '');
-$planId         = !empty($_POST['plan_id']) ? (int) $_POST['plan_id'] : null;
-$eventId        = !empty($_POST['event_id']) ? (int) $_POST['event_id'] : null;
-$baseAmount     = (float) ($_POST['base_amount'] ?? 0);
+$code            = trim($_POST['code'] ?? '');
+$existingCodes   = trim($_POST['existing_codes'] ?? '');
+$planId          = !empty($_POST['plan_id']) ? (int) $_POST['plan_id'] : null;
+$eventId         = !empty($_POST['event_id']) ? (int) $_POST['event_id'] : null;
+$baseAmount      = (float) ($_POST['base_amount'] ?? 0);
 $registrationFee = (float) ($_POST['registration_fee'] ?? 0);
 
 if ($code === '') {
@@ -57,7 +60,7 @@ if ($code === '') {
     exit;
 }
 
-// Validate the code
+// Validate the new code individually first
 $validation = validateDiscountCode($code, $planId, $eventId);
 
 if (!$validation['valid']) {
@@ -67,23 +70,45 @@ if (!$validation['valid']) {
 
 $discount = $validation['discount'];
 
-// Calculate amounts
-$discountAmounts = calculateDiscountAmount($discount, $baseAmount, $registrationFee);
+// Build combined codes string (existing + new)
+$allCodes = $existingCodes !== '' ? $existingCodes . ',' . $code : $code;
 
-// Build the full breakdown for display
+// Check for duplicate
+$existingArr = array_filter(array_map('trim', explode(',', strtoupper($existingCodes))));
+if (in_array(strtoupper($code), $existingArr, true)) {
+    echo json_encode(['valid' => false, 'error' => 'This code is already applied.']);
+    exit;
+}
+
+// Build the full breakdown with all codes combined
 $breakdown = calculateTotalWithFees([
     'base_amount'      => $baseAmount,
     'registration_fee' => $registrationFee,
-    'discount_code'    => $code,
+    'discount_code'    => $allCodes,
     'plan_id'          => $planId,
     'event_id'         => $eventId,
 ]);
 
-// Human-readable message
+// Check if the new code was actually accepted (not rejected due to scope conflict)
+if ($breakdown['discount_error'] && stripos($breakdown['discount_error'], strtoupper($code)) !== false) {
+    echo json_encode(['valid' => false, 'error' => $breakdown['discount_error']]);
+    exit;
+}
+
+// Human-readable message for the new code
 if ($discount['discount_type'] === 'percentage') {
     $msg = number_format($discount['discount_value'], 0) . '% discount applied!';
 } else {
     $msg = formatMoney($discount['discount_value']) . ' discount applied!';
+}
+
+// Per-code discount details for display
+$perCodeDetails = [];
+foreach ($breakdown['discount_details_all'] ?? [] as $dd) {
+    $perCodeDetails[] = [
+        'code'           => $dd['code'],
+        'total_discount' => $dd['total_discount'],
+    ];
 }
 
 echo json_encode([
@@ -91,11 +116,13 @@ echo json_encode([
     'discount_type'    => $discount['discount_type'],
     'discount_value'   => (float) $discount['discount_value'],
     'applies_to'       => $discount['applies_to'],
-    'plan_discount'    => $discountAmounts['plan_discount'],
-    'reg_fee_discount' => $discountAmounts['reg_fee_discount'],
-    'total_discount'   => $discountAmounts['total_discount'],
+    'plan_discount'    => $breakdown['discount_detail']['plan_discount'] ?? 0,
+    'reg_fee_discount' => $breakdown['discount_detail']['reg_fee_discount'] ?? 0,
+    'total_discount'   => $breakdown['discount_amount'],
     'subtotal'         => $breakdown['subtotal'],
     'service_fee'      => $breakdown['service_fee'],
     'total'            => $breakdown['total'],
     'message'          => $msg,
+    'all_codes'        => implode(',', $breakdown['discount_codes'] ?? []),
+    'per_code_details' => $perCodeDetails,
 ]);

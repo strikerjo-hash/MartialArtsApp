@@ -253,14 +253,14 @@ function sync_parent_payment_methods_to_child(int $parentStudentId, int $childSt
     $copied = 0;
 
     try {
-        // Get parent-student's payment methods
+        // Get parent's default payment method (we only sync the default card)
         $parentMethods = $pdo->prepare(
-            "SELECT * FROM payment_methods WHERE student_id = ? ORDER BY is_default DESC, created_at DESC"
+            "SELECT * FROM payment_methods WHERE student_id = ? ORDER BY is_default DESC, created_at DESC LIMIT 1"
         );
         $parentMethods->execute([$parentStudentId]);
-        $parentCards = $parentMethods->fetchAll();
+        $parentCard = $parentMethods->fetch();
 
-        if (empty($parentCards)) {
+        if (!$parentCard) {
             return 0;
         }
 
@@ -272,66 +272,82 @@ function sync_parent_payment_methods_to_child(int $parentStudentId, int $childSt
         $parentInfo = $parentStmt->fetch();
         $parentName = $parentInfo ? trim($parentInfo['first_name'] . ' ' . $parentInfo['last_name']) : 'Parent';
 
-        // Get child's existing payment methods to avoid duplicates
+        $label = $parentCard['label'] . ' (via ' . $parentName . ')';
+        $gatewayPmId = $parentCard['gateway_payment_method_id'] ?? null;
+
+        // Check if child already has a card synced from this parent
         $existingStmt = $pdo->prepare(
-            "SELECT last_four, card_brand FROM payment_methods WHERE student_id = ?"
+            "SELECT id FROM payment_methods WHERE student_id = ? AND source_parent_id = ? LIMIT 1"
         );
-        $existingStmt->execute([$childStudentId]);
-        $existingCards = [];
-        foreach ($existingStmt->fetchAll() as $ec) {
-            $existingCards[] = ($ec['card_brand'] ?? '') . ':' . $ec['last_four'];
-        }
+        $existingStmt->execute([$childStudentId, $parentStudentId]);
+        $existingRow = $existingStmt->fetch();
 
-        // Count existing cards to decide default status
-        $countStmt = $pdo->prepare("SELECT COUNT(*) FROM payment_methods WHERE student_id = ?");
-        $countStmt->execute([$childStudentId]);
-        $existingCount = (int) $countStmt->fetchColumn();
-
-        foreach ($parentCards as $pc) {
-            $cardKey = ($pc['card_brand'] ?? '') . ':' . $pc['last_four'];
-            if (in_array($cardKey, $existingCards, true)) {
-                continue;
-            }
-
-            $label = $pc['label'] . ' (via ' . $parentName . ')';
-            $isDefault = ($existingCount === 0 && $copied === 0) ? 1 : 0;
-
+        if ($existingRow) {
+            // Update existing synced card with parent's latest card details
+            $upd = $pdo->prepare(
+                "UPDATE payment_methods SET label = ?, card_brand = ?, last_four = ?, exp_month = ?, exp_year = ?,
+                 encrypted_token = ?, gateway_payment_method_id = ?
+                 WHERE id = ?"
+            );
+            $upd->execute([
+                $label,
+                $parentCard['card_brand'],
+                $parentCard['last_four'],
+                $parentCard['exp_month'] ?? null,
+                $parentCard['exp_year'] ?? null,
+                $parentCard['encrypted_token'] ?? '',
+                $gatewayPmId,
+                $existingRow['id'],
+            ]);
+        } else {
+            // Insert new synced card for this parent
             try {
                 $ins = $pdo->prepare(
-                    "INSERT INTO payment_methods (student_id, label, card_brand, last_four, exp_month, exp_year, encrypted_token, gateway_payment_method_id, is_default)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    "INSERT INTO payment_methods (student_id, label, card_brand, last_four, exp_month, exp_year, encrypted_token, gateway_payment_method_id, is_default, source_parent_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)"
                 );
                 $ins->execute([
                     $childStudentId,
                     $label,
-                    $pc['card_brand'],
-                    $pc['last_four'],
-                    $pc['exp_month'] ?? null,
-                    $pc['exp_year'] ?? null,
-                    $pc['encrypted_token'] ?? '',
-                    $pc['gateway_payment_method_id'] ?? null,
-                    $isDefault,
+                    $parentCard['card_brand'],
+                    $parentCard['last_four'],
+                    $parentCard['exp_month'] ?? null,
+                    $parentCard['exp_year'] ?? null,
+                    $parentCard['encrypted_token'] ?? '',
+                    $gatewayPmId,
+                    $parentStudentId,
                 ]);
-                $copied++;
             } catch (\PDOException $e) {
+                // Fallback without optional columns
                 try {
                     $ins = $pdo->prepare(
-                        "INSERT INTO payment_methods (student_id, label, card_brand, last_four, encrypted_token, is_default)
-                         VALUES (?, ?, ?, ?, ?, ?)"
+                        "INSERT INTO payment_methods (student_id, label, card_brand, last_four, encrypted_token, is_default, source_parent_id)
+                         VALUES (?, ?, ?, ?, ?, 0, ?)"
                     );
                     $ins->execute([
                         $childStudentId,
                         $label,
-                        $pc['card_brand'],
-                        $pc['last_four'],
-                        $pc['encrypted_token'] ?? '',
-                        $isDefault,
+                        $parentCard['card_brand'],
+                        $parentCard['last_four'],
+                        $parentCard['encrypted_token'] ?? '',
+                        $parentStudentId,
                     ]);
-                    $copied++;
-                } catch (\PDOException $e2) {}
+                } catch (\PDOException $e2) {
+                    return 0;
+                }
             }
         }
-    } catch (\PDOException $e) {}
+        $copied = 1;
+
+        // Make this parent's synced card the child's default (latest card update wins)
+        // First clear all defaults for this child
+        $pdo->prepare("UPDATE payment_methods SET is_default = 0 WHERE student_id = ?")->execute([$childStudentId]);
+        // Then set this parent's synced card as default
+        $pdo->prepare("UPDATE payment_methods SET is_default = 1 WHERE student_id = ? AND source_parent_id = ?")->execute([$childStudentId, $parentStudentId]);
+
+    } catch (\PDOException $e) {
+        error_log("[PAYMENT] sync_parent_payment_methods_to_child failed: " . $e->getMessage());
+    }
 
     return $copied;
 }

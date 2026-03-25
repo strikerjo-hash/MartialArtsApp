@@ -211,16 +211,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['process_payment'])) {
                 'payment_method' => $amountCharged > 0 ? 'credit_card' : 'account_credit',
             ]);
 
-            // Record discount code usage
-            if ($feeBreakdown['discount_code_id']) {
-                recordDiscountCodeUse(
-                    $feeBreakdown['discount_code_id'],
-                    $parentId,
-                    $feeBreakdown['discount_amount'],
-                    'event',
-                    $registrations[0]['id']
-                );
-            }
+            // Record discount code usage (supports multiple codes)
+            recordAllDiscountCodeUses($feeBreakdown, $parentId, 'event', $registrations[0]['id']);
 
             header('Location: parent_events.php?success=payment');
             exit;
@@ -289,6 +281,7 @@ include 'includes/parent_header.php';
                 <!-- Discount Code -->
                 <div class="mt-4 pt-3 border-t border-blue-200">
                     <label class="block text-sm font-medium text-gray-700 mb-1">Discount Code</label>
+                    <div id="applied-codes-list" class="mb-1"></div>
                     <div class="flex gap-2">
                         <input type="text" id="discount-input" placeholder="Enter code"
                                value="<?= htmlspecialchars($discountCodeFromPost) ?>"
@@ -475,11 +468,91 @@ include 'includes/parent_header.php';
     var breakdownArea = document.getElementById('fee-breakdown-area');
     var btnText       = document.getElementById('btn-text');
     var hiddenFields  = document.querySelectorAll('.discount-hidden');
+    var appliedList   = document.getElementById('applied-codes-list');
+
+    var appliedCodes = [];
+    var originalBreakdownHtml = '<?= addslashes(renderFeeBreakdownHtml($feeBreakdown, true, "Total Event Fees")) ?>';
+
+    function renderCodeBadges(details) {
+        if (!appliedList) return;
+        if (appliedCodes.length === 0) { appliedList.innerHTML = ''; return; }
+        var html = '<div class="flex flex-wrap gap-1">';
+        appliedCodes.forEach(function(c) {
+            var detail = (details || []).find(function(d) { return d.code === c; });
+            var label = c;
+            if (detail && detail.total_discount) label += ' (-$' + parseFloat(detail.total_discount).toFixed(2) + ')';
+            html += '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">';
+            html += label;
+            html += ' <button type="button" onclick="removeCode(\'' + c.replace(/'/g, "\\'") + '\')" class="text-green-600 hover:text-red-600 font-bold">&times;</button>';
+            html += '</span>';
+        });
+        html += '</div>';
+        appliedList.innerHTML = html;
+    }
+
+    window.removeCode = function(code) {
+        appliedCodes = appliedCodes.filter(function(c) { return c !== code; });
+        hiddenFields.forEach(function(f) { f.value = appliedCodes.join(','); });
+        discountMsg.innerHTML = '';
+        if (appliedCodes.length === 0) {
+            if (breakdownArea) breakdownArea.innerHTML = originalBreakdownHtml;
+            if (btnText) btnText.textContent = 'Pay Now \u2014 $' + parseFloat(<?= json_encode($feeBreakdown['total']) ?>).toFixed(2);
+            renderCodeBadges([]);
+        } else {
+            revalidateAll();
+        }
+    };
+
+    async function revalidateAll() {
+        var lastCode = appliedCodes[appliedCodes.length - 1];
+        var fd = new FormData();
+        fd.append('code', lastCode);
+        fd.append('event_id', '<?= $firstEventId ?>');
+        fd.append('base_amount', '<?= $totalBaseFee ?>');
+        fd.append('registration_fee', '0');
+        fd.append('existing_codes', appliedCodes.slice(0, -1).join(','));
+
+        try {
+            var resp = await fetch('ajax_validate_discount.php', { method: 'POST', body: fd });
+            var data = await resp.json();
+            if (data.valid) {
+                appliedCodes = (data.all_codes || appliedCodes.join(',')).split(',').filter(Boolean);
+                hiddenFields.forEach(function(f) { f.value = appliedCodes.join(','); });
+                updateBreakdownDisplay(data);
+                renderCodeBadges(data.per_code_details || []);
+                if (btnText) btnText.textContent = 'Pay Now \u2014 $' + parseFloat(data.total).toFixed(2);
+            }
+        } catch (err) {
+            discountMsg.innerHTML = '<span class="text-red-600">Unable to validate code. Please try again.</span>';
+        }
+    }
+
+    function updateBreakdownDisplay(data) {
+        var html = '<div class="space-y-2 text-sm">';
+        html += '<div class="flex justify-between"><span class="text-gray-600">Total Event Fees:</span><span class="font-semibold">$' + parseFloat(<?= json_encode($totalBaseFee) ?>).toFixed(2) + '</span></div>';
+        if (data.per_code_details && data.per_code_details.length > 0) {
+            data.per_code_details.forEach(function(d) {
+                html += '<div class="flex justify-between"><span class="text-green-600 font-semibold">Discount (' + d.code + '):</span><span class="text-green-600 font-semibold">-$' + parseFloat(d.total_discount).toFixed(2) + '</span></div>';
+            });
+        } else if (data.total_discount > 0) {
+            html += '<div class="flex justify-between"><span class="text-green-600 font-semibold">Discount:</span><span class="text-green-600 font-semibold">-$' + data.total_discount.toFixed(2) + '</span></div>';
+        }
+        if (data.service_fee > 0) {
+            html += '<div class="flex justify-between"><span class="text-gray-600">Service Fee (<?= number_format($feeBreakdown["service_fee_percentage"], 2) ?>%):</span><span class="font-semibold">$' + data.service_fee.toFixed(2) + '</span></div>';
+        }
+        html += '<div class="flex justify-between pt-2 border-t border-blue-200"><span class="text-lg font-semibold text-gray-800">Total Due:</span><span class="text-xl font-bold text-green-600">$' + data.total.toFixed(2) + '</span></div>';
+        html += '</div>';
+        if (breakdownArea) breakdownArea.innerHTML = html;
+    }
 
     applyBtn.addEventListener('click', async function() {
         var code = (discountInput.value || '').trim();
         if (!code) {
             discountMsg.innerHTML = '<span class="text-red-600">Please enter a code.</span>';
+            return;
+        }
+        if (appliedCodes.indexOf(code.toUpperCase()) !== -1 || appliedCodes.indexOf(code) !== -1) {
+            discountMsg.innerHTML = '<span class="text-red-600">This code has already been applied.</span>';
             return;
         }
         applyBtn.disabled = true;
@@ -490,6 +563,7 @@ include 'includes/parent_header.php';
         fd.append('event_id', '<?= $firstEventId ?>');
         fd.append('base_amount', '<?= $totalBaseFee ?>');
         fd.append('registration_fee', '0');
+        fd.append('existing_codes', appliedCodes.join(','));
 
         try {
             var resp = await fetch('ajax_validate_discount.php', { method: 'POST', body: fd });
@@ -497,26 +571,17 @@ include 'includes/parent_header.php';
 
             if (data.valid) {
                 discountMsg.innerHTML = '<span class="text-green-600">' + data.message + '</span>';
-                hiddenFields.forEach(function(f) { f.value = code; });
+                appliedCodes = (data.all_codes || code).split(',').filter(Boolean);
+                hiddenFields.forEach(function(f) { f.value = appliedCodes.join(','); });
+                discountInput.value = '';
                 if (btnText) btnText.textContent = 'Pay Now \u2014 $' + parseFloat(data.total).toFixed(2);
-
-                var html = '<div class="space-y-2 text-sm">';
-                html += '<div class="flex justify-between"><span class="text-gray-600">Total Event Fees:</span><span class="font-semibold">$' + parseFloat(<?= json_encode($totalBaseFee) ?>).toFixed(2) + '</span></div>';
-                if (data.total_discount > 0) {
-                    html += '<div class="flex justify-between"><span class="text-green-600 font-semibold">Discount (' + code + '):</span><span class="text-green-600 font-semibold">-$' + data.total_discount.toFixed(2) + '</span></div>';
-                }
-                if (data.service_fee > 0) {
-                    html += '<div class="flex justify-between"><span class="text-gray-600">Service Fee (<?= number_format($feeBreakdown["service_fee_percentage"], 2) ?>%):</span><span class="font-semibold">$' + data.service_fee.toFixed(2) + '</span></div>';
-                }
-                html += '<div class="flex justify-between pt-2 border-t border-blue-200"><span class="text-lg font-semibold text-gray-800">Total Due:</span><span class="text-xl font-bold text-green-600">$' + data.total.toFixed(2) + '</span></div>';
-                html += '</div>';
-                if (breakdownArea) breakdownArea.innerHTML = html;
+                updateBreakdownDisplay(data);
+                renderCodeBadges(data.per_code_details || []);
             } else {
-                discountMsg.innerHTML = '<span class="text-red-600">' + data.error + '</span>';
-                hiddenFields.forEach(function(f) { f.value = ''; });
+                discountMsg.innerHTML = '<span class="text-red-600">' + (data.error || 'Unable to validate code. Please try again.') + '</span>';
             }
         } catch (err) {
-            discountMsg.innerHTML = '<span class="text-red-600">Error validating code.</span>';
+            discountMsg.innerHTML = '<span class="text-red-600">Unable to validate code. Please try again.</span>';
         }
         applyBtn.disabled = false;
         applyBtn.textContent = 'Apply';

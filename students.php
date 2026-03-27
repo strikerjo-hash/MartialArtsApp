@@ -89,6 +89,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['action'])) {
         switch ($_POST['action']) {
             case 'add':
+                $addEmail = sanitizeInput($_POST['email']);
+                // Store empty emails as NULL so the unique index doesn't conflict
+                $addEmailDb = ($addEmail !== '') ? $addEmail : null;
+
+                // Check for duplicate non-empty email at this school
+                if ($addEmailDb !== null) {
+                    $dupParams = [$addEmailDb];
+                    $dupSql = "SELECT id, first_name, last_name FROM students WHERE email = ?" . school_where();
+                    school_param($dupParams);
+                    $dupStmt = $pdo->prepare($dupSql);
+                    $dupStmt->execute($dupParams);
+                    $dupStudent = $dupStmt->fetch();
+                    if ($dupStudent) {
+                        $dupName = htmlspecialchars($dupStudent['first_name'] . ' ' . $dupStudent['last_name']);
+                        $message = showAlert("A student with that email already exists ({$dupName}). Please use a different email address.", 'error');
+                        break;
+                    }
+                }
+
                 $stmt = $pdo->prepare("
                     INSERT INTO students (school_id, first_name, last_name, email, phone, date_of_birth,
                                         address, emergency_contact_name, emergency_contact_phone,
@@ -99,7 +118,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     current_school_id(),
                     sanitizeInput($_POST['first_name']),
                     sanitizeInput($_POST['last_name']),
-                    sanitizeInput($_POST['email']),
+                    $addEmailDb,
                     sanitizeInput($_POST['phone']),
                     $_POST['date_of_birth'],
                     sanitizeInput($_POST['address']),

@@ -177,6 +177,26 @@ run_migration($pdo, 'Per-school parents.username', "ALTER TABLE parents DROP IND
 run_migration($pdo, 'Per-school class_enrollments', "ALTER TABLE class_enrollments DROP INDEX unique_enrollment, ADD UNIQUE INDEX unique_enrollment_school (student_id, class_id, school_id)", $results, $errors);
 run_migration($pdo, 'Per-school event_registrations', "ALTER TABLE event_registrations DROP INDEX unique_registration, ADD UNIQUE INDEX unique_registration_school (event_id, student_id, school_id)", $results, $errors);
 
+// Fix blank emails: convert empty strings to NULL so unique index allows multiple students without email
+try {
+    $pdo->exec("UPDATE students SET email = NULL WHERE email = ''");
+    $pdo->exec("UPDATE students SET username = NULL WHERE username = ''");
+    $results[] = '[OK] Converted blank student emails/usernames to NULL';
+} catch (\PDOException $e) {
+    // Non-fatal, may have been done already
+}
+
+// Recreate email unique index to allow multiple NULLs (MySQL allows this by default)
+try {
+    $idxCheck = $pdo->query("SHOW INDEX FROM students WHERE Key_name = 'idx_students_email_school'");
+    if ($idxCheck->rowCount() > 0) {
+        $pdo->exec("ALTER TABLE students DROP INDEX idx_students_email_school, ADD UNIQUE INDEX idx_students_email_school (email, school_id)");
+        $results[] = '[OK] Rebuilt idx_students_email_school (NULLs now allowed)';
+    }
+} catch (\PDOException $e) {
+    // Index may not need rebuilding
+}
+
 // ============================================================================
 // 6. Auth.php migrations: payment lockout, import flags, calendar events
 // ============================================================================

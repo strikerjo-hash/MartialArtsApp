@@ -140,18 +140,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $planPrice     = (float) ($plan_data['price'] ?? 0);
                 $regFee        = (float) ($plan_data['registration_fee'] ?? 0);
 
-                // ── Pre-validate discount code (needed before auto-correct check) ──
+                // ── Pre-validate discount code(s) (needed before auto-correct check) ──
                 $discountCode       = trim($_POST['discount_code'] ?? '');
-                $discountValidation = null;
                 $discountCoversAll  = false;
                 $discountNote       = '';
+                $discountBreakdown  = null;
 
                 if ($discountCode !== '') {
-                    $discountValidation = validateDiscountCode($discountCode, (int)$plan_id, null);
-                    if ($discountValidation['valid']) {
-                        $discountRecord  = $discountValidation['discount'];
-                        $discountAmounts = calculateDiscountAmount($discountRecord, $planPrice, $regFee);
-                        $effectiveTotal  = ($planPrice + $regFee) - $discountAmounts['total_discount'];
+                    $discountBreakdown = calculateTotalWithFees([
+                        'base_amount'      => $planPrice,
+                        'registration_fee' => $regFee,
+                        'discount_code'    => $discountCode,
+                        'plan_id'          => (int)$plan_id,
+                    ]);
+                    if ($discountBreakdown['discount_amount'] > 0) {
+                        $effectiveTotal = ($planPrice + $regFee) - $discountBreakdown['discount_amount'];
                         if ($effectiveTotal <= 0) {
                             $discountCoversAll = true;
                         }
@@ -182,17 +185,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $membership_id = $pdo->lastInsertId();
 
                 // ── Record discount code usage (reuse pre-validation result) ──
-                if ($discountCode !== '' && $discountValidation && $discountValidation['valid']) {
-                    $discountRecord  = $discountValidation['discount'];
-                    $discountAmounts = calculateDiscountAmount($discountRecord, $planPrice, $regFee);
-                    recordDiscountCodeUse(
-                        (int)$discountRecord['id'],
-                        (int)$_POST['student_id'],
-                        $discountAmounts['total_discount'],
-                        'membership',
-                        (int)$membership_id
-                    );
-                    $discountNote = ' | Discount: -$' . number_format($discountAmounts['total_discount'], 2) . ' (' . strtoupper($discountCode) . ')';
+                if ($discountCode !== '' && $discountBreakdown && $discountBreakdown['discount_amount'] > 0) {
+                    recordAllDiscountCodeUses($discountBreakdown, (int)$_POST['student_id'], 'membership', (int)$membership_id);
+                    $codeNames = strtoupper(implode(', ', $discountBreakdown['discount_codes'] ?? [$discountCode]));
+                    $discountNote = ' | Discount: -$' . number_format($discountBreakdown['discount_amount'], 2) . ' (' . $codeNames . ')';
                 }
 
                 if ($paymentStatus === 'paid' && $amountPaid > 0) {
@@ -289,40 +285,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     break;
                 }
 
-                // Check if a discount is already applied to this membership
-                $existingDiscount = $pdo->prepare("SELECT id FROM discount_code_uses WHERE reference_id = ? AND context = 'membership' LIMIT 1");
-                $existingDiscount->execute([$membershipId]);
-                if ($existingDiscount->fetch()) {
-                    $message = showAlert('A discount code has already been applied to this membership.', 'error');
+                // Check if discounts are already applied to this membership
+                $existingDiscountCount = $pdo->prepare("SELECT COUNT(*) FROM discount_code_uses WHERE reference_id = ? AND context = 'membership'");
+                $existingDiscountCount->execute([$membershipId]);
+                if ((int)$existingDiscountCount->fetchColumn() >= 2) {
+                    $message = showAlert('This membership already has the maximum number of discount codes applied.', 'error');
                     break;
                 }
 
-                // Validate the discount code against the plan
-                $discountValidation = validateDiscountCode($discountCode, $planId, null);
-                if (!$discountValidation['valid']) {
-                    $message = showAlert('Discount code error: ' . $discountValidation['error'], 'error');
+                // Validate all discount codes via calculateTotalWithFees
+                $memPlanPrice = (float) $memData['price'];
+                $memRegFee    = (float) ($memData['registration_fee'] ?? 0);
+
+                $breakdown = calculateTotalWithFees([
+                    'base_amount'      => $memPlanPrice,
+                    'registration_fee' => $memRegFee,
+                    'discount_code'    => $discountCode,
+                    'plan_id'          => $planId,
+                ]);
+
+                if ($breakdown['discount_amount'] <= 0) {
+                    $errMsg = $breakdown['discount_error'] ?: 'The discount code(s) could not be applied.';
+                    $message = showAlert($errMsg, 'error');
                     break;
                 }
 
-                $discountRecord  = $discountValidation['discount'];
-                $memPlanPrice    = (float) $memData['price'];
-                $memRegFee       = (float) ($memData['registration_fee'] ?? 0);
-                $discountAmounts = calculateDiscountAmount($discountRecord, $memPlanPrice, $memRegFee);
+                // Record all discount code usages
+                recordAllDiscountCodeUses($breakdown, $studentId, 'membership', $membershipId);
 
-                // Record the discount usage
-                recordDiscountCodeUse(
-                    (int) $discountRecord['id'],
-                    $studentId,
-                    $discountAmounts['total_discount'],
-                    'membership',
-                    $membershipId
-                );
-
-                $newTotal = $memPlanPrice + $memRegFee - $discountAmounts['total_discount'];
+                $codeNames = strtoupper(implode(', ', $breakdown['discount_codes'] ?? []));
+                $newTotal = $memPlanPrice + $memRegFee - $breakdown['discount_amount'];
                 $message = showAlert(
-                    'Discount code <strong>' . strtoupper($discountCode) . '</strong> applied! Saves ' .
-                    formatMoney($discountAmounts['total_discount']) . '. Discounted total: ' .
-                    formatMoney($newTotal),
+                    'Discount code(s) <strong>' . htmlspecialchars($codeNames) . '</strong> applied! Saves ' .
+                    formatMoney($breakdown['discount_amount']) . '. Discounted total: ' .
+                    formatMoney(max(0, $newTotal)),
                     'success'
                 );
                 break;
@@ -721,16 +717,19 @@ include 'includes/header.php';
             </div>
             <div><label class="block text-sm font-medium text-gray-700 mb-1">Payment Method</label><select name="payment_method" class="w-full px-3 py-2 border border-gray-300 rounded-lg"><option value="cash">Cash</option><option value="credit_card">Credit Card</option><option value="debit_card">Debit Card</option><option value="bank_transfer">Bank Transfer</option><option value="other">Other</option></select></div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Discount Code</label>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Discount Code(s)</label>
                 <div class="flex gap-2">
-                    <input type="text" name="discount_code" id="admin-discount-code" placeholder="Optional — enter code"
+                    <input type="text" id="admin-discount-code" placeholder="Enter code and click Apply"
                            class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm">
                     <button type="button" id="admin-apply-discount"
                             class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium">
                         Apply
                     </button>
                 </div>
+                <input type="hidden" name="discount_code" id="admin-discount-hidden" value="">
                 <div id="admin-discount-message" class="text-sm mt-1"></div>
+                <div id="admin-applied-codes" class="flex flex-wrap gap-2 mt-2"></div>
+                <p class="text-xs text-gray-400 mt-1">You can apply up to 2 codes: one for plan price and one for registration fee.</p>
             </div>
             <div class="bg-blue-50 border border-blue-200 rounded-lg p-3">
                 <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" name="auto_renew" value="1" checked class="rounded border-gray-300 text-blue-600"><span class="text-sm font-medium text-blue-800">Enable auto-renewal (subscription)</span></label>
@@ -859,14 +858,16 @@ include 'includes/header.php';
                 <p class="text-gray-600">Price: <strong id="discount_plan_price_display"></strong></p>
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Discount Code</label>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Discount Code(s)</label>
                 <div class="flex gap-2">
-                    <input type="text" id="existing-discount-code" placeholder="Enter discount code"
+                    <input type="text" id="existing-discount-code" placeholder="Enter code and click Apply"
                            class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-indigo-500">
                     <button type="button" id="existing-apply-discount-btn"
                             class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium">Apply</button>
                 </div>
                 <div id="existing-discount-message" class="text-sm mt-1"></div>
+                <div id="existing-applied-codes" class="flex flex-wrap gap-2 mt-2"></div>
+                <p class="text-xs text-gray-400 mt-1">You can apply up to 2 codes: one for plan price and one for registration fee.</p>
             </div>
             <div id="discount-summary" class="hidden bg-green-50 border border-green-200 rounded-lg p-3 text-sm text-green-700">
                 <p>Discounted total: <strong id="discount-new-total"></strong></p>
@@ -1015,6 +1016,7 @@ function openApplyDiscountModal(membershipId, planId, planName, planPrice, planR
     document.getElementById('discount_plan_price_display').textContent = '$' + (planPrice + planRegFee).toFixed(2);
     document.getElementById('existing-discount-code').value = '';
     document.getElementById('existing-discount-message').innerHTML = '';
+    document.getElementById('existing-applied-codes').innerHTML = '';
     document.getElementById('discount-summary').classList.add('hidden');
     document.getElementById('discount-submit-btn').disabled = true;
 
@@ -1133,10 +1135,59 @@ document.addEventListener('DOMContentLoaded', function() {
     var codeInput    = document.getElementById('admin-discount-code');
     var applyBtn     = document.getElementById('admin-apply-discount');
     var msgDiv       = document.getElementById('admin-discount-message');
+    var hiddenInput  = document.getElementById('admin-discount-hidden');
+    var appliedList  = document.getElementById('admin-applied-codes');
 
     if (!planSelect || !amountInput || !codeInput || !applyBtn) return;
 
-    var appliedDiscount = null; // stores {total_discount, total, code} when discount is applied
+    var appliedCodes = [];
+
+    function renderCodeBadges(perCodeDetails) {
+        appliedList.innerHTML = '';
+        (perCodeDetails || []).forEach(function(d) {
+            var badge = document.createElement('span');
+            badge.className = 'inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-800 text-xs font-medium rounded-full';
+            badge.innerHTML = d.code + ' (-$' + (d.total_discount || 0).toFixed(2) + ') <button type="button" data-code="' + d.code + '" class="ml-1 text-green-600 hover:text-red-600 font-bold">&times;</button>';
+            badge.querySelector('button').addEventListener('click', function() { removeCode(this.dataset.code); });
+            appliedList.appendChild(badge);
+        });
+    }
+
+    function removeCode(code) {
+        appliedCodes = appliedCodes.filter(function(c) { return c.toUpperCase() !== code.toUpperCase(); });
+        hiddenInput.value = appliedCodes.join(',');
+        msgDiv.innerHTML = '';
+        if (appliedCodes.length === 0) {
+            appliedList.innerHTML = '';
+            var opt = planSelect.options[planSelect.selectedIndex];
+            if (opt && opt.value) {
+                var price = parseFloat(opt.getAttribute('data-price')) || 0;
+                var regfee = parseFloat(opt.getAttribute('data-regfee')) || 0;
+                amountInput.value = (price + regfee).toFixed(2);
+            }
+            return;
+        }
+        revalidateAll();
+    }
+
+    function revalidateAll() {
+        var opt = planSelect.options[planSelect.selectedIndex];
+        if (!opt || !opt.value || appliedCodes.length === 0) return;
+        var fd = new FormData();
+        fd.append('code', appliedCodes[appliedCodes.length - 1]);
+        fd.append('existing_codes', appliedCodes.slice(0, -1).join(','));
+        fd.append('plan_id', opt.value);
+        fd.append('base_amount', (parseFloat(opt.getAttribute('data-price')) || 0).toString());
+        fd.append('registration_fee', (parseFloat(opt.getAttribute('data-regfee')) || 0).toString());
+        fetch('ajax_validate_discount.php', { method: 'POST', body: fd })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.valid) {
+                    amountInput.value = data.total.toFixed(2);
+                    renderCodeBadges(data.per_code_details || []);
+                }
+            }).catch(function() {});
+    }
 
     // Auto-fill amount when plan changes
     planSelect.addEventListener('change', function() {
@@ -1148,10 +1199,11 @@ document.addEventListener('DOMContentLoaded', function() {
         } else {
             amountInput.value = '';
         }
-        // Clear any applied discount when plan changes
-        appliedDiscount = null;
+        appliedCodes = [];
+        hiddenInput.value = '';
         codeInput.value = '';
         msgDiv.innerHTML = '';
+        appliedList.innerHTML = '';
     });
 
     // Apply discount code via AJAX
@@ -1168,33 +1220,28 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        var planId   = opt.value;
-        var price    = parseFloat(opt.getAttribute('data-price')) || 0;
-        var regfee   = parseFloat(opt.getAttribute('data-regfee')) || 0;
-
         applyBtn.disabled = true;
         applyBtn.textContent = '...';
 
         var fd = new FormData();
         fd.append('code', code);
-        fd.append('plan_id', planId);
-        fd.append('base_amount', price.toString());
-        fd.append('registration_fee', regfee.toString());
-        fd.append('csrf_token', '<?= $_SESSION['csrf_token'] ?? '' ?>');
+        fd.append('existing_codes', appliedCodes.join(','));
+        fd.append('plan_id', opt.value);
+        fd.append('base_amount', (parseFloat(opt.getAttribute('data-price')) || 0).toString());
+        fd.append('registration_fee', (parseFloat(opt.getAttribute('data-regfee')) || 0).toString());
 
         fetch('ajax_validate_discount.php', { method: 'POST', body: fd })
             .then(function(resp) { return resp.json(); })
             .then(function(data) {
                 if (data.valid) {
-                    msgDiv.innerHTML = '<span class="text-green-600">' + data.message +
-                        ' &mdash; Saves $' + data.total_discount.toFixed(2) + '</span>';
+                    msgDiv.innerHTML = '<span class="text-green-600">' + data.message + '</span>';
+                    appliedCodes = (data.all_codes || code).split(',').filter(Boolean);
+                    hiddenInput.value = appliedCodes.join(',');
+                    codeInput.value = '';
                     amountInput.value = data.total.toFixed(2);
-                    appliedDiscount = { total_discount: data.total_discount, total: data.total, code: code };
+                    renderCodeBadges(data.per_code_details || []);
                 } else {
                     msgDiv.innerHTML = '<span class="text-red-600">' + data.error + '</span>';
-                    appliedDiscount = null;
-                    // Reset amount to full price
-                    amountInput.value = (price + regfee).toFixed(2);
                 }
             })
             .catch(function() {
@@ -1209,49 +1256,98 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // ── Apply Discount to Existing Membership ──
 (function() {
-    var applyBtn = document.getElementById('existing-apply-discount-btn');
+    var applyBtn    = document.getElementById('existing-apply-discount-btn');
     if (!applyBtn) return;
 
-    applyBtn.addEventListener('click', function() {
-        var codeInput = document.getElementById('existing-discount-code');
-        var msgDiv    = document.getElementById('existing-discount-message');
-        var code      = (codeInput.value || '').trim();
+    var codeInput   = document.getElementById('existing-discount-code');
+    var msgDiv      = document.getElementById('existing-discount-message');
+    var hiddenInput = document.getElementById('discount_code_hidden');
+    var appliedList = document.getElementById('existing-applied-codes');
+    var appliedCodes = [];
 
+    function renderCodeBadges(perCodeDetails) {
+        appliedList.innerHTML = '';
+        (perCodeDetails || []).forEach(function(d) {
+            var badge = document.createElement('span');
+            badge.className = 'inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-800 text-xs font-medium rounded-full';
+            badge.innerHTML = d.code + ' (-$' + (d.total_discount || 0).toFixed(2) + ') <button type="button" data-code="' + d.code + '" class="ml-1 text-green-600 hover:text-red-600 font-bold">&times;</button>';
+            badge.querySelector('button').addEventListener('click', function() { removeCode(this.dataset.code); });
+            appliedList.appendChild(badge);
+        });
+    }
+
+    function removeCode(code) {
+        appliedCodes = appliedCodes.filter(function(c) { return c.toUpperCase() !== code.toUpperCase(); });
+        hiddenInput.value = appliedCodes.join(',');
+        msgDiv.innerHTML = '';
+        if (appliedCodes.length === 0) {
+            appliedList.innerHTML = '';
+            document.getElementById('discount-summary').classList.add('hidden');
+            document.getElementById('discount-submit-btn').disabled = true;
+            return;
+        }
+        revalidateAll();
+    }
+
+    function revalidateAll() {
+        var modal  = document.getElementById('applyDiscountModal');
+        var planId = document.getElementById('discount_plan_id').value;
+        var price  = parseFloat(modal.dataset.planPrice) || 0;
+        var regfee = parseFloat(modal.dataset.planRegfee) || 0;
+        var fd = new FormData();
+        fd.append('code', appliedCodes[appliedCodes.length - 1]);
+        fd.append('existing_codes', appliedCodes.slice(0, -1).join(','));
+        fd.append('plan_id', planId);
+        fd.append('base_amount', price.toString());
+        fd.append('registration_fee', regfee.toString());
+        fetch('ajax_validate_discount.php', { method: 'POST', body: fd })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.valid) {
+                    document.getElementById('discount-summary').classList.remove('hidden');
+                    document.getElementById('discount-new-total').textContent = '$' + data.total.toFixed(2);
+                    document.getElementById('discount-submit-btn').disabled = false;
+                    renderCodeBadges(data.per_code_details || []);
+                }
+            }).catch(function() {});
+    }
+
+    applyBtn.addEventListener('click', function() {
+        var code = (codeInput.value || '').trim();
         if (!code) {
             msgDiv.innerHTML = '<span class="text-red-600">Please enter a discount code.</span>';
             return;
         }
 
-        var modal   = document.getElementById('applyDiscountModal');
-        var planId  = document.getElementById('discount_plan_id').value;
-        var price   = parseFloat(modal.dataset.planPrice) || 0;
-        var regfee  = parseFloat(modal.dataset.planRegfee) || 0;
+        var modal  = document.getElementById('applyDiscountModal');
+        var planId = document.getElementById('discount_plan_id').value;
+        var price  = parseFloat(modal.dataset.planPrice) || 0;
+        var regfee = parseFloat(modal.dataset.planRegfee) || 0;
 
         applyBtn.disabled = true;
         applyBtn.textContent = '...';
 
         var fd = new FormData();
         fd.append('code', code);
+        fd.append('existing_codes', appliedCodes.join(','));
         fd.append('plan_id', planId);
         fd.append('base_amount', price.toString());
         fd.append('registration_fee', regfee.toString());
-        fd.append('csrf_token', '<?= $_SESSION['csrf_token'] ?? '' ?>');
 
         fetch('ajax_validate_discount.php', { method: 'POST', body: fd })
             .then(function(resp) { return resp.json(); })
             .then(function(data) {
                 if (data.valid) {
-                    msgDiv.innerHTML = '<span class="text-green-600">' + data.message +
-                        ' &mdash; Saves $' + data.total_discount.toFixed(2) + '</span>';
+                    msgDiv.innerHTML = '<span class="text-green-600">' + data.message + '</span>';
+                    appliedCodes = (data.all_codes || code).split(',').filter(Boolean);
+                    hiddenInput.value = appliedCodes.join(',');
+                    codeInput.value = '';
                     document.getElementById('discount-summary').classList.remove('hidden');
                     document.getElementById('discount-new-total').textContent = '$' + data.total.toFixed(2);
-                    document.getElementById('discount_code_hidden').value = code;
                     document.getElementById('discount-submit-btn').disabled = false;
+                    renderCodeBadges(data.per_code_details || []);
                 } else {
                     msgDiv.innerHTML = '<span class="text-red-600">' + data.error + '</span>';
-                    document.getElementById('discount-summary').classList.add('hidden');
-                    document.getElementById('discount_code_hidden').value = '';
-                    document.getElementById('discount-submit-btn').disabled = true;
                 }
             })
             .catch(function() {

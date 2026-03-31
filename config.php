@@ -104,8 +104,8 @@ if (!defined('API_MODE')) {
 // ---------- School Switch Handler ----------
 // Migrations have been moved to migrate.php — run it once after deployment.
 if (!defined('API_MODE')) {
-    // School switch handler (super admin only)
-    if (isset($_GET['switch_school']) && function_exists('is_super_admin') && is_super_admin()) {
+    // School switch handler (super admin or multi-school admin)
+    if (isset($_GET['switch_school']) && function_exists('switch_school') && isset($_SESSION['user_type']) && $_SESSION['user_type'] === 'admin') {
         $switchTo = (int) $_GET['switch_school'];
         switch_school($switchTo === 0 ? null : $switchTo);
         $url = strtok($_SERVER['REQUEST_URI'], '?');

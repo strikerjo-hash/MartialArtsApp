@@ -264,6 +264,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $message = showAlert('Auto-renewal ' . ($new_value ? 'enabled' : 'disabled') . '!', 'success');
                 break;
 
+            case 'change_billing_day':
+                $newBillingDay = (int) ($_POST['new_billing_day'] ?? 0);
+                $membershipIdBD = (int) ($_POST['membership_id'] ?? 0);
+                if ($newBillingDay < 1 || $newBillingDay > 28) {
+                    $message = showAlert('Billing day must be between 1 and 28.', 'error');
+                    break;
+                }
+                $bdParams = [$newBillingDay, $membershipIdBD];
+                school_param($bdParams);
+                $pdo->prepare("UPDATE memberships SET billing_day = ? WHERE id = ?" . school_where())->execute($bdParams);
+                $message = showAlert('Billing day changed to day ' . $newBillingDay . ' of each month.', 'success');
+                break;
+
             case 'apply_discount_to_membership':
                 $membershipId = (int) $_POST['membership_id'];
                 $discountCode = trim($_POST['discount_code'] ?? '');
@@ -516,7 +529,11 @@ include 'includes/header.php';
                             <div class="text-sm text-gray-900"><?php echo $m['plan_name']; ?></div>
                             <div class="text-sm text-gray-500"><?php echo formatMoney($m['plan_price']); ?></div>
                             <?php if (isset($m['billing_day']) && $m['billing_day']): ?>
-                                <div class="text-xs text-blue-600">Monthly &middot; Day <?php echo $m['billing_day']; ?></div>
+                                <div class="text-xs text-blue-600">
+                                    Monthly &middot; Day <?php echo $m['billing_day']; ?>
+                                    <button type="button" onclick="openChangeBillingDay(<?= $m['id'] ?>, <?= $m['billing_day'] ?>)"
+                                            class="ml-1 text-blue-500 hover:text-blue-700 underline" title="Change billing day">edit</button>
+                                </div>
                             <?php endif; ?>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
@@ -1061,6 +1078,38 @@ function openApplyDiscountModal(membershipId, planId, planName, planPrice, planR
         </form>
     </div>
 </div>
+
+<!-- Change Billing Day Modal -->
+<div id="billingDayModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+    <div class="relative top-20 mx-auto p-5 border w-full max-w-sm shadow-lg rounded-md bg-white">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-bold text-gray-800">Change Billing Day</h3>
+            <button onclick="document.getElementById('billingDayModal').classList.add('hidden')" class="text-gray-600 hover:text-gray-800">&#10005;</button>
+        </div>
+        <form method="POST" class="space-y-4">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="change_billing_day">
+            <input type="hidden" name="membership_id" id="bd_membership_id">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">New Billing Day (1-28)</label>
+                <input type="number" name="new_billing_day" id="bd_new_day" min="1" max="28" required
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                <p class="text-xs text-gray-500 mt-1">The student will be charged on this day each month. Max is 28 to avoid issues with shorter months.</p>
+            </div>
+            <div class="flex justify-end space-x-3 pt-2">
+                <button type="button" onclick="document.getElementById('billingDayModal').classList.add('hidden')" class="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Cancel</button>
+                <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">Save</button>
+            </div>
+        </form>
+    </div>
+</div>
+<script>
+function openChangeBillingDay(membershipId, currentDay) {
+    document.getElementById('bd_membership_id').value = membershipId;
+    document.getElementById('bd_new_day').value = currentDay;
+    document.getElementById('billingDayModal').classList.remove('hidden');
+}
+</script>
 
 <!-- Cancel Membership Modal -->
 <div id="cancelModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">

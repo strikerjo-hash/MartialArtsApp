@@ -173,11 +173,11 @@ try {
     $classesSql = "SELECT c.* FROM classes c
          JOIN class_enrollments ce ON ce.class_id = c.id
          WHERE ce.student_id = :sid AND ce.status = 'active' AND c.status = 'active'";
-    if (!is_viewing_all_schools()) { $classesSql .= ' AND c.school_id = :school_id'; }
+    if (!is_viewing_all_schools()) { $classesSql .= ' AND c.school_id = :school_id AND ce.school_id = :ce_school_id'; }
     $classesSql .= " ORDER BY FIELD(c.day_of_week, 'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'), c.start_time";
     $classesStmt = $pdo->prepare($classesSql);
     $classesStmt->bindValue(':sid', $studentId, PDO::PARAM_INT);
-    if (!is_viewing_all_schools()) { $classesStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+    if (!is_viewing_all_schools()) { $classesStmt->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); $classesStmt->bindValue(':ce_school_id', current_school_id(), PDO::PARAM_INT); }
     $classesStmt->execute();
     $classes = $classesStmt->fetchAll();
 } catch (\PDOException $e) {}
@@ -440,6 +440,29 @@ include 'includes/student_header.php';
 <div class="container mx-auto px-4 py-8">
 
     <?php echo $portal_message; ?>
+
+    <?php
+    // Membership expiry warning banner (top of page)
+    if ($membership) {
+        $_expiryDaysLeft = (strtotime($membership['end_date']) - time()) / 86400;
+        if ($_expiryDaysLeft > 0 && $_expiryDaysLeft <= 30):
+    ?>
+        <div class="bg-orange-50 border-2 border-orange-300 rounded-lg p-4 mb-6">
+            <div class="flex items-center gap-3">
+                <span class="text-2xl flex-shrink-0">&#9888;&#65039;</span>
+                <div class="flex-1">
+                    <p class="font-semibold text-orange-800">Your membership expires in <?= floor($_expiryDaysLeft) ?> day<?= floor($_expiryDaysLeft) != 1 ? 's' : '' ?>!</p>
+                    <p class="text-sm text-orange-700">Renew or upgrade your plan to continue training without interruption.</p>
+                </div>
+                <a href="student_upgrade.php" class="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded-lg text-sm font-medium whitespace-nowrap">
+                    Renew Now
+                </a>
+            </div>
+        </div>
+    <?php
+        endif;
+    }
+    ?>
 
     <?php if (is_student_payment_locked()): ?>
         <div class="bg-red-50 border-2 border-red-400 rounded-lg p-6 mb-6">
@@ -762,6 +785,17 @@ include 'includes/student_header.php';
                     <div>
                         <span class="text-sm text-gray-500">Valid Until</span>
                         <p class="font-medium text-gray-800"><?= formatDate($membership['end_date']) ?></p>
+                        <?php
+                        $memDaysLeft = (strtotime($membership['end_date']) - time()) / 86400;
+                        if ($memDaysLeft > 0 && $memDaysLeft <= 30):
+                        ?>
+                            <div class="mt-2 px-3 py-2 bg-orange-50 border border-orange-200 rounded-lg">
+                                <p class="text-sm font-medium text-orange-700">
+                                    Your membership expires in <?= floor($memDaysLeft) ?> day<?= floor($memDaysLeft) != 1 ? 's' : '' ?>!
+                                </p>
+                                <p class="text-xs text-orange-600 mt-0.5">Contact us or <a href="student_upgrade.php" class="underline font-medium">upgrade/renew</a> to avoid interruption.</p>
+                            </div>
+                        <?php endif; ?>
                     </div>
                     <?php if ($memIsMonthly): ?>
                         <div>

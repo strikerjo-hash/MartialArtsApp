@@ -114,6 +114,73 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['change_password'])) {
     }
 }
 
+// ---------- Handle profile photo upload ----------
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_photo'])) {
+    verify_csrf();
+
+    if (!empty($_FILES['profile_photo']['name'])) {
+        $allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+        $maxSize = 2 * 1024 * 1024; // 2MB
+        $file = $_FILES['profile_photo'];
+
+        if ($file['error'] !== UPLOAD_ERR_OK) {
+            $errors[] = 'File upload failed. Please try again.';
+        } elseif ($file['size'] > $maxSize) {
+            $errors[] = 'Photo must be under 2MB.';
+        } else {
+            $finfo = new finfo(FILEINFO_MIME_TYPE);
+            $mime = $finfo->file($file['tmp_name']);
+            if (!in_array($mime, $allowedTypes)) {
+                $errors[] = 'Only JPG, PNG, GIF, and WebP images are allowed.';
+            } else {
+                $ext = pathinfo($file['name'], PATHINFO_EXTENSION);
+                $photoDir = __DIR__ . '/uploads/photos';
+                if (!is_dir($photoDir)) { mkdir($photoDir, 0750, true); }
+
+                // Delete old photo if exists
+                if (!empty($student['photo']) && file_exists(__DIR__ . '/' . $student['photo'])) {
+                    unlink(__DIR__ . '/' . $student['photo']);
+                }
+
+                $filename = 'student_' . $studentId . '_' . time() . '.' . strtolower($ext);
+                $path = $photoDir . '/' . $filename;
+                if (move_uploaded_file($file['tmp_name'], $path)) {
+                    $dbPath = 'uploads/photos/' . $filename;
+                    $updSql = 'UPDATE students SET photo = :photo WHERE id = :id';
+                    if (!is_viewing_all_schools()) { $updSql .= ' AND school_id = :school_id'; }
+                    $upd = $pdo->prepare($updSql);
+                    $upd->bindValue(':photo', $dbPath);
+                    $upd->bindValue(':id', $studentId, PDO::PARAM_INT);
+                    if (!is_viewing_all_schools()) { $upd->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+                    $upd->execute();
+                    $student['photo'] = $dbPath;
+                    $success = 'Profile photo updated!';
+                } else {
+                    $errors[] = 'Failed to save photo. Please try again.';
+                }
+            }
+        }
+    } else {
+        $errors[] = 'Please select a photo to upload.';
+    }
+}
+
+// ---------- Handle profile photo removal ----------
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['remove_photo'])) {
+    verify_csrf();
+    if (!empty($student['photo']) && file_exists(__DIR__ . '/' . $student['photo'])) {
+        unlink(__DIR__ . '/' . $student['photo']);
+    }
+    $updSql = 'UPDATE students SET photo = NULL WHERE id = :id';
+    if (!is_viewing_all_schools()) { $updSql .= ' AND school_id = :school_id'; }
+    $upd = $pdo->prepare($updSql);
+    $upd->bindValue(':id', $studentId, PDO::PARAM_INT);
+    if (!is_viewing_all_schools()) { $upd->bindValue(':school_id', current_school_id(), PDO::PARAM_INT); }
+    $upd->execute();
+    $student['photo'] = null;
+    $success = 'Profile photo removed.';
+}
+
 // ---------- Handle communication consent update ----------
 require_once __DIR__ . '/includes/messaging.php';
 $comm_consent_text    = get_comm_consent_text();
@@ -200,6 +267,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_comm_consent']
                 <?php endforeach; ?>
             </div>
         <?php endif; ?>
+
+        <!-- Profile Photo -->
+        <section class="card">
+            <h2>Profile Photo</h2>
+            <div style="display: flex; align-items: center; gap: 1.5rem; margin-bottom: 1rem;">
+                <?php if (!empty($student['photo'])): ?>
+                    <img src="<?= htmlspecialchars($student['photo']) ?>" alt="Profile"
+                         style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover; border: 3px solid var(--primary-color, #3b82f6);">
+                <?php else: ?>
+                    <div style="width: 80px; height: 80px; border-radius: 50%; background: var(--primary-color, #3b82f6); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 2rem; font-weight: bold;">
+                        <?= strtoupper(substr($student['first_name'], 0, 1) . substr($student['last_name'], 0, 1)) ?>
+                    </div>
+                <?php endif; ?>
+                <div>
+                    <form method="POST" action="student_profile.php" enctype="multipart/form-data" style="display: flex; gap: 0.5rem; align-items: center;">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="upload_photo" value="1">
+                        <input type="file" name="profile_photo" accept="image/jpeg,image/png,image/gif,image/webp"
+                               style="font-size: 0.85rem;">
+                        <button type="submit" class="btn btn-sm btn-primary">Upload</button>
+                    </form>
+                    <?php if (!empty($student['photo'])): ?>
+                        <form method="POST" action="student_profile.php" style="margin-top: 0.5rem;"
+                              onsubmit="return confirm('Remove your profile photo?')">
+                            <?= csrf_field() ?>
+                            <input type="hidden" name="remove_photo" value="1">
+                            <button type="submit" class="btn btn-sm btn-outline" style="color: #dc2626; border-color: #dc2626;">Remove Photo</button>
+                        </form>
+                    <?php endif; ?>
+                    <p style="font-size: 0.75rem; color: #6b7280; margin-top: 0.25rem;">JPG, PNG, GIF, or WebP. Max 2MB.</p>
+                </div>
+            </div>
+        </section>
 
         <!-- Personal Information -->
         <section class="card">

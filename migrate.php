@@ -957,6 +957,17 @@ try {
     $errors[] = '[ERROR] Adding school-scoped unique index to discount_codes: ' . $e->getMessage();
 }
 
+// Add profile_photo column to users table for admin/instructor profile pictures
+try {
+    $colCheck = $pdo->query("SHOW COLUMNS FROM users LIKE 'profile_photo'");
+    if ($colCheck->rowCount() === 0) {
+        $pdo->exec("ALTER TABLE users ADD COLUMN profile_photo VARCHAR(255) DEFAULT NULL AFTER email");
+        $results[] = '[OK] Added profile_photo column to users table';
+    }
+} catch (\PDOException $e) {
+    $errors[] = '[ERROR] Adding profile_photo to users: ' . $e->getMessage();
+}
+
 // Create pending_parent_links table for admin-approval of parent-child linking
 run_migration($pdo, 'Create pending_parent_links table', "
     CREATE TABLE IF NOT EXISTS pending_parent_links (

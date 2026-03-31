@@ -300,6 +300,9 @@ function login_student(array $student): void
     $_SESSION['must_change_password']    = !empty($student['must_change_password']) && (int)$student['must_change_password'] === 1;
     $_SESSION['registration_incomplete'] = !empty($student['registration_incomplete']) && (int)$student['registration_incomplete'] === 1;
 
+    // Track session start time for duration logging
+    $_SESSION['login_at'] = time();
+
     // Cache payment lockout status immediately on login
     refresh_payment_lockout_status();
 
@@ -563,6 +566,9 @@ function login_admin(array $admin): void
     $_SESSION['role']      = $admin['role'] ?? 'admin';
     $_SESSION['school_id'] = $admin['school_id'] ?? 1;
 
+    // Track session start time for duration logging
+    $_SESSION['login_at'] = time();
+
     // Super admins start switched into their home school
     if (($admin['role'] ?? 'admin') === 'super_admin') {
         $_SESSION['active_school_id'] = $admin['school_id'] ?? 1;
@@ -594,12 +600,26 @@ function logout(): void
 {
     auth_start_session();
 
-    // Audit log: capture user info BEFORE clearing session
+    // Audit log: capture user info and session duration BEFORE clearing session
     if (function_exists('audit_log')) {
         $userType = $_SESSION['user_type'] ?? 'unknown';
         $username = $_SESSION['username'] ?? ($_SESSION['first_name'] ?? 'unknown');
+        $loginAt  = $_SESSION['login_at'] ?? null;
+        $duration = $loginAt ? (time() - $loginAt) : null;
+
+        $desc = ucfirst($userType) . ' logout: ' . $username;
+        if ($duration !== null) {
+            $hours = floor($duration / 3600);
+            $mins  = floor(($duration % 3600) / 60);
+            $secs  = $duration % 60;
+            $desc .= ' | Session duration: ';
+            if ($hours > 0) $desc .= $hours . 'h ';
+            $desc .= $mins . 'm ' . $secs . 's';
+        }
+
         audit_log('logout', [
-            'description' => ucfirst($userType) . ' logout: ' . $username,
+            'description' => $desc,
+            'old_values'  => $duration !== null ? json_encode(['session_seconds' => $duration, 'login_at' => date('Y-m-d H:i:s', $loginAt)]) : null,
         ]);
     }
 

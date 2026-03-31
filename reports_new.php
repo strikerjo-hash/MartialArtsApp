@@ -89,7 +89,7 @@ $stmt = $pdo->prepare("SELECT COUNT(*) as c FROM memberships " . school_where_cl
 $stmt->execute($params);
 $stats['expiring_soon'] = $stmt->fetch()['c'];
 
-// Financial stats — filtered by date range
+// Financial stats ï¿½ filtered by date range
 try {
     $params = [$date_from, $date_to];
     school_param($params);
@@ -153,7 +153,7 @@ $stmt = $pdo->prepare("SELECT COUNT(*) as c FROM classes " . school_where_clause
 $stmt->execute($params);
 $stats['total_classes'] = $stmt->fetch()['c'];
 
-// Revenue by month — enhanced with count and refund totals (always last 12 months for trend chart)
+// Revenue by month ï¿½ enhanced with count and refund totals (always last 12 months for trend chart)
 try {
     $params = [];
     school_param($params);
@@ -292,7 +292,7 @@ $nm_stmt = $pdo->prepare("
     SELECT s.id, s.first_name, s.last_name, s.email,
            COUNT(ce.id) as enrolled_classes
     FROM students s
-    JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active'
+    JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active' AND ce.school_id = s.school_id
     LEFT JOIN memberships m ON m.student_id = s.id AND m.status = 'active' AND m.end_date >= CURDATE()
     WHERE s.status = 'active'
       AND m.id IS NULL" . school_where('s') . "
@@ -310,7 +310,7 @@ $ol_stmt = $pdo->prepare("
            mp.name as plan_name, mp.classes_per_week,
            COUNT(ce.id) as enrolled_classes
     FROM students s
-    JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active'
+    JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active' AND ce.school_id = s.school_id
     JOIN memberships m ON m.student_id = s.id AND m.status = 'active' AND m.end_date >= CURDATE()
     JOIN membership_plans mp ON m.plan_id = mp.id
     WHERE s.status = 'active'
@@ -590,7 +590,7 @@ try {
         SELECT c.name, c.day_of_week, c.start_time, c.max_students,
                COUNT(ce.id) as enrolled, ROUND(COUNT(ce.id) * 100.0 / NULLIF(c.max_students, 0), 1) as utilization_pct
         FROM classes c
-        LEFT JOIN class_enrollments ce ON c.id = ce.class_id AND ce.status = 'active'
+        LEFT JOIN class_enrollments ce ON c.id = ce.class_id AND ce.status = 'active' AND ce.school_id = c.school_id
         WHERE c.status = 'active'" . school_where('c') . " GROUP BY c.id ORDER BY utilization_pct DESC
     ");
     $stmt->execute($params);

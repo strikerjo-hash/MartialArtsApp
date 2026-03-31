@@ -770,9 +770,14 @@ include 'includes/header.php';
     <div class="bg-white rounded-lg shadow p-6 mb-6">
         <div class="flex items-center justify-between">
             <div class="flex items-center space-x-6">
-                <div class="w-24 h-24 bg-blue-600 rounded-full flex items-center justify-center text-white text-3xl font-bold">
-                    <?php echo strtoupper(substr($student['first_name'], 0, 1) . substr($student['last_name'], 0, 1)); ?>
-                </div>
+                <?php if (!empty($student['photo'])): ?>
+                    <img src="<?= htmlspecialchars($student['photo']) ?>" alt="Profile"
+                         class="w-24 h-24 rounded-full object-cover border-4 border-blue-600">
+                <?php else: ?>
+                    <div class="w-24 h-24 bg-blue-600 rounded-full flex items-center justify-center text-white text-3xl font-bold">
+                        <?php echo strtoupper(substr($student['first_name'], 0, 1) . substr($student['last_name'], 0, 1)); ?>
+                    </div>
+                <?php endif; ?>
                 <div>
                     <h1 class="text-3xl font-bold text-gray-800">
                         <?php echo $student['first_name'] . ' ' . $student['last_name']; ?>

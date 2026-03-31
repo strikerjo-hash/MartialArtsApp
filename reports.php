@@ -345,7 +345,7 @@ $stmt = $pdo->prepare("
     SELECT s.id, s.first_name, s.last_name, s.email,
            COUNT(ce.id) as enrolled_classes
     FROM students s
-    JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active'
+    JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active' AND ce.school_id = s.school_id
     LEFT JOIN memberships m ON m.student_id = s.id AND m.status = 'active' AND m.end_date >= CURDATE()
     WHERE s.status = 'active'
       AND m.id IS NULL" . school_where('s') . "
@@ -364,7 +364,7 @@ $olStmt = $pdo->prepare("
            mp.name as plan_name, mp.classes_per_week,
            COUNT(ce.id) as enrolled_classes
     FROM students s
-    JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active'
+    JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active' AND ce.school_id = s.school_id
     JOIN memberships m ON m.student_id = s.id AND m.status = 'active' AND m.end_date >= CURDATE()
     JOIN membership_plans mp ON m.plan_id = mp.id
     WHERE s.status = 'active'
@@ -665,7 +665,7 @@ try {
         SELECT c.name, c.day_of_week, c.start_time, c.max_students,
                COUNT(ce.id) as enrolled, ROUND(COUNT(ce.id) * 100.0 / NULLIF(c.max_students, 0), 1) as utilization_pct
         FROM classes c
-        LEFT JOIN class_enrollments ce ON c.id = ce.class_id AND ce.status = 'active'
+        LEFT JOIN class_enrollments ce ON c.id = ce.class_id AND ce.status = 'active' AND ce.school_id = c.school_id
         WHERE c.status = 'active'" . school_where('c') . " GROUP BY c.id ORDER BY utilization_pct DESC
     ");
     $ccStmt->execute($ccParams);
@@ -860,7 +860,7 @@ try {
                 WHERE c3.instructor_id = u.id AND a3.attendance_date BETWEEN ? AND ?) as attendance_rate
         FROM users u
         JOIN classes c ON c.instructor_id = u.id AND c.status = 'active'
-        LEFT JOIN class_enrollments ce ON ce.class_id = c.id AND ce.status = 'active'
+        LEFT JOIN class_enrollments ce ON ce.class_id = c.id AND ce.status = 'active' AND ce.school_id = c.school_id
         WHERE u.role = 'instructor'" . school_where('u') . "
         GROUP BY u.id ORDER BY student_count DESC
     ");
@@ -893,7 +893,7 @@ try {
                ROUND(SUM(IFNULL(enr.cnt, 0)) * 100.0 / NULLIF(SUM(c.max_students), 0), 1) as utilization_pct
         FROM users u
         JOIN classes c ON c.instructor_id = u.id AND c.status = 'active' AND c.max_students > 0
-        LEFT JOIN (SELECT class_id, COUNT(*) as cnt FROM class_enrollments WHERE status = 'active' GROUP BY class_id) enr ON enr.class_id = c.id
+        LEFT JOIN (SELECT class_id, COUNT(*) as cnt FROM class_enrollments WHERE status = 'active' AND school_id = " . intval(current_school_id()) . " GROUP BY class_id) enr ON enr.class_id = c.id
         WHERE u.role = 'instructor'" . school_where('u') . "
         GROUP BY u.id ORDER BY utilization_pct DESC
     ");

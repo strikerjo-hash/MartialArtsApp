@@ -69,7 +69,7 @@ try {
         SELECT s.id, s.first_name, s.last_name, s.email,
                COUNT(CASE WHEN a.status = 'absent' THEN 1 END) as absences
         FROM students s
-        JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active'
+        JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active' AND ce.school_id = s.school_id
         JOIN attendance a ON a.student_id = s.id
             AND a.attendance_date BETWEEN ? AND ?
         WHERE s.status = 'active'" . school_where('s') . "

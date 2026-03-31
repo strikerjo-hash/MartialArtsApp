@@ -66,9 +66,10 @@ if (strpos($context, 'unlinked:') === 0) {
     if ($classId > 0) {
         $sql .= " AND s.id NOT IN (
             SELECT ce.student_id FROM class_enrollments ce
-            WHERE ce.class_id = ? AND ce.status = 'active'
+            WHERE ce.class_id = ? AND ce.status = 'active'" . school_where('ce') . "
         )";
         $params[] = $classId;
+        school_param($params);
     }
 }
 

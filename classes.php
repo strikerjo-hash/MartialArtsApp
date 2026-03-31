@@ -302,7 +302,7 @@ $studentParams = [];
 $studentStmt = $pdo->prepare("
     SELECT s.id, s.first_name, s.last_name,
            m.status as mem_status, mp.classes_per_week,
-           (SELECT COUNT(*) FROM class_enrollments ce WHERE ce.student_id = s.id AND ce.status = 'active') as current_enrollments
+           (SELECT COUNT(*) FROM class_enrollments ce WHERE ce.student_id = s.id AND ce.status = 'active' AND ce.school_id = s.school_id) as current_enrollments
     FROM students s
     LEFT JOIN memberships m ON m.student_id = s.id AND m.status = 'active' AND m.end_date >= CURDATE()
     LEFT JOIN membership_plans mp ON m.plan_id = mp.id

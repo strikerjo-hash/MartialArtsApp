@@ -446,8 +446,21 @@ $siteName = getSiteName();
                             <?php echo date('l, F j, Y'); ?>
                         </span>
 
-                        <?php if (is_super_admin()): ?>
-                        <!-- School Switcher (Super Admin) -->
+                        <?php
+                        // Show school switcher for super admins (all schools) or regular admins assigned to multiple schools
+                        $_showSchoolSwitcher = false;
+                        $_adminAssignedSchools = [];
+                        if (is_super_admin()) {
+                            $_showSchoolSwitcher = true;
+                        } elseif (isset($_SESSION['user_id']) && in_array($_SESSION['role'] ?? '', ['admin', 'staff', 'instructor'])) {
+                            $_adminAssignedSchools = get_user_schools((int)$_SESSION['user_id']);
+                            if (count($_adminAssignedSchools) > 1) {
+                                $_showSchoolSwitcher = true;
+                            }
+                        }
+                        ?>
+                        <?php if ($_showSchoolSwitcher): ?>
+                        <!-- School Switcher -->
                         <div class="relative" id="schoolSwitcher">
                             <button onclick="document.getElementById('schoolDropdown').classList.toggle('hidden')"
                                     class="flex items-center px-3 py-1.5 bg-yellow-100 text-yellow-800 rounded-lg text-sm font-medium hover:bg-yellow-200 border border-yellow-300">
@@ -465,6 +478,7 @@ $siteName = getSiteName();
                                 </svg>
                             </button>
                             <div id="schoolDropdown" class="hidden absolute right-0 mt-2 w-64 bg-white rounded-lg shadow-lg border z-50">
+                                <?php if (is_super_admin()): ?>
                                 <a href="?switch_school=0" class="block px-4 py-2 text-sm hover:bg-gray-100 <?php echo is_viewing_all_schools() ? 'bg-blue-50 font-bold text-blue-700' : 'text-gray-700'; ?>">
                                     🌐 All Schools
                                 </a>
@@ -478,6 +492,22 @@ $siteName = getSiteName();
                                         <?php endif; ?>
                                     </a>
                                 <?php endforeach; ?>
+                                <?php else: ?>
+                                <?php
+                                // Regular admin: only show assigned schools
+                                $_allSchoolsData = get_all_schools();
+                                $_schoolsById = [];
+                                foreach ($_allSchoolsData as $_s) { $_schoolsById[(int)$_s['id']] = $_s; }
+                                foreach ($_adminAssignedSchools as $_schoolId):
+                                    $_school = $_schoolsById[$_schoolId] ?? null;
+                                    if (!$_school) continue;
+                                ?>
+                                    <a href="?switch_school=<?php echo $_school['id']; ?>"
+                                       class="block px-4 py-2 text-sm hover:bg-gray-100 <?php echo (current_school_id() === (int)$_school['id']) ? 'bg-blue-50 font-bold text-blue-700' : 'text-gray-700'; ?>">
+                                        🏫 <?php echo htmlspecialchars($_school['name']); ?>
+                                    </a>
+                                <?php endforeach; ?>
+                                <?php endif; ?>
                             </div>
                         </div>
                         <script>
@@ -511,9 +541,14 @@ $siteName = getSiteName();
 
                         <div class="relative" id="profileDropdownWrapper">
                             <button type="button" id="profileDropdownBtn" class="flex items-center space-x-2 hover:bg-gray-100 rounded-lg px-2 py-1 transition-colors">
-                                <div class="w-8 h-8 rounded-full flex items-center justify-center text-white font-bold user-avatar">
-                                    <?php echo htmlspecialchars(strtoupper(substr(getCurrentUser()['username'], 0, 1))); ?>
-                                </div>
+                                <?php $_avatarUser = getCurrentUser(); ?>
+                                <?php if (!empty($_avatarUser['profile_photo'])): ?>
+                                    <img src="<?= htmlspecialchars($_avatarUser['profile_photo']) ?>" alt="" class="w-8 h-8 rounded-full object-cover">
+                                <?php else: ?>
+                                    <div class="w-8 h-8 rounded-full flex items-center justify-center text-white font-bold user-avatar">
+                                        <?php echo htmlspecialchars(strtoupper(substr($_avatarUser['username'], 0, 1))); ?>
+                                    </div>
+                                <?php endif; ?>
                                 <span class="text-sm font-medium text-gray-700">
                                     <?php echo htmlspecialchars(getCurrentUser()['full_name']); ?>
                                 </span>

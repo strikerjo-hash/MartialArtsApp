@@ -83,18 +83,29 @@ function get_current_school(): array
 }
 
 /**
- * Switch the super admin's active school context.
- * Pass null or 0 to switch to "All Schools" mode.
+ * Switch the admin's active school context.
+ * Super admins can pass null/0 for "All Schools" mode.
+ * Regular admins can only switch to schools they are assigned to.
  */
 function switch_school(?int $schoolId): void
 {
-    if (!is_super_admin()) {
+    if (is_super_admin()) {
+        if ($schoolId === null || $schoolId === 0) {
+            unset($_SESSION['active_school_id']);
+        } else {
+            $_SESSION['active_school_id'] = $schoolId;
+        }
         return;
     }
-    if ($schoolId === null || $schoolId === 0) {
-        unset($_SESSION['active_school_id']);
-    } else {
-        $_SESSION['active_school_id'] = $schoolId;
+
+    // Regular admins: verify they have access to this school
+    $userId = (int) ($_SESSION['user_id'] ?? 0);
+    if ($userId && $schoolId) {
+        $assignedSchools = get_user_schools($userId);
+        if (in_array($schoolId, $assignedSchools, true)) {
+            $_SESSION['active_school_id'] = $schoolId;
+            $_SESSION['school_id'] = $schoolId;
+        }
     }
 }
 

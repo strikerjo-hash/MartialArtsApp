@@ -212,8 +212,8 @@ switch ($tab) {
             $data = $pdo->query("
                 SELECT c.name, c.day_of_week, c.max_students, COUNT(ce.id) as enrolled,
                        ROUND(COUNT(ce.id) * 100.0 / NULLIF(c.max_students, 0), 1) as pct
-                FROM classes c LEFT JOIN class_enrollments ce ON c.id = ce.class_id AND ce.status = 'active'
-                WHERE c.status = 'active' GROUP BY c.id ORDER BY pct DESC
+                FROM classes c LEFT JOIN class_enrollments ce ON c.id = ce.class_id AND ce.status = 'active' AND ce.school_id = c.school_id
+                WHERE c.status = 'active' AND c.school_id = " . intval(current_school_id()) . " GROUP BY c.id ORDER BY pct DESC
             ")->fetchAll();
             $rows = [];
             foreach ($data as $d) { $rows[] = [$d['name'], $d['day_of_week'], $d['enrolled'], $d['max_students'], ($d['pct'] ?? 0) . '%']; }
@@ -276,7 +276,7 @@ switch ($tab) {
             $params = [];
             $stmt = $pdo->prepare("
                 SELECT s.first_name, s.last_name, s.email, COUNT(ce.id) as enrolled
-                FROM students s JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active'
+                FROM students s JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active' AND ce.school_id = s.school_id
                 LEFT JOIN memberships m ON m.student_id = s.id AND m.status = 'active' AND m.end_date >= CURDATE()
                 WHERE s.status = 'active' AND m.id IS NULL" . school_where('s') . "
                 GROUP BY s.id ORDER BY enrolled DESC
@@ -292,10 +292,10 @@ switch ($tab) {
         try {
             $data = $pdo->query("
                 SELECT s.first_name, s.last_name, mp.name as plan, mp.classes_per_week as lim, COUNT(ce.id) as enrolled
-                FROM students s JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active'
+                FROM students s JOIN class_enrollments ce ON ce.student_id = s.id AND ce.status = 'active' AND ce.school_id = s.school_id
                 JOIN memberships m ON m.student_id = s.id AND m.status = 'active' AND m.end_date >= CURDATE()
                 JOIN membership_plans mp ON m.plan_id = mp.id
-                WHERE s.status = 'active' AND mp.classes_per_week < 99
+                WHERE s.status = 'active' AND s.school_id = " . intval(current_school_id()) . " AND mp.classes_per_week < 99
                 GROUP BY s.id, mp.name, mp.classes_per_week HAVING COUNT(ce.id) > mp.classes_per_week
                 ORDER BY (COUNT(ce.id) - mp.classes_per_week) DESC
             ")->fetchAll();
@@ -405,7 +405,7 @@ switch ($tab) {
                        ROUND(COUNT(CASE WHEN a.status = 'present' THEN 1 END) * 100.0 / NULLIF(COUNT(a.id), 0), 1) as attendance_rate
                 FROM users u
                 LEFT JOIN classes c ON c.instructor_id = u.id AND c.status = 'active'
-                LEFT JOIN class_enrollments ce ON ce.class_id = c.id AND ce.status = 'active'
+                LEFT JOIN class_enrollments ce ON ce.class_id = c.id AND ce.status = 'active' AND ce.school_id = c.school_id
                 LEFT JOIN attendance a ON a.class_id = c.id AND a.attendance_date BETWEEN ? AND ?
                 WHERE u.role = 'instructor'" . school_where('u') . "
                 GROUP BY u.id ORDER BY u.full_name
@@ -450,7 +450,7 @@ switch ($tab) {
                        ROUND(COUNT(ce.id) * 100.0 / NULLIF(SUM(c.max_students), 0), 1) as utilization
                 FROM users u
                 LEFT JOIN classes c ON c.instructor_id = u.id AND c.status = 'active'
-                LEFT JOIN class_enrollments ce ON ce.class_id = c.id AND ce.status = 'active'
+                LEFT JOIN class_enrollments ce ON ce.class_id = c.id AND ce.status = 'active' AND ce.school_id = c.school_id
                 WHERE u.role = 'instructor'" . school_where('u') . "
                 GROUP BY u.id ORDER BY u.full_name
             ");

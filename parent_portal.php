@@ -250,6 +250,15 @@ include 'includes/parent_header.php';
                                         <span class="mr-2">📅</span>
                                         <span>Valid until: <strong><?= formatDate($child['membership_end']) ?></strong></span>
                                     </div>
+                                    <?php
+                                    $_childDaysLeft = (strtotime($child['membership_end']) - time()) / 86400;
+                                    if ($_childDaysLeft > 0 && $_childDaysLeft <= 30):
+                                    ?>
+                                        <div class="flex items-center text-sm text-orange-600 font-medium">
+                                            <span class="mr-2">&#9888;&#65039;</span>
+                                            <span>Expires in <?= floor($_childDaysLeft) ?> day<?= floor($_childDaysLeft) != 1 ? 's' : '' ?>!</span>
+                                        </div>
+                                    <?php endif; ?>
                                 <?php endif; ?>
                                 <?php if (isset($childPendingPlans[(int)$child['id']])): ?>
                                     <?php $cpPending = $childPendingPlans[(int)$child['id']]; ?>

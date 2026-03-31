@@ -148,6 +148,7 @@ $status_filter = $_GET['status'] ?? '';
 $membership_filter = $_GET['membership'] ?? '';
 $payment_filter = $_GET['payment'] ?? '';
 $activity_filter = $_GET['activity'] ?? '';
+$enrollment_filter = $_GET['enrollment'] ?? '';
 $sort_col = $_GET['sort'] ?? '';
 $sort_dir = strtolower($_GET['order'] ?? '') === 'asc' ? 'ASC' : 'DESC';
 
@@ -229,6 +230,14 @@ if ($payment_filter === 'paid') {
 }
 if ($activity_filter) {
     $query .= " AND s.activity_status = :activity";
+}
+if ($enrollment_filter === 'enrolled') {
+    $query .= " AND EXISTS (SELECT 1 FROM class_enrollments ce2 WHERE ce2.student_id = s.id AND ce2.school_id = s.school_id AND ce2.status = 'active')";
+} elseif ($enrollment_filter === 'not_enrolled') {
+    $query .= " AND NOT EXISTS (SELECT 1 FROM class_enrollments ce2 WHERE ce2.student_id = s.id AND ce2.school_id = s.school_id AND ce2.status = 'active')";
+} elseif ($enrollment_filter === 'active_any') {
+    // Active: enrolled in classes OR has active membership (the dashboard definition)
+    $query .= " AND (EXISTS (SELECT 1 FROM class_enrollments ce2 WHERE ce2.student_id = s.id AND ce2.school_id = s.school_id AND ce2.status = 'active') OR EXISTS (SELECT 1 FROM memberships m2 WHERE m2.student_id = s.id AND m2.school_id = s.school_id AND m2.status = 'active'))";
 }
 
 // Sort — use whitelisted column or default to created_at DESC
@@ -337,6 +346,13 @@ include 'includes/header.php';
                 <option value="pending" <?php echo $payment_filter === 'pending' ? 'selected' : ''; ?>>Pending</option>
                 <option value="partial" <?php echo $payment_filter === 'partial' ? 'selected' : ''; ?>>Partial</option>
                 <option value="overdue" <?php echo $payment_filter === 'overdue' ? 'selected' : ''; ?>>Overdue</option>
+            </select>
+
+            <select name="enrollment" class="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                <option value="">All Enrollment</option>
+                <option value="active_any" <?= $enrollment_filter === 'active_any' ? 'selected' : '' ?>>Active (Enrolled or Membership)</option>
+                <option value="enrolled" <?= $enrollment_filter === 'enrolled' ? 'selected' : '' ?>>Enrolled in Classes</option>
+                <option value="not_enrolled" <?= $enrollment_filter === 'not_enrolled' ? 'selected' : '' ?>>Not Enrolled</option>
             </select>
 
             <select name="activity" class="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">

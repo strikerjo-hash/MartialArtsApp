@@ -12,12 +12,15 @@ requireLogin();
 
 // Dashboard statistics
 
-// Active Students — non-parents with active memberships only
+// Active Students — anyone enrolled in classes OR with active memberships (deduplicated, includes parents who train)
 $params = [];
 $stmt = $pdo->prepare("
     SELECT COUNT(DISTINCT s.id) FROM students s
-    INNER JOIN memberships m ON m.student_id = s.id AND m.school_id = s.school_id
-    WHERE s.status = 'active' AND s.is_parent = 0 AND m.status = 'active'" . school_where('s'));
+    WHERE s.status = 'active'
+    AND (
+        EXISTS (SELECT 1 FROM class_enrollments ce WHERE ce.student_id = s.id AND ce.school_id = s.school_id AND ce.status = 'active')
+        OR EXISTS (SELECT 1 FROM memberships m WHERE m.student_id = s.id AND m.school_id = s.school_id AND m.status = 'active')
+    )" . school_where('s'));
 school_param($params);
 $stmt->execute($params);
 $studentCount = (int)$stmt->fetchColumn();
@@ -155,7 +158,7 @@ include 'includes/header.php';
                 </div>
                 <div class="ml-3">
                     <p class="text-2xl font-bold text-gray-800"><?php echo $studentCount; ?></p>
-                    <p class="text-xs text-gray-600">Active Student Memberships</p>
+                    <p class="text-xs text-gray-600">Active Students</p>
                 </div>
             </div>
         </div>
